@@ -1,6 +1,6 @@
 # hybrid-fusion
 
-[![CI](https://github.com/Limen-Neural/hybrid-fusion/actions/workflows/ci.yml/badge.svg)](https://github.com/Limen-Neural/hybrid-fusion/actions/workflows/ci.yml)
+[![CI](https://github.com/rmems/hybrid-fusion/actions/workflows/ci.yml/badge.svg)](https://github.com/rmems/hybrid-fusion/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
 
 **Pure-Rust master orchestrator for a hybrid transformer <-> spiking neural
@@ -40,12 +40,13 @@ This crate **owns**:
 
 This crate **does not own**:
 
-- Tensor/transformer/MoE math -> see [`cortex-tensor`](https://github.com/Spikenaut/cortex-tensor).
-- GGUF parsing and weight layout -> see [`engram-parser`](https://github.com/Spikenaut/engram-parser).
-- Neuron dynamics and SNN integration internals -> see [`neuromod`](https://github.com/Spikenaut/neuromod).
+- Tensor/transformer/MoE math -> see [`cortex-tensor`](https://github.com/rmems/cortex-tensor).
+- GGUF parsing and weight layout -> see [`engram-parser`](https://github.com/rmems/engram-parser).
+- Neuron dynamics and SNN integration internals -> see [`neuromod`](https://github.com/Limen-Neural/neuromod)
+  (still under Limen-Neural until that crate returns to `rmems`).
 
-See [LIM-9](https://github.com/Limen-Neural/hybrid-fusion/issues/5) for the
-full boundary matrix.
+See [issue #5](https://github.com/rmems/hybrid-fusion/issues/5) for the full
+boundary matrix.
 
 ## Quick start
 
@@ -74,6 +75,7 @@ use hybrid_fusion::Result;
 ## Guides
 
 - **[Implementing a Backend](docs/implementing-backends.md)** — trait contracts, data flow, tensor shape conventions, and a minimal working example for `Transformer` + `SpikingNetwork`.
+- **[Extraction map](docs/extraction-map.md)** — what is extractable from corinth-canal / grok-ozempic into hybrid-fusion vs sibling crates (MoE, dual GGUF+Safetensors, non-extract list).
 
 ## Error monitoring (optional)
 

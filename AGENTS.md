@@ -1,14 +1,15 @@
 # AGENTS.md — hybrid-fusion
 
-**Version:** 0.2.0 (last updated 2026-07-09)
+**Version:** 0.2.1 (last updated 2026-08-11)
 
 Context file for AI coding agents working in this repository.
 
 ## Agent identity
 
-You are an AI coding agent working on **hybrid-fusion** for the Limen-Neural
-organization. Prefer small, test-backed changes that respect crate boundaries.
-Do not invent concrete backend dependencies in this crate.
+You are an AI coding agent working on **hybrid-fusion** under the **rmems**
+GitHub account (returned from Limen-Neural). Prefer small, test-backed changes
+that respect crate boundaries. Do not invent concrete backend dependencies in
+this crate.
 
 ## Tools available
 
@@ -86,7 +87,14 @@ cargo test --all-features
 cargo clippy -- -D warnings
 ```
 
+## Extraction map (v0.3 planning)
+
+Before porting new LLM/SNN/MoE traits, read
+[docs/extraction-map.md](docs/extraction-map.md). It maps research modules from
+corinth-canal and grok-ozempic to hybrid-fusion contracts vs sibling crates, and
+lists non-extract items (SAAQ, mmap parsers, CUDA, GOZ1).
+
 ## Org boundary matrix
 
-See [hybrid-fusion issue #5](https://github.com/Limen-Neural/hybrid-fusion/issues/5)
-(Limen-Neural boundary matrix) for cross-crate ownership and dependency rules.
+See [hybrid-fusion issue #5](https://github.com/rmems/hybrid-fusion/issues/5)
+for cross-crate ownership and dependency rules.
