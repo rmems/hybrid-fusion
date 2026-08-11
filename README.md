@@ -131,7 +131,7 @@ Always initialise through the **re-export** so events raised inside
 `hybrid-fusion` land on the same hub:
 
 ```rust
-// Requires: hybrid-fusion = { version = "0.2", features = ["sentry"] }
+// Requires: hybrid-fusion = { version = "0.3", features = ["sentry"] }
 let _guard = hybrid_fusion::sentry::init((
     // Empty string / missing env → client is disabled (no network).
     std::env::var("SENTRY_DSN").unwrap_or_default(),
