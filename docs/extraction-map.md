@@ -3,9 +3,9 @@
 This document maps **research reference** modules into **orchestration
 contracts** owned by `hybrid-fusion` versus concrete backends owned by sibling
 crates. It is the planning surface for epic
-[#20](https://github.com/rmems/hybrid-fusion/issues/20) (v0.3 architecture
-contracts). Implementation work lives in the linked sub-issues; this file is
-docs-only.
+[#20](https://github.com/rmems/hybrid-fusion/issues/20) and the **v0.3.0**
+architecture-contracts package series. Implementation work lives in the linked
+sub-issues; this file is docs-only.
 
 | Source repo | Local path | Role |
 |-------------|------------|------|
@@ -81,7 +81,7 @@ orchestration layer: GGUF (`GgufLoader`) **and** Safetensors
 |---------------|------------|----------------------------------|-------------|-------|-------|
 | `Router` host | corinth-canal `src/moe/mod.rs` | `ExpertRouter` trait (activity/embedding → expert selection) | **hybrid-fusion** | [#22](https://github.com/rmems/hybrid-fusion/issues/22) | Research: **stabilizing**; no GGUF load in trait |
 | Pure gate / top-k math | corinth-canal `src/moe/routing.rs` (`synthetic_gate_scores`, normalize, top-k patterns) | pure helpers (e.g. `src/routing.rs`) + mock router | **hybrid-fusion** | [#26](https://github.com/rmems/hybrid-fusion/issues/26) | Low-risk pure math; unit-test without checkpoints |
-| Checkpoint gate matmul | corinth-canal `routing.rs` `checkpoint_gate_scores` / `safetensors_gate_scores` | **do not extract** as hybrid-fusion I/O | `engram-parser` + research | — | Needs real weights / mmap |
+| Checkpoint gate matmul | corinth-canal `routing.rs` `checkpoint_gate_scores` / `safetensors_gate_scores` | **do not extract** into hybrid-fusion | **cortex-tensor** (gate matmul / tensor ops) + **engram-parser** (parse, mmap, layout discovery, weight slice) | — | Pure top-k/normalize stays hybrid-fusion (#26); real-weight scoring is backend + parser |
 | Family adapters | corinth-canal `src/moe/adapter.rs` | stay research / parser | research / `engram-parser` | — | Olmoe, Qwen3Moe, Gemma4, … tensor names |
 | MoE fields on output | corinth-canal `ModelOutput`-style fields | expand `HybridOutput` (`expert_weights`, `selected_experts`, optional `routing_entropy`) | **hybrid-fusion** | [#22](https://github.com/rmems/hybrid-fusion/issues/22) | Keep existing ANN→SNN fields working |
 | Reverse-path integration test | mock backends pattern in hybrid-fusion `backends` | activity → project → route tests | **hybrid-fusion** | [#23](https://github.com/rmems/hybrid-fusion/issues/23) | Depends on #22, #25, #26 |
@@ -94,7 +94,7 @@ inventory talk to layout types, not payload parsers.
 | Source module | Local path | Target hybrid-fusion type/trait | Owner crate | Issue | Notes |
 |---------------|------------|----------------------------------|-------------|-------|-------|
 | GGUF layout façade | hybrid-fusion `GgufLoader` / `GgufLayout`; corinth-canal `src/moe/gguf/` | keep/extend layout trait; no mmap here | **hybrid-fusion** (trait); **engram-parser** (parse/mmap/dequant) | existing | Concrete GGUF stays out of this crate |
-| Safetensors header inspect / manifest | corinth-canal `src/moe/safetensors.rs`, `moe/safetensors/discovery.rs` | `SafetensorsLoader` and/or unified `CheckpointLoader` + layout/manifest types (name, dtype, shape, shard refs, labels) | **hybrid-fusion** (contract); **engram-parser** (I/O) | [#27](https://github.com/rmems/hybrid-fusion/issues/27) | Header-only inspect in research; dual format for MoE onboarding |
+| Safetensors header inspect / manifest | corinth-canal `src/moe/safetensors.rs`, `moe/safetensors/discovery.rs` | **`SafetensorsLoader` + layout/manifest types** (name, dtype, shape, shard refs, labels) — primary public contract for [#27](https://github.com/rmems/hybrid-fusion/issues/27), symmetric to existing `GgufLoader` | **hybrid-fusion** (trait); **engram-parser** (parse/mmap I/O) | [#27](https://github.com/rmems/hybrid-fusion/issues/27) | Optional later: a thin `CheckpointLoader` wrapper over GGUF+ST for format-agnostic callers; **not** the #27 deliverable. Do not introduce a second competing ST symbol. |
 | MoE router/expert candidates | corinth-canal safetensors discovery | candidate / router-tensor **role** types for #22 / #24 / #26 | **hybrid-fusion** | [#27](https://github.com/rmems/hybrid-fusion/issues/27) | Name + shape heuristics only at trait layer |
 | GGUF checkpoint façade | corinth-canal `src/moe/checkpoint.rs`, `gguf/*` | not promoted into hybrid-fusion body | **engram-parser** | — | Research status: **reference** |
 
@@ -141,9 +141,9 @@ Do **not** copy these into `hybrid-fusion` as implementation work:
 
 | Crate | Responsibility relative to this map |
 |-------|-------------------------------------|
-| **hybrid-fusion** | Orchestration traits/types; pure projector + pure MoE math; dual checkpoint **contracts** |
-| **cortex-tensor** | Transformer / tensor math backends implementing `Transformer` |
-| **engram-parser** | Concrete GGUF + Safetensors loaders implementing layout traits |
+| **hybrid-fusion** | Orchestration traits/types; pure projector + pure MoE math (no checkpoint matmul); dual checkpoint **contracts** (`GgufLoader`, `SafetensorsLoader`) |
+| **cortex-tensor** | Transformer / tensor math backends implementing `Transformer`; real-weight gate matmul |
+| **engram-parser** | Concrete GGUF + Safetensors parse, mmap, layout discovery implementing loader traits |
 | **neuromod** | Neuron dynamics implementing `SpikingNetwork` |
 | **brainstem-daemon** | SNN runtime scheduling |
 | **limbic-critic** | Neuromodulator → critic signal mapping |
@@ -168,7 +168,7 @@ Do **not** copy these into `hybrid-fusion` as implementation work:
  └─ 7. #27  SafetensorsLoader / layout types
 ```
 
-#9 (optional Sentry) is **outside** this epic and is already implemented in-tree.
+Issue `#9` (optional Sentry) is **outside** this epic and is already implemented in-tree.
 
 ---
 

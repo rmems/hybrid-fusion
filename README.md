@@ -37,16 +37,24 @@ This crate **owns**:
 - Orchestration of hybrid ANN -> SNN forward-pass paths.
 - Transformer hidden-state pooling and resizing into bounded SNN stimuli.
 - The public `HybridNetwork<T, S>` API and error boundaries.
+- Pure MoE routing math (top-k, normalize, synthetic gate scores) — planned for
+  v0.3 / [#26](https://github.com/rmems/hybrid-fusion/issues/26); not tensor matmul
+  against checkpoint weights.
 
 This crate **does not own**:
 
-- Tensor/transformer/MoE math -> see [`cortex-tensor`](https://github.com/rmems/cortex-tensor).
-- GGUF parsing and weight layout -> see [`engram-parser`](https://github.com/rmems/engram-parser).
-- Neuron dynamics and SNN integration internals -> see [`neuromod`](https://github.com/Limen-Neural/neuromod)
+- Tensor / transformer math -> [`cortex-tensor`](https://github.com/rmems/cortex-tensor)
+  (including real-weight gate matmul once backends land).
+- GGUF / Safetensors parse, mmap, and layout discovery ->
+  [`engram-parser`](https://github.com/rmems/engram-parser).
+- Neuron dynamics and SNN integration internals ->
+  [`neuromod`](https://github.com/Limen-Neural/neuromod)
   (still under Limen-Neural until that crate returns to `rmems`).
+- SNN runtime / scheduling -> `brainstem-daemon`.
 
 See [issue #5](https://github.com/rmems/hybrid-fusion/issues/5) for the full
-boundary matrix.
+boundary matrix, and [docs/extraction-map.md](docs/extraction-map.md) for the
+v0.3 ownership plan.
 
 ## Quick start
 
