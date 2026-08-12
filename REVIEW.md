@@ -19,10 +19,13 @@ Copy-paste this into every PR review:
 ### Trait boundaries
 
 - [ ] No concrete `cortex-tensor`, `neuromod`, or backend-specific types in public API
-- [ ] `Transformer` and `SpikingNetwork` traits remain the only coupling points
+- [ ] Pluggable surface stays trait/type contracts: `Transformer`, `SpikingNetwork`,
+      `GgufLoader`, `ExpertRouter`, `SpikeActivity` (plus config/output types)
 - [ ] No new `use` statements pulling in concrete backend crates
 - [ ] Public types are generic over trait bounds, not pinned to implementations
-- [ ] Reference: LIM-9 boundary matrix for ownership rules
+- [ ] Reverse-path MoE: pure routing math / types here; mmap loaders and gate matmul
+      stay in `engram-parser` / `cortex-tensor` (see `docs/extraction-map.md`)
+- [ ] Reference: issue #5 boundary matrix for ownership rules
 
 ### Invariants
 
@@ -53,16 +56,21 @@ Copy-paste this into every PR review:
 
 ## What to look for in trait changes
 
-Changes to `Transformer`, `SpikingNetwork`, or `NeuroModulators` require extra scrutiny:
+Changes to `Transformer`, `SpikingNetwork`, `ExpertRouter`, `SpikeActivity`, or
+`NeuroModulators` require extra scrutiny:
 
 1. **Backward compatibility** — adding a method with a default impl is safe; removing or renaming one breaks every downstream implementor
 2. **Semantic contracts** — does the new method carry invariants (e.g., output bounds, shape requirements)? Document them in the trait-level doc comment
-3. **LIM-9 ownership** — verify the owning team is listed in the boundary matrix before merging trait changes
+3. **Boundary ownership** — verify the owning crate/team is listed in the
+   [issue #5](https://github.com/rmems/hybrid-fusion/issues/5) boundary matrix
+   (historically tracked as LIM-9) before merging trait changes
 4. **Downstream impact** — check if `neuromod`, `cortex-tensor`, or any SNN backend implements the trait and would break
 
 ## Boundary matrix
 
-The LIM-9 boundary matrix is the source of truth for which team owns which trait and which crate may depend on which. Consult it before merging any change that touches:
+The [issue #5](https://github.com/rmems/hybrid-fusion/issues/5) boundary matrix
+(historically “LIM-9”) is the source of truth for which team owns which trait
+and which crate may depend on which. Consult it before merging any change that touches:
 
 - Trait definitions in `src/traits.rs`
 - Public re-exports in `src/lib.rs`

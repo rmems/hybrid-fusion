@@ -60,13 +60,14 @@ All normal backend interaction flows through the trait contracts in `src/traits.
 
 ## Trait contracts
 
-Three core traits define the pluggable backend surface:
+Core traits / types on the pluggable surface:
 
 - **`Transformer`** — produces hidden-state tensors from token IDs. Implementations live in downstream crates (e.g. `cortex-tensor`).
 - **`SpikingNetwork`** — steps the SNN forward given stimuli + neuromodulator state, returns fired neuron indices. Implementations live in `neuromod` / `brainstem-daemon`.
 - **`GgufLoader`** — loads GGUF model layouts from disk. Implementations live in `engram-parser`.
+- **`ExpertRouter`** + **`SpikeActivity`** — reverse-path MoE routing contract (embedding → expert weights / selection). Concrete routers may use pure math (#26) or checkpoint backends outside this crate.
 
-`HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits; `GgufLoader` is consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above.
+`HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits; `GgufLoader` / `ExpertRouter` are consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above.
 
 ## Sibling crates
 
