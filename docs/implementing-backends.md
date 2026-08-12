@@ -658,4 +658,31 @@ gate distribution and selects `0..top_k`.
 family adapters, real gate matmul (see extraction map / sibling crates).
 
 `HybridNetwork::forward` leaves `HybridOutput` MoE fields as `None` until a
-reverse-path orchestrator lands (follow-ups #25 / #26 / #23).
+reverse-path orchestrator lands (follow-ups #26 / #23).
+
+### `ProjectionMode` + pure project
+
+```rust
+use hybrid_fusion::{
+    project_spike_activity, ProjectionMode, SpikeActivity, ExpertRouter,
+};
+
+let activity = SpikeActivity::from_fired(&[0, 2], 8)?;
+// Dense embedding for MoE ExpertRouter — not SAAQ / latent calibration.
+let embedding = project_spike_activity(
+    ProjectionMode::RateSum,
+    &activity,
+    /* n_neurons */ 8,
+    /* embed_dim */ 16,
+)?;
+// router.route(&embedding)?;
+```
+
+| Mode | Pure path |
+|------|-----------|
+| `RateSum` | rates + temporal bins + membrane + iz |
+| `TemporalHistogram` | histogram-weighted blend |
+| `MembraneSnapshot` | membrane-weighted blend |
+| `SpikingTernary` | same features as RateSum here; GIF dynamics → `neuromod` |
+
+No learned W/b matrix. Embedding is resize + `tanh` only.

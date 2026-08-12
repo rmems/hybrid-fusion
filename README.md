@@ -77,6 +77,7 @@ use hybrid_fusion::Result;
 | `SpikingNetwork` trait | Backend-agnostic SNN interface. |
 | `ExpertRouter` trait | MoE routing: embedding → expert weights / selection. |
 | `SpikeActivity` | Pure spike/membrane bag for reverse-path projection. |
+| `ProjectionMode` + `project_spike_activity` | SNN activity → dense embedding for MoE (pure modes). |
 | `NeuroModulators` | Neuromodulator struct passed to SNN steps. |
 | `HybridConfig` / `TransformerConfig` | Predefined configs (`tiny`, `olmo_1b`). |
 | `projector::embed_to_stimuli_with_width` | Pool -> resize -> tanh adapter. |
