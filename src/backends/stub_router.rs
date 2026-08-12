@@ -91,7 +91,8 @@ mod tests {
         assert_eq!(out.expert_weights.len(), 4);
         assert!((out.expert_weights.iter().sum::<f32>() - 1.0).abs() < 1e-5);
         assert_eq!(out.selected_experts, vec![0, 1]);
-        assert!(out.routing_entropy.is_some());
+        let entropy = out.routing_entropy.expect("stub route reports entropy");
+        assert!((entropy - 1.0).abs() < 1e-5);
     }
 
     #[test]

@@ -16,25 +16,37 @@ use crate::error::{HybridError, Result};
 /// Soft upper bound for synthetic / stub expert counts (keeps f32 math sane).
 pub const MAX_REASONABLE_EXPERTS: usize = 1_000_000;
 
-/// Synthetic gate scores from an embedding and expert count (corinth-canal).
+/// Synthetic gate scores from an embedding and expert count.
 ///
-/// Partitions the embedding into chunks (with wrap) and sums each chunk as the
-/// score for one expert. Empty embedding or zero experts yields an empty vec.
+/// Partitions the embedding across experts so **every** element is used:
+/// base chunk size `width / num_experts`, with the first `width % num_experts`
+/// experts getting one extra element. When `num_experts > width`, the first
+/// `width` experts each get one element and the rest score `0.0`.
+///
+/// Empty embedding → zeros for each expert. Zero experts → empty vec.
 pub fn synthetic_gate_scores(num_experts: usize, embedding: &[f32]) -> Vec<f32> {
     if num_experts == 0 {
         return Vec::new();
     }
-    let width = embedding.len().max(1);
-    let chunk = (width / num_experts).max(1);
-    let mut gate_scores = Vec::with_capacity(num_experts);
     if embedding.is_empty() {
         return vec![0.0; num_experts];
     }
+    let width = embedding.len();
+    let base = width / num_experts;
+    let rem = width % num_experts;
+    let mut gate_scores = Vec::with_capacity(num_experts);
+    let mut start = 0;
     for expert_id in 0..num_experts {
-        let start = (expert_id * chunk) % width;
-        let end = (start + chunk).min(width);
-        gate_scores.push(embedding[start..end].iter().sum());
+        let len = base + usize::from(expert_id < rem);
+        if len == 0 {
+            gate_scores.push(0.0);
+        } else {
+            let end = start + len;
+            gate_scores.push(embedding[start..end].iter().sum());
+            start = end;
+        }
     }
+    debug_assert_eq!(start, width);
     gate_scores
 }
 
@@ -62,7 +74,7 @@ pub fn softmax(scores: &[f32]) -> Vec<f32> {
     exp_scores.into_iter().map(|v| v / sum_exp).collect()
 }
 
-/// Indices of the `top_k` largest weights (stable on ties via index order after sort).
+/// Indices of the `top_k` largest weights (descending). NaN weights sort last.
 ///
 /// Returns at most `weights.len()` indices. `top_k == 0` yields empty.
 pub fn top_k_indices(weights: &[f32], top_k: usize) -> Vec<usize> {
@@ -70,7 +82,12 @@ pub fn top_k_indices(weights: &[f32], top_k: usize) -> Vec<usize> {
         return Vec::new();
     }
     let mut indexed: Vec<(usize, f32)> = weights.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    indexed.sort_by(|a, b| match (a.1.is_nan(), b.1.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater, // NaN after finite
+        (false, true) => Ordering::Less,
+        (false, false) => b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal),
+    });
     indexed
         .into_iter()
         .take(top_k.min(weights.len()))
@@ -80,20 +97,23 @@ pub fn top_k_indices(weights: &[f32], top_k: usize) -> Vec<usize> {
 
 /// Shannon entropy of a discrete distribution, normalized by `ln(n)` into `[0, 1]`.
 ///
-/// From corinth-canal `latent::normalized_entropy`. Empty or single-weight → `0.0`.
+/// Accumulates in `f64` for large expert counts. Empty or single-weight → `0.0`.
 pub fn routing_entropy(weights: &[f32]) -> f32 {
     if weights.len() <= 1 {
         return 0.0;
     }
-    let entropy = weights
+    let entropy: f64 = weights
         .iter()
         .copied()
         .filter(|w| w.is_finite() && *w > 0.0)
-        .map(|w| -w * w.ln())
-        .sum::<f32>();
-    let max_entropy = (weights.len() as f32).ln();
+        .map(|w| {
+            let w = f64::from(w);
+            -w * w.ln()
+        })
+        .sum();
+    let max_entropy = (weights.len() as f64).ln();
     if max_entropy > 0.0 {
-        (entropy / max_entropy).clamp(0.0, 1.0)
+        (entropy / max_entropy).clamp(0.0, 1.0) as f32
     } else {
         0.0
     }
@@ -105,6 +125,7 @@ pub fn routing_entropy(weights: &[f32]) -> f32 {
 ///
 /// - Empty embedding
 /// - `num_experts == 0` or `top_k == 0`
+/// - `num_experts > MAX_REASONABLE_EXPERTS`
 pub fn route_synthetic(
     embedding: &[f32],
     num_experts: usize,
@@ -119,6 +140,11 @@ pub fn route_synthetic(
         return Err(HybridError::InvalidConfig(
             "route_synthetic: num_experts must be >= 1".into(),
         ));
+    }
+    if num_experts > MAX_REASONABLE_EXPERTS {
+        return Err(HybridError::InvalidConfig(format!(
+            "route_synthetic: num_experts ({num_experts}) exceeds max {MAX_REASONABLE_EXPERTS}"
+        )));
     }
     if top_k == 0 {
         return Err(HybridError::InvalidConfig(
@@ -159,6 +185,30 @@ mod tests {
     }
 
     #[test]
+    fn top_k_nan_sorts_last() {
+        let idx = top_k_indices(&[0.1, f32::NAN, 0.9], 2);
+        assert_eq!(idx, vec![2, 0]);
+        assert!(!idx.contains(&1));
+    }
+
+    #[test]
+    fn synthetic_scores_uses_full_embedding() {
+        // len 5, 2 experts → chunks [0..3] and [3..5] (remainder to first)
+        let emb = [1.0, 1.0, 1.0, 10.0, 10.0];
+        let s = synthetic_gate_scores(2, &emb);
+        assert_eq!(s.len(), 2);
+        assert!((s[0] - 3.0).abs() < 1e-5);
+        assert!((s[1] - 20.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn synthetic_scores_more_experts_than_dims() {
+        let emb = [1.0, 2.0];
+        let s = synthetic_gate_scores(4, &emb);
+        assert_eq!(s, vec![1.0, 2.0, 0.0, 0.0]);
+    }
+
+    #[test]
     fn synthetic_scores_deterministic() {
         let emb = [1.0, 2.0, 3.0, 4.0];
         let a = synthetic_gate_scores(2, &emb);
@@ -184,8 +234,9 @@ mod tests {
     }
 
     #[test]
-    fn route_synthetic_rejects_empty() {
+    fn route_synthetic_rejects_empty_and_huge() {
         assert!(route_synthetic(&[], 2, 1).is_err());
         assert!(route_synthetic(&[1.0], 0, 1).is_err());
+        assert!(route_synthetic(&[1.0], MAX_REASONABLE_EXPERTS + 1, 1).is_err());
     }
 }

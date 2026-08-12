@@ -37,8 +37,8 @@ This crate **owns**:
 - Orchestration of hybrid ANN -> SNN forward-pass paths.
 - Transformer hidden-state pooling and resizing into bounded SNN stimuli.
 - The public `HybridNetwork<T, S>` API and error boundaries.
-- Pure MoE routing math (top-k, normalize, synthetic gate scores) — planned for
-  v0.3 / [#26](https://github.com/rmems/hybrid-fusion/issues/26); not tensor matmul
+- Pure MoE routing math (top-k, normalize, synthetic gate scores) in `routing`
+  ([#26](https://github.com/rmems/hybrid-fusion/issues/26)); not tensor matmul
   against checkpoint weights.
 
 This crate **does not own**:
@@ -78,7 +78,8 @@ use hybrid_fusion::Result;
 | `ExpertRouter` trait | MoE routing: embedding → expert weights / selection. |
 | `SpikeActivity` | Pure spike/membrane bag for reverse-path projection. |
 | `ProjectionMode` + `project_spike_activity` | SNN activity → dense embedding for MoE (pure modes). |
-| `routing` helpers + `SyntheticExpertRouter` | Pure MoE math (gates, softmax, top-k, entropy). |
+| `routing` helpers | Always-on pure MoE math (gates, softmax, top-k, entropy). |
+| `SyntheticExpertRouter` / `StubExpertRouter` | File-free `ExpertRouter` impls (**requires `backends` feature**). |
 | `NeuroModulators` | Neuromodulator struct passed to SNN steps. |
 | `HybridConfig` / `TransformerConfig` | Predefined configs (`tiny`, `olmo_1b`). |
 | `projector::embed_to_stimuli_with_width` | Pool -> resize -> tanh adapter. |
