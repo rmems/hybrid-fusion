@@ -109,11 +109,25 @@ pub fn spike_activity_features(
             "spike_activity_features: n_neurons must be > 0".into(),
         ));
     }
-    if activity.potentials.len() < n_neurons {
+    if activity.potentials.len() != n_neurons {
         return Err(HybridError::InputLengthMismatch {
             expected: n_neurons,
             got: activity.potentials.len(),
         });
+    }
+    for (i, &v) in activity.potentials.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(HybridError::InvalidConfig(format!(
+                "spike_activity_features: non-finite potential at index {i}"
+            )));
+        }
+    }
+    for (i, &v) in activity.iz_potentials.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(HybridError::InvalidConfig(format!(
+                "spike_activity_features: non-finite iz_potential at index {i}"
+            )));
+        }
     }
     for (t, step) in activity.spike_train.iter().enumerate() {
         if let Some(&idx) = step.iter().find(|&&i| i >= n_neurons) {
@@ -139,19 +153,27 @@ pub fn spike_activity_features(
     let mut hist = vec![0.0_f32; n_neurons * bins];
     if !activity.spike_train.is_empty() {
         let steps = activity.spike_train.len();
+        let mut bin_steps = vec![0_usize; bins];
         for (t, step) in activity.spike_train.iter().enumerate() {
             let bin = ((t * bins) / steps).min(bins - 1);
+            bin_steps[bin] += 1;
             for &idx in step {
                 hist[idx * bins + bin] += 1.0;
             }
         }
-        let total = (n_steps / bins as f32).max(1.0);
-        for h in &mut hist {
-            *h /= total;
+        // Normalize each bin by its actual timestep width (uneven when steps % bins != 0).
+        for neuron in 0..n_neurons {
+            for bin in 0..bins {
+                let width = bin_steps[bin];
+                if width > 0 {
+                    hist[neuron * bins + bin] /= width as f32;
+                }
+            }
         }
     }
 
-    let membrane: Vec<f32> = activity.potentials[..n_neurons]
+    let membrane: Vec<f32> = activity
+        .potentials
         .iter()
         .map(|&v| v.clamp(0.0, 1.0))
         .collect();
@@ -331,6 +353,58 @@ mod tests {
                 got: 1,
             }) => {}
             other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_rejects_long_potentials() {
+        let act = SpikeActivity {
+            spike_train: vec![vec![]],
+            potentials: vec![0.0; 5],
+            iz_potentials: vec![],
+        };
+        match project_spike_activity(ProjectionMode::RateSum, &act, 4, 4) {
+            Err(HybridError::InputLengthMismatch {
+                expected: 4,
+                got: 5,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_rejects_non_finite_potentials() {
+        let act = SpikeActivity {
+            spike_train: vec![vec![]],
+            potentials: vec![0.0, f32::NAN],
+            iz_potentials: vec![],
+        };
+        match project_spike_activity(ProjectionMode::RateSum, &act, 2, 4) {
+            Err(HybridError::InvalidConfig(msg)) => assert!(msg.contains("non-finite")),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn histogram_five_steps_per_bin_normalized() {
+        // 5 steps → bin widths [2,1,1,1]; each bin gets one fire of neuron 0.
+        // After per-bin normalize, each non-empty bin should be 1.0 for that neuron.
+        let act = SpikeActivity {
+            spike_train: vec![vec![0], vec![0], vec![0], vec![0], vec![0]],
+            potentials: vec![0.0; 2],
+            iz_potentials: vec![],
+        };
+        let feats = spike_activity_features(ProjectionMode::RateSum, &act, 2).unwrap();
+        // layout: rates[2] + hist[2*4] + membrane[2] + iz[5]
+        let hist_off = 2;
+        // bins with fires: all 5 steps fire neuron 0 in bins 0,0,1,2,3 → bin0 has 2 steps, others 1
+        // counts in bin0 for neuron0 = 2 → /2 = 1.0; other bins 1 → /1 = 1.0
+        for bin in 0..4 {
+            let v = feats[hist_off + bin];
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "bin {bin} expected ~1.0 after per-width norm, got {v}"
+            );
         }
     }
 }
