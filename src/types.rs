@@ -2,6 +2,27 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Strategy to convert [`SpikeActivity`](crate::SpikeActivity) into a dense embedding
+/// for reverse-path **MoE** [`ExpertRouter`](crate::ExpertRouter) (not SAAQ).
+///
+/// Pure feature construction (no learned W/b). [`SpikingTernary`](Self::SpikingTernary)
+/// is a trait-level hook: pure path matches [`RateSum`](Self::RateSum); GIF membrane
+/// dynamics stay in `neuromod` / research.
+///
+/// Source shape: corinth-canal `ProjectionMode` (`src/types.rs` / `src/projector.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ProjectionMode {
+    /// Per-neuron spike-count / firing-rate features only (`len == n_neurons`).
+    #[default]
+    RateSum,
+    /// Time-binned spike histogram features only (`len == n_neurons * 4`).
+    TemporalHistogram,
+    /// Clamped membrane-potential features only (`len == n_neurons`).
+    MembraneSnapshot,
+    /// Pure-path alias of [`RateSum`]; full ternary/GIF impl is out of crate.
+    SpikingTernary,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransformerConfig {
     pub vocab_size: usize,

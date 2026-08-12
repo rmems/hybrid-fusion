@@ -12,12 +12,13 @@ pub mod types;
 
 pub use error::{HybridError, Result};
 pub use hybrid::HybridNetwork;
+pub use projector::{project_spike_activity, spike_activity_features};
 pub use tensor::Tensor;
 pub use traits::{
     ExpertRouteOutput, ExpertRouter, GgufLayout, GgufLoader, NeuroModulators, SpikeActivity,
     SpikingNetwork, Transformer,
 };
-pub use types::{HybridConfig, HybridOutput, TransformerConfig};
+pub use types::{HybridConfig, HybridOutput, ProjectionMode, TransformerConfig};
 
 /// Re-export of the `sentry` crate when the `sentry` feature is enabled.
 ///
