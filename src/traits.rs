@@ -65,7 +65,10 @@ pub struct SpikeActivity {
 }
 
 impl SpikeActivity {
-    /// Build a one-step activity bag from fired indices (zeros membranes).
+    /// Build a one-step activity bag from fired indices (zeroed membranes).
+    ///
+    /// `n_neurons` sizes `potentials` only; fired indices are **not** checked
+    /// against it (callers / projectors own that invariant).
     pub fn from_fired(fired: &[usize], n_neurons: usize) -> Self {
         Self {
             spike_train: vec![fired.to_vec()],

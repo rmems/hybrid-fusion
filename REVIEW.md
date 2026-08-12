@@ -19,10 +19,13 @@ Copy-paste this into every PR review:
 ### Trait boundaries
 
 - [ ] No concrete `cortex-tensor`, `neuromod`, or backend-specific types in public API
-- [ ] `Transformer` and `SpikingNetwork` traits remain the only coupling points
+- [ ] Pluggable surface stays trait/type contracts: `Transformer`, `SpikingNetwork`,
+      `GgufLoader`, `ExpertRouter`, `SpikeActivity` (plus config/output types)
 - [ ] No new `use` statements pulling in concrete backend crates
 - [ ] Public types are generic over trait bounds, not pinned to implementations
-- [ ] Reference: LIM-9 boundary matrix for ownership rules
+- [ ] Reverse-path MoE: pure routing math / types here; mmap loaders and gate matmul
+      stay in `engram-parser` / `cortex-tensor` (see `docs/extraction-map.md`)
+- [ ] Reference: issue #5 boundary matrix for ownership rules
 
 ### Invariants
 
@@ -53,7 +56,8 @@ Copy-paste this into every PR review:
 
 ## What to look for in trait changes
 
-Changes to `Transformer`, `SpikingNetwork`, or `NeuroModulators` require extra scrutiny:
+Changes to `Transformer`, `SpikingNetwork`, `ExpertRouter`, `SpikeActivity`, or
+`NeuroModulators` require extra scrutiny:
 
 1. **Backward compatibility** — adding a method with a default impl is safe; removing or renaming one breaks every downstream implementor
 2. **Semantic contracts** — does the new method carry invariants (e.g., output bounds, shape requirements)? Document them in the trait-level doc comment

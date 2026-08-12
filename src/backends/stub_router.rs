@@ -55,7 +55,8 @@ impl ExpertRouter for StubExpertRouter {
         let w = 1.0 / self.num_experts as f32;
         let expert_weights = vec![w; self.num_experts];
         let selected_experts: Vec<usize> = (0..self.top_k).collect();
-        // Uniform discrete distribution: H = log(n) nats, normalized later by callers if needed.
+        // Shannon entropy in nats for a uniform discrete distribution: H = ln(n).
+        // Callers that want H / ln(n) ∈ [0, 1] can normalize themselves (#26 / telemetry).
         let routing_entropy = Some((self.num_experts as f32).ln());
         Ok(ExpertRouteOutput {
             expert_weights,
@@ -96,5 +97,11 @@ mod tests {
     fn stub_clamps_top_k() {
         let router = StubExpertRouter::new(3, 10).unwrap();
         assert_eq!(router.top_k(), 3);
+    }
+
+    #[test]
+    fn stub_rejects_zero_experts() {
+        assert!(StubExpertRouter::new(0, 1).is_err());
+        assert!(StubExpertRouter::new(2, 0).is_err());
     }
 }

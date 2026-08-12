@@ -15,6 +15,7 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Changed
 
+- **`HybridOutput` gains** optional `expert_weights`, `selected_experts`, `routing_entropy` (struct-literal / exhaustive matches must be updated). ANN→SNN `forward` sets them to `None` (#22).
 - Bump crate version `0.2.0` → `0.3.0` for the architecture-contracts milestone.
 - Post-transfer hygiene: package `repository`, README CI badge, and docs now point at `rmems/hybrid-fusion` (#28).
 - README sibling-crate links and ownership split clarified (pure MoE math in hybrid-fusion; tensor math in cortex-tensor; parse/mmap in engram-parser; dynamics in neuromod; runtime in brainstem-daemon).
