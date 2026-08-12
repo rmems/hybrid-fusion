@@ -178,10 +178,36 @@ fn test_forward_output_shapes() {
 #[test]
 fn test_spike_activity_from_fired() {
     use hybrid_fusion::SpikeActivity;
-    let act = SpikeActivity::from_fired(&[1, 3], 8);
+    let act = SpikeActivity::from_fired(&[1, 3], 8).expect("valid from_fired");
     assert_eq!(act.spike_train, vec![vec![1, 3]]);
     assert_eq!(act.potentials.len(), 8);
     assert!(act.iz_potentials.is_empty());
+}
+
+#[test]
+fn test_spike_activity_from_fired_edges() {
+    use hybrid_fusion::{HybridError, SpikeActivity};
+
+    // empty fired + valid neuron count
+    let silent = SpikeActivity::from_fired(&[], 8).unwrap();
+    assert_eq!(silent.spike_train, vec![Vec::<usize>::new()]);
+    assert_eq!(silent.potentials.len(), 8);
+
+    // zero neurons rejected
+    match SpikeActivity::from_fired(&[], 0).unwrap_err() {
+        HybridError::InvalidConfig(_) => {}
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+    match SpikeActivity::from_fired(&[0], 0).unwrap_err() {
+        HybridError::InvalidConfig(_) => {}
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+
+    // out-of-range index rejected
+    match SpikeActivity::from_fired(&[8], 8).unwrap_err() {
+        HybridError::InvalidConfig(_) => {}
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
 }
 
 #[test]

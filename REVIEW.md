@@ -61,12 +61,16 @@ Changes to `Transformer`, `SpikingNetwork`, `ExpertRouter`, `SpikeActivity`, or
 
 1. **Backward compatibility** — adding a method with a default impl is safe; removing or renaming one breaks every downstream implementor
 2. **Semantic contracts** — does the new method carry invariants (e.g., output bounds, shape requirements)? Document them in the trait-level doc comment
-3. **LIM-9 ownership** — verify the owning team is listed in the boundary matrix before merging trait changes
+3. **Boundary ownership** — verify the owning crate/team is listed in the
+   [issue #5](https://github.com/rmems/hybrid-fusion/issues/5) boundary matrix
+   (historically tracked as LIM-9) before merging trait changes
 4. **Downstream impact** — check if `neuromod`, `cortex-tensor`, or any SNN backend implements the trait and would break
 
 ## Boundary matrix
 
-The LIM-9 boundary matrix is the source of truth for which team owns which trait and which crate may depend on which. Consult it before merging any change that touches:
+The [issue #5](https://github.com/rmems/hybrid-fusion/issues/5) boundary matrix
+(historically “LIM-9”) is the source of truth for which team owns which trait
+and which crate may depend on which. Consult it before merging any change that touches:
 
 - Trait definitions in `src/traits.rs`
 - Public re-exports in `src/lib.rs`

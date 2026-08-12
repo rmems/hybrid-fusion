@@ -634,7 +634,9 @@ pub struct SpikeActivity {
 }
 ```
 
-Helper: `SpikeActivity::from_fired(fired, n_neurons)` for one-step tests.
+Helper: `SpikeActivity::from_fired(fired, n_neurons) -> Result` for one-step
+tests. Rejects `n_neurons == 0` and any fired index `>= n_neurons`; empty
+`fired` with `n_neurons > 0` is valid.
 
 ### `ExpertRouter`
 

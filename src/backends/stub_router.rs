@@ -8,6 +8,9 @@
 use crate::error::{HybridError, Result};
 use crate::traits::{ExpertRouteOutput, ExpertRouter};
 
+/// Upper bound so `1.0 / num_experts as f32` stays finite and non-zero.
+const MAX_STUB_EXPERTS: usize = 1_000_000;
+
 /// Uniform / stub MoE router (corinth-canal `RoutingMode::StubUniform` spirit).
 #[derive(Debug, Clone)]
 pub struct StubExpertRouter {
@@ -17,17 +20,29 @@ pub struct StubExpertRouter {
 
 impl StubExpertRouter {
     /// Build a stub router. `num_experts` and `top_k` must be ≥ 1; `top_k` is
-    /// clamped to `num_experts`.
+    /// clamped to `num_experts`. `num_experts` is capped at [`MAX_STUB_EXPERTS`]
+    /// so uniform weights remain representable in `f32`.
     pub fn new(num_experts: usize, top_k: usize) -> Result<Self> {
         if num_experts == 0 {
             return Err(HybridError::InvalidConfig(
                 "StubExpertRouter: num_experts must be >= 1".into(),
             ));
         }
+        if num_experts > MAX_STUB_EXPERTS {
+            return Err(HybridError::InvalidConfig(format!(
+                "StubExpertRouter: num_experts ({num_experts}) exceeds max {MAX_STUB_EXPERTS}"
+            )));
+        }
         if top_k == 0 {
             return Err(HybridError::InvalidConfig(
                 "StubExpertRouter: top_k must be >= 1".into(),
             ));
+        }
+        let w = 1.0_f32 / num_experts as f32;
+        if !w.is_finite() || w <= 0.0 {
+            return Err(HybridError::InvalidConfig(format!(
+                "StubExpertRouter: uniform weight underflow for num_experts={num_experts}"
+            )));
         }
         Ok(Self {
             num_experts,
@@ -47,10 +62,9 @@ impl ExpertRouter for StubExpertRouter {
 
     fn route(&mut self, embedding: &[f32]) -> Result<ExpertRouteOutput> {
         if embedding.is_empty() {
-            return Err(HybridError::InputLengthMismatch {
-                expected: 1,
-                got: 0,
-            });
+            return Err(HybridError::InvalidConfig(
+                "StubExpertRouter::route: embedding must be non-empty".into(),
+            ));
         }
         let w = 1.0 / self.num_experts as f32;
         let expert_weights = vec![w; self.num_experts];
@@ -88,7 +102,7 @@ mod tests {
         let mut router = StubExpertRouter::new(2, 1).unwrap();
         let err = router.route(&[]).unwrap_err();
         match err {
-            HybridError::InputLengthMismatch { got: 0, .. } => {}
+            HybridError::InvalidConfig(msg) => assert!(msg.contains("non-empty")),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -103,5 +117,10 @@ mod tests {
     fn stub_rejects_zero_experts() {
         assert!(StubExpertRouter::new(0, 1).is_err());
         assert!(StubExpertRouter::new(2, 0).is_err());
+    }
+
+    #[test]
+    fn stub_rejects_huge_expert_count() {
+        assert!(StubExpertRouter::new(MAX_STUB_EXPERTS + 1, 1).is_err());
     }
 }
