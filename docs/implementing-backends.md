@@ -686,3 +686,18 @@ let embedding = project_spike_activity(
 | `SpikingTernary` | identical to RateSum on the pure path; GIF → `neuromod` |
 
 No learned W/b matrix. Embedding is mode features → resize + `tanh` only.
+
+### Pure MoE math (`routing`)
+
+File-free helpers for [`ExpertRouter`](../src/traits.rs) backends:
+
+| Helper | Role |
+|--------|------|
+| `synthetic_gate_scores` | embedding chunks → per-expert scores |
+| `softmax` | normalize scores (sum ≈ 1) |
+| `top_k_indices` | select experts |
+| `routing_entropy` | Shannon entropy normalized to `[0, 1]` |
+| `route_synthetic` | all of the above in one call |
+
+Reference: `SyntheticExpertRouter` (`backends`) implements `ExpertRouter` via
+`route_synthetic`. Uniform stub remains `StubExpertRouter`.

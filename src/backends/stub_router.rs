@@ -6,10 +6,8 @@
 //! No checkpoints, no matmul — pure bookkeeping for reverse-path smoke tests.
 
 use crate::error::{HybridError, Result};
+use crate::routing::{MAX_REASONABLE_EXPERTS, routing_entropy};
 use crate::traits::{ExpertRouteOutput, ExpertRouter};
-
-/// Upper bound so `1.0 / num_experts as f32` stays finite and non-zero.
-const MAX_STUB_EXPERTS: usize = 1_000_000;
 
 /// Uniform / stub MoE router (corinth-canal `RoutingMode::StubUniform` spirit).
 #[derive(Debug, Clone)]
@@ -20,17 +18,17 @@ pub struct StubExpertRouter {
 
 impl StubExpertRouter {
     /// Build a stub router. `num_experts` and `top_k` must be ≥ 1; `top_k` is
-    /// clamped to `num_experts`. `num_experts` is capped at [`MAX_STUB_EXPERTS`]
-    /// so uniform weights remain representable in `f32`.
+    /// clamped to `num_experts`. `num_experts` is capped at
+    /// [`MAX_REASONABLE_EXPERTS`] so uniform weights remain representable in `f32`.
     pub fn new(num_experts: usize, top_k: usize) -> Result<Self> {
         if num_experts == 0 {
             return Err(HybridError::InvalidConfig(
                 "StubExpertRouter: num_experts must be >= 1".into(),
             ));
         }
-        if num_experts > MAX_STUB_EXPERTS {
+        if num_experts > MAX_REASONABLE_EXPERTS {
             return Err(HybridError::InvalidConfig(format!(
-                "StubExpertRouter: num_experts ({num_experts}) exceeds max {MAX_STUB_EXPERTS}"
+                "StubExpertRouter: num_experts ({num_experts}) exceeds max {MAX_REASONABLE_EXPERTS}"
             )));
         }
         if top_k == 0 {
@@ -69,13 +67,12 @@ impl ExpertRouter for StubExpertRouter {
         let w = 1.0 / self.num_experts as f32;
         let expert_weights = vec![w; self.num_experts];
         let selected_experts: Vec<usize> = (0..self.top_k).collect();
-        // Shannon entropy in nats for a uniform discrete distribution: H = ln(n).
-        // Callers that want H / ln(n) ∈ [0, 1] can normalize themselves (#26 / telemetry).
-        let routing_entropy = Some((self.num_experts as f32).ln());
+        // Normalized Shannon entropy ∈ [0, 1] (uniform → ~1).
+        let entropy = routing_entropy(&expert_weights);
         Ok(ExpertRouteOutput {
             expert_weights,
             selected_experts,
-            routing_entropy,
+            routing_entropy: Some(entropy),
         })
     }
 }
@@ -121,6 +118,6 @@ mod tests {
 
     #[test]
     fn stub_rejects_huge_expert_count() {
-        assert!(StubExpertRouter::new(MAX_STUB_EXPERTS + 1, 1).is_err());
+        assert!(StubExpertRouter::new(MAX_REASONABLE_EXPERTS + 1, 1).is_err());
     }
 }

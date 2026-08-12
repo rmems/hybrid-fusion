@@ -5,6 +5,7 @@ pub mod backends;
 pub mod error;
 pub mod hybrid;
 pub mod projector;
+pub mod routing;
 pub mod telemetry;
 pub mod tensor;
 pub mod traits;
@@ -13,6 +14,10 @@ pub mod types;
 pub use error::{HybridError, Result};
 pub use hybrid::HybridNetwork;
 pub use projector::{project_spike_activity, spike_activity_features};
+pub use routing::{
+    MAX_REASONABLE_EXPERTS, route_synthetic, routing_entropy, softmax, synthetic_gate_scores,
+    top_k_indices,
+};
 pub use tensor::Tensor;
 pub use traits::{
     ExpertRouteOutput, ExpertRouter, GgufLayout, GgufLoader, NeuroModulators, SpikeActivity,
@@ -38,3 +43,5 @@ pub use backends::simple_snn::SimpleSnn;
 pub use backends::simple_transformer::SimpleTransformer;
 #[cfg(feature = "backends")]
 pub use backends::stub_router::StubExpertRouter;
+#[cfg(feature = "backends")]
+pub use backends::synthetic_router::SyntheticExpertRouter;
