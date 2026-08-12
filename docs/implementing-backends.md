@@ -678,11 +678,11 @@ let embedding = project_spike_activity(
 // router.route(&embedding)?;
 ```
 
-| Mode | Pure path |
-|------|-----------|
-| `RateSum` | rates + temporal bins + membrane + iz |
-| `TemporalHistogram` | histogram-weighted blend |
-| `MembraneSnapshot` | membrane-weighted blend |
-| `SpikingTernary` | same features as RateSum here; GIF dynamics → `neuromod` |
+| Mode | Pure feature vector |
+|------|---------------------|
+| `RateSum` | per-neuron firing rates only (`n_neurons`) |
+| `TemporalHistogram` | time-binned rates only (`n_neurons × 4`) |
+| `MembraneSnapshot` | clamped membrane potentials only (`n_neurons`) |
+| `SpikingTernary` | identical to RateSum on the pure path; GIF → `neuromod` |
 
-No learned W/b matrix. Embedding is resize + `tanh` only.
+No learned W/b matrix. Embedding is mode features → resize + `tanh` only.

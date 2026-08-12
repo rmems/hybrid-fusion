@@ -12,14 +12,14 @@ use serde::{Deserialize, Serialize};
 /// Source shape: corinth-canal `ProjectionMode` (`src/types.rs` / `src/projector.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ProjectionMode {
-    /// Per-neuron firing rates + temporal bins + membrane (+ optional iz bank).
+    /// Per-neuron spike-count / firing-rate features only (`len == n_neurons`).
     #[default]
     RateSum,
-    /// Emphasizes time-binned spike histograms over raw rates.
+    /// Time-binned spike histogram features only (`len == n_neurons * 4`).
     TemporalHistogram,
-    /// Emphasizes membrane potentials as the primary signal.
+    /// Clamped membrane-potential features only (`len == n_neurons`).
     MembraneSnapshot,
-    /// Pure-path alias of RateSum features; full ternary/GIF impl is out of crate.
+    /// Pure-path alias of [`RateSum`]; full ternary/GIF impl is out of crate.
     SpikingTernary,
 }
 

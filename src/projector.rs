@@ -12,8 +12,6 @@ use crate::types::ProjectionMode;
 
 /// Temporal histogram bins (matches corinth-canal `TEMPORAL_BINS`).
 const TEMPORAL_BINS: usize = 4;
-/// Adaptive-bank dims when `iz_potentials` is short (corinth `IZ_NEURONS` spirit).
-const IZ_FEATURE_DIM: usize = 5;
 
 fn mean_pool(embedding: &Tensor) -> Vec<f32> {
     match embedding.ndim() {
@@ -97,8 +95,16 @@ pub fn embed_to_stimuli_with_width(embedding: &Tensor, snn_width: usize) -> Vec<
 
 /// Build a mode-specific feature vector from spike activity (no learned weights).
 ///
-/// Feature layout follows corinth-canal `build_feature_vector` blends, without
-/// EMA state or Xavier W/b. Length is mode-dependent (≈ `n_neurons * (1+4+1) + 5`).
+/// Each [`ProjectionMode`] emits a **distinct** pure representation (issue #25):
+/// - [`RateSum`](ProjectionMode::RateSum) / [`SpikingTernary`](ProjectionMode::SpikingTernary):
+///   per-neuron firing rates only (`len == n_neurons`)
+/// - [`TemporalHistogram`](ProjectionMode::TemporalHistogram): time-binned rates only
+///   (`len == n_neurons * 4`)
+/// - [`MembraneSnapshot`](ProjectionMode::MembraneSnapshot): clamped membranes only
+///   (`len == n_neurons`)
+///
+/// Unlike corinth-canal’s full rates+hist+membrane+iz concat (for a learned
+/// linear layer), pure hybrid-fusion modes do not share a common concatenation.
 pub fn spike_activity_features(
     mode: ProjectionMode,
     activity: &SpikeActivity,
@@ -122,13 +128,6 @@ pub fn spike_activity_features(
             )));
         }
     }
-    for (i, &v) in activity.iz_potentials.iter().enumerate() {
-        if !v.is_finite() {
-            return Err(HybridError::InvalidConfig(format!(
-                "spike_activity_features: non-finite iz_potential at index {i}"
-            )));
-        }
-    }
     for (t, step) in activity.spike_train.iter().enumerate() {
         if let Some(&idx) = step.iter().find(|&&i| i >= n_neurons) {
             return Err(HybridError::InvalidConfig(format!(
@@ -137,8 +136,23 @@ pub fn spike_activity_features(
         }
     }
 
-    let n_steps = activity.spike_train.len().max(1) as f32;
+    match mode {
+        ProjectionMode::RateSum | ProjectionMode::SpikingTernary => {
+            // SpikingTernary pure path matches RateSum; GIF lives in neuromod.
+            Ok(firing_rates(activity, n_neurons))
+        }
+        ProjectionMode::TemporalHistogram => Ok(temporal_histogram(activity, n_neurons)),
+        ProjectionMode::MembraneSnapshot => Ok(activity
+            .potentials
+            .iter()
+            .map(|&v| v.clamp(0.0, 1.0))
+            .collect()),
+    }
+}
 
+/// Per-neuron mean spike counts over timesteps (`len == n_neurons`).
+fn firing_rates(activity: &SpikeActivity, n_neurons: usize) -> Vec<f32> {
+    let n_steps = activity.spike_train.len().max(1) as f32;
     let mut rates = vec![0.0_f32; n_neurons];
     for step in &activity.spike_train {
         for &idx in step {
@@ -148,68 +162,35 @@ pub fn spike_activity_features(
     for r in &mut rates {
         *r /= n_steps;
     }
+    rates
+}
 
+/// Time-binned spike rates (`len == n_neurons * TEMPORAL_BINS`), each bin
+/// normalized by its actual timestep width.
+fn temporal_histogram(activity: &SpikeActivity, n_neurons: usize) -> Vec<f32> {
     let bins = TEMPORAL_BINS;
     let mut hist = vec![0.0_f32; n_neurons * bins];
-    if !activity.spike_train.is_empty() {
-        let steps = activity.spike_train.len();
-        let mut bin_steps = vec![0_usize; bins];
-        for (t, step) in activity.spike_train.iter().enumerate() {
-            let bin = ((t * bins) / steps).min(bins - 1);
-            bin_steps[bin] += 1;
-            for &idx in step {
-                hist[idx * bins + bin] += 1.0;
-            }
+    if activity.spike_train.is_empty() {
+        return hist;
+    }
+    let steps = activity.spike_train.len();
+    let mut bin_steps = vec![0_usize; bins];
+    for (t, step) in activity.spike_train.iter().enumerate() {
+        let bin = ((t * bins) / steps).min(bins - 1);
+        bin_steps[bin] += 1;
+        for &idx in step {
+            hist[idx * bins + bin] += 1.0;
         }
-        // Normalize each bin by its actual timestep width (uneven when steps % bins != 0).
-        for neuron in 0..n_neurons {
-            for bin in 0..bins {
-                let width = bin_steps[bin];
-                if width > 0 {
-                    hist[neuron * bins + bin] /= width as f32;
-                }
+    }
+    for neuron in 0..n_neurons {
+        for bin in 0..bins {
+            let width = bin_steps[bin];
+            if width > 0 {
+                hist[neuron * bins + bin] /= width as f32;
             }
         }
     }
-
-    let membrane: Vec<f32> = activity
-        .potentials
-        .iter()
-        .map(|&v| v.clamp(0.0, 1.0))
-        .collect();
-
-    let iz: Vec<f32> = activity
-        .iz_potentials
-        .iter()
-        .take(IZ_FEATURE_DIM)
-        .map(|&v| (v / 30.0).clamp(-1.0, 1.0))
-        .chain(std::iter::repeat(0.0))
-        .take(IZ_FEATURE_DIM)
-        .collect();
-
-    let mut features = Vec::new();
-    match mode {
-        ProjectionMode::RateSum | ProjectionMode::SpikingTernary => {
-            // SpikingTernary pure path matches RateSum features; GIF lives elsewhere.
-            features.extend_from_slice(&rates);
-            features.extend_from_slice(&hist);
-            features.extend_from_slice(&membrane);
-            features.extend_from_slice(&iz);
-        }
-        ProjectionMode::TemporalHistogram => {
-            features.extend(rates.iter().map(|r| r * 0.3));
-            features.extend(hist.iter().map(|h| h * 2.0));
-            features.extend_from_slice(&membrane);
-            features.extend_from_slice(&iz);
-        }
-        ProjectionMode::MembraneSnapshot => {
-            features.extend_from_slice(&rates);
-            features.extend_from_slice(&hist);
-            features.extend(membrane.iter().map(|v| v * 2.0));
-            features.extend_from_slice(&iz);
-        }
-    }
-    Ok(features)
+    hist
 }
 
 /// Project spike activity into a dense embedding for **MoE ExpertRouter** input.
@@ -394,17 +375,40 @@ mod tests {
             potentials: vec![0.0; 2],
             iz_potentials: vec![],
         };
-        let feats = spike_activity_features(ProjectionMode::RateSum, &act, 2).unwrap();
-        // layout: rates[2] + hist[2*4] + membrane[2] + iz[5]
-        let hist_off = 2;
-        // bins with fires: all 5 steps fire neuron 0 in bins 0,0,1,2,3 → bin0 has 2 steps, others 1
-        // counts in bin0 for neuron0 = 2 → /2 = 1.0; other bins 1 → /1 = 1.0
-        for bin in 0..4 {
-            let v = feats[hist_off + bin];
+        let feats = spike_activity_features(ProjectionMode::TemporalHistogram, &act, 2).unwrap();
+        assert_eq!(feats.len(), 2 * 4);
+        // neuron 0 hist occupies [0..4]
+        for (bin, &v) in feats.iter().take(4).enumerate() {
             assert!(
                 (v - 1.0).abs() < 1e-5,
                 "bin {bin} expected ~1.0 after per-width norm, got {v}"
             );
         }
+    }
+
+    #[test]
+    fn modes_emit_distinct_feature_dims_and_content() {
+        let act = SpikeActivity {
+            spike_train: vec![vec![0], vec![1], vec![0]],
+            potentials: vec![0.25, 0.75],
+            iz_potentials: vec![],
+        };
+        let rates = spike_activity_features(ProjectionMode::RateSum, &act, 2).unwrap();
+        let hist = spike_activity_features(ProjectionMode::TemporalHistogram, &act, 2).unwrap();
+        let mem = spike_activity_features(ProjectionMode::MembraneSnapshot, &act, 2).unwrap();
+        let tern = spike_activity_features(ProjectionMode::SpikingTernary, &act, 2).unwrap();
+
+        assert_eq!(rates.len(), 2);
+        assert_eq!(hist.len(), 8);
+        assert_eq!(mem.len(), 2);
+        assert_eq!(tern, rates);
+
+        // Membrane is potentials only (clamped), not spike rates.
+        assert!((mem[0] - 0.25).abs() < 1e-5);
+        assert!((mem[1] - 0.75).abs() < 1e-5);
+        // RateSum: neuron0 fires 2/3, neuron1 fires 1/3
+        assert!((rates[0] - 2.0 / 3.0).abs() < 1e-5);
+        assert!((rates[1] - 1.0 / 3.0).abs() < 1e-5);
+        assert_ne!(rates, mem);
     }
 }
