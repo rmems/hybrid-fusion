@@ -168,6 +168,20 @@ fn test_forward_output_shapes() {
 
     // first forward sets global_step to 1
     assert_eq!(out.global_step, 1);
+
+    // ANN→SNN path does not populate reverse-path MoE fields
+    assert!(out.expert_weights.is_none());
+    assert!(out.selected_experts.is_none());
+    assert!(out.routing_entropy.is_none());
+}
+
+#[test]
+fn test_spike_activity_from_fired() {
+    use hybrid_fusion::SpikeActivity;
+    let act = SpikeActivity::from_fired(&[1, 3], 8);
+    assert_eq!(act.spike_train, vec![vec![1, 3]]);
+    assert_eq!(act.potentials.len(), 8);
+    assert!(act.iz_potentials.is_empty());
 }
 
 #[test]

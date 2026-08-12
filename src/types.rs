@@ -76,4 +76,10 @@ pub struct HybridOutput {
     pub stimuli: Vec<f32>,
     pub fired_neurons: Vec<usize>,
     pub global_step: u64,
+    /// MoE gate weights when reverse-path routing ran; `None` on ANN→SNN only.
+    pub expert_weights: Option<Vec<f32>>,
+    /// Selected expert indices when reverse-path routing ran; `None` otherwise.
+    pub selected_experts: Option<Vec<usize>>,
+    /// Optional routing entropy telemetry from an `ExpertRouter`.
+    pub routing_entropy: Option<f32>,
 }

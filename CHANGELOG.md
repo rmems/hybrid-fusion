@@ -11,6 +11,7 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 ### Added
 
 - `docs/extraction-map.md` — maps extractable LLM/SNN/MoE architecture from corinth-canal and grok-ozempic into hybrid-fusion traits vs sibling crates (#21).
+- Reverse-path contracts: `SpikeActivity`, `ExpertRouter`, `ExpertRouteOutput`; MoE fields on `HybridOutput`; `StubExpertRouter` under `backends` (#22).
 
 ### Changed
 

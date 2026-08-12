@@ -75,6 +75,8 @@ use hybrid_fusion::Result;
 | `HybridNetwork<T, S>` | Generic orchestrator over any `Transformer` + `SpikingNetwork`. |
 | `Transformer` trait | Backend-agnostic transformer interface. |
 | `SpikingNetwork` trait | Backend-agnostic SNN interface. |
+| `ExpertRouter` trait | MoE routing: embedding → expert weights / selection. |
+| `SpikeActivity` | Pure spike/membrane bag for reverse-path projection. |
 | `NeuroModulators` | Neuromodulator struct passed to SNN steps. |
 | `HybridConfig` / `TransformerConfig` | Predefined configs (`tiny`, `olmo_1b`). |
 | `projector::embed_to_stimuli_with_width` | Pool -> resize -> tanh adapter. |

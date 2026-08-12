@@ -13,7 +13,10 @@ pub mod types;
 pub use error::{HybridError, Result};
 pub use hybrid::HybridNetwork;
 pub use tensor::Tensor;
-pub use traits::{GgufLayout, GgufLoader, NeuroModulators, SpikingNetwork, Transformer};
+pub use traits::{
+    ExpertRouteOutput, ExpertRouter, GgufLayout, GgufLoader, NeuroModulators, SpikeActivity,
+    SpikingNetwork, Transformer,
+};
 pub use types::{HybridConfig, HybridOutput, TransformerConfig};
 
 /// Re-export of the `sentry` crate when the `sentry` feature is enabled.
@@ -32,3 +35,5 @@ pub use sentry;
 pub use backends::simple_snn::SimpleSnn;
 #[cfg(feature = "backends")]
 pub use backends::simple_transformer::SimpleTransformer;
+#[cfg(feature = "backends")]
+pub use backends::stub_router::StubExpertRouter;

@@ -1,9 +1,10 @@
 # Implementing a Backend
 
 `hybrid-fusion` is backend-agnostic: it defines the `Transformer`, `SpikingNetwork`,
-`GgufLoader`, and `NeuroModulators` contracts but ships no concrete math. This guide
-explains every trait method, how data flows through `HybridNetwork::forward`, and
-provides a minimal compilable example you can adapt for your own backend.
+`GgufLoader`, `ExpertRouter`, `SpikeActivity`, and `NeuroModulators` contracts but
+ships no concrete math. This guide explains every trait method, how data flows
+through `HybridNetwork::forward`, and provides a minimal compilable example you can
+adapt for your own backend.
 
 For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs).
 
@@ -20,6 +21,7 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 7. [Minimal working example](#7-minimal-working-example)
 8. [Common pitfalls](#8-common-pitfalls)
 9. [Error reference](#9-error-reference)
+10. [Reverse path: SpikeActivity + ExpertRouter](#10-reverse-path-spikeactivity--expertrouter)
 
 ---
 
@@ -316,6 +318,10 @@ pub struct HybridOutput {
     pub stimuli: Vec<f32>,      // tanh-squashed, len == snn.num_channels()
     pub fired_neurons: Vec<usize>,
     pub global_step: u64,
+    // MoE reverse-path fields (None on ANN→SNN-only forward):
+    pub expert_weights: Option<Vec<f32>>,
+    pub selected_experts: Option<Vec<usize>>,
+    pub routing_entropy: Option<f32>,
 }
 ```
 
@@ -602,3 +608,52 @@ All errors come from [`src/error.rs`](../src/error.rs):
 | `UnsupportedFormat(String)` | Unknown checkpoint format |
 | `Io(...)` | std::io error (propagated via `From`) |
 | `Json(...)` | serde_json error (propagated via `From`) |
+
+---
+
+## 10. Reverse path: SpikeActivity + ExpertRouter
+
+The **ANN → SNN** path above is complete for `HybridNetwork::forward`. A
+second path is being extracted from research (corinth-canal):
+
+```text
+SpikeActivity → (ProjectionMode / projector — issue #25)
+             → embedding → ExpertRouter::route → ExpertRouteOutput
+```
+
+### `SpikeActivity`
+
+Pure data bag (not a trait). Fields mirror corinth-canal funnel / projector
+inputs without GIF dynamics:
+
+```rust
+pub struct SpikeActivity {
+    pub spike_train: Vec<Vec<usize>>,
+    pub potentials: Vec<f32>,
+    pub iz_potentials: Vec<f32>,
+}
+```
+
+Helper: `SpikeActivity::from_fired(fired, n_neurons)` for one-step tests.
+
+### `ExpertRouter`
+
+```rust
+pub trait ExpertRouter {
+    fn num_experts(&self) -> usize;
+    fn top_k(&self) -> usize;
+    fn route(&mut self, embedding: &[f32]) -> Result<ExpertRouteOutput>;
+}
+```
+
+`ExpertRouteOutput` carries `expert_weights`, `selected_experts`, and optional
+`routing_entropy`. Embedding length is **not** fixed to 2048.
+
+**Reference stub** (feature `backends`): `StubExpertRouter` returns a uniform
+gate distribution and selects `0..top_k`.
+
+**Out of scope for this crate's trait surface:** GGUF/Safetensors weight load,
+family adapters, real gate matmul (see extraction map / sibling crates).
+
+`HybridNetwork::forward` leaves `HybridOutput` MoE fields as `None` until a
+reverse-path orchestrator lands (follow-ups #25 / #26 / #23).
