@@ -10,6 +10,8 @@
 pub mod simple_snn;
 pub mod simple_transformer;
 // Defensive: parent `lib.rs` already gates the whole `backends` module; keep
-// the feature on the stub so it cannot leak if that gate is relaxed later.
+// the feature on optional routers so they cannot leak if that gate is relaxed.
 #[cfg(feature = "backends")]
 pub mod stub_router;
+#[cfg(feature = "backends")]
+pub mod synthetic_router;
