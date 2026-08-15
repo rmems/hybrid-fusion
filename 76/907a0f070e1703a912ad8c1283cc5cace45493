@@ -1,0 +1,31 @@
+CHANGELOG.md
+  s_558fd9cb0d3207::t_181339e530de8e 17-18
+README.md
+  s_558fd9cb0d3207::t_c4332f87dbe2bf 43-44
+  s_558fd9cb0d3207::t_1c20ae2d126275 78
+docs/implementing-backends.md
+  s_558fd9cb0d3207::t_7390b89f029b56 614
+  s_558fd9cb0d3207::t_ec67154a725315 24
+  s_558fd9cb0d3207::t_03bbfeaf03b37c 660-693
+AGENTS.md
+  s_558fd9cb0d3207::t_fdce5639181931 44
+  s_558fd9cb0d3207::t_bde09b055fe8bb 73-75
+src/hybrid.rs
+  s_558fd9cb0d3207::t_6dd714dad05a49 76-77
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "76907a0f070e1703a912ad8c1283cc5cace45493",
+  "prompts": {},
+  "sessions": {
+    "s_558fd9cb0d3207": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cfddf247-82b5-459f-b255-5e3ea5d5c5f3",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
