@@ -1,6 +1,6 @@
 # Design: Reverse-path orchestrator (`ReverseHybridPath`) — issue #23
 
-**Status:** draft for user review  
+**Status:** implemented (see plan `docs/superpowers/plans/2026-08-15-reverse-path-orchestrator.md`)  
 **Date:** 2026-08-14  
 **Issue:** [rmems/hybrid-fusion#23](https://github.com/rmems/hybrid-fusion/issues/23)  
 **Epic:** [#20](https://github.com/rmems/hybrid-fusion/issues/20)  
