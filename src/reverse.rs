@@ -89,12 +89,8 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
     pub fn forward_activity(&mut self, activity: &SpikeActivity) -> Result<HybridOutput> {
         self.global_step = self.global_step.saturating_add(1);
 
-        let embedding = project_spike_activity(
-            self.mode,
-            activity,
-            self.n_neurons,
-            self.embed_dim,
-        )?;
+        let embedding =
+            project_spike_activity(self.mode, activity, self.n_neurons, self.embed_dim)?;
 
         // v1: propagate router errors without Sentry (validation-heavy path;
         // avoid flooding on bad activity / empty embeddings).
@@ -134,7 +130,6 @@ mod tests {
     struct MockRouter {
         num_experts: usize,
         top_k: usize,
-        calls: usize,
     }
 
     impl MockRouter {
@@ -142,7 +137,6 @@ mod tests {
             Self {
                 num_experts,
                 top_k: top_k.min(num_experts),
-                calls: 0,
             }
         }
     }
@@ -162,14 +156,13 @@ mod tests {
                     "MockRouter: empty embedding".into(),
                 ));
             }
-            self.calls += 1;
             let n = self.num_experts;
             let mut expert_weights = vec![0.0f32; n];
             let k = self.top_k;
             let w = 1.0 / k as f32;
             let mut selected = Vec::with_capacity(k);
-            for i in 0..k {
-                expert_weights[i] = w;
+            for (i, weight) in expert_weights.iter_mut().enumerate().take(k) {
+                *weight = w;
                 selected.push(i);
             }
             Ok(ExpertRouteOutput {
@@ -203,8 +196,7 @@ mod tests {
     #[test]
     fn forward_activity_increments_global_step() {
         let r = MockRouter::new(4, 2);
-        let mut path =
-            ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, r).unwrap();
+        let mut path = ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, r).unwrap();
         assert_eq!(path.global_step(), 0);
         let act = SpikeActivity::from_fired(&[0, 2], 4).unwrap();
         let out = path.forward_activity(&act).unwrap();
@@ -217,8 +209,7 @@ mod tests {
     #[test]
     fn reset_clears_global_step() {
         let r = MockRouter::new(4, 2);
-        let mut path =
-            ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, r).unwrap();
+        let mut path = ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, r).unwrap();
         let act = SpikeActivity::from_fired(&[1], 4).unwrap();
         path.forward_activity(&act).unwrap();
         path.reset();
@@ -228,8 +219,7 @@ mod tests {
     #[test]
     fn forward_activity_sets_moe_fields_and_empty_stimuli() {
         let r = MockRouter::new(4, 2);
-        let mut path =
-            ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, r).unwrap();
+        let mut path = ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, r).unwrap();
         let act = SpikeActivity::from_fired(&[0, 3], 4).unwrap();
         let out = path.forward_activity(&act).unwrap();
 
@@ -255,8 +245,7 @@ mod tests {
     #[test]
     fn accessors_match_construction() {
         let r = MockRouter::new(8, 3);
-        let path =
-            ReverseHybridPath::new(ProjectionMode::MembraneSnapshot, 16, 32, r).unwrap();
+        let path = ReverseHybridPath::new(ProjectionMode::MembraneSnapshot, 16, 32, r).unwrap();
         assert_eq!(path.mode(), ProjectionMode::MembraneSnapshot);
         assert_eq!(path.n_neurons(), 16);
         assert_eq!(path.embed_dim(), 32);
