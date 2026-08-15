@@ -1,0 +1,24 @@
+src/reverse.rs
+  s_b24d34810c33d6::t_6c04ad08bfa9e7 133
+  s_b24d34810c33d6::t_557d810448c898 1-17,19-132,134-266
+  s_b24d34810c33d6::t_cacf4deabf4e58 18
+src/lib.rs
+  s_b24d34810c33d6::t_6408e28e597927 18
+  s_b24d34810c33d6::t_822e4119544679 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "2789303e13958290e22f87a15cf5da3885a05057",
+  "prompts": {},
+  "sessions": {
+    "s_b24d34810c33d6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "46ff4775-1c94-4044-923f-b5de93ec3c7f",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
