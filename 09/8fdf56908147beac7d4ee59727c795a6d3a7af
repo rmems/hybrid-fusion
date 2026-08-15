@@ -1,0 +1,20 @@
+tests/reverse_path.rs
+  s_127c79dbf0e5bd::t_6f9c71c5f234f6 89-92
+  s_127c79dbf0e5bd::t_95e06552a02981 1-88,93-224
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "098fdf56908147beac7d4ee59727c795a6d3a7af",
+  "prompts": {},
+  "sessions": {
+    "s_127c79dbf0e5bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ca0abb9e-f2c0-4509-9f06-5b98fd292379",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
