@@ -5,6 +5,7 @@ pub mod backends;
 pub mod error;
 pub mod hybrid;
 pub mod projector;
+pub mod reverse;
 pub mod routing;
 pub mod telemetry;
 pub mod tensor;
@@ -14,6 +15,7 @@ pub mod types;
 pub use error::{HybridError, Result};
 pub use hybrid::HybridNetwork;
 pub use projector::{project_spike_activity, spike_activity_features};
+pub use reverse::ReverseHybridPath;
 pub use routing::{
     MAX_REASONABLE_EXPERTS, route_synthetic, routing_entropy, softmax, synthetic_gate_scores,
     top_k_indices,
