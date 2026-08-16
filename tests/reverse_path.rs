@@ -71,6 +71,27 @@ impl ExpertRouter for MockRouter {
     }
 }
 
+/// Router that always fails, so router errors can be observed on a valid
+/// (non-empty) embedding — `MockRouter` only rejects empty embeddings, which
+/// the projector never produces for `embed_dim > 0`.
+struct FailingRouter;
+
+impl ExpertRouter for FailingRouter {
+    fn num_experts(&self) -> usize {
+        2
+    }
+
+    fn top_k(&self) -> usize {
+        1
+    }
+
+    fn route(&mut self, _embedding: &[f32]) -> Result<ExpertRouteOutput> {
+        Err(HybridError::InvalidConfig(
+            "FailingRouter: always fails".into(),
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -193,6 +214,22 @@ fn reverse_path_rejects_bad_activity_from_projector() {
     // global_step still increments before project in current design — verify
     // design: step increments first, then project. Spec §5.3 step 1 then 2.
     // If project fails after increment, step is 1.
+    assert_eq!(path.global_step(), 1);
+}
+
+#[test]
+fn reverse_path_propagates_router_errors() {
+    let mut path = ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, FailingRouter).unwrap();
+    let activity = SpikeActivity::from_fired(&[0, 3], 4).unwrap();
+
+    // Projection succeeds (embed_dim > 0), so this is the router's error.
+    let err = path.forward_activity(&activity).unwrap_err();
+    match err {
+        HybridError::InvalidConfig(msg) => assert!(msg.contains("FailingRouter")),
+        other => panic!("expected router InvalidConfig, got {other:?}"),
+    }
+    // Same documented step semantics as the projector-error case above:
+    // the increment happens before project/route, so a failed call consumes it.
     assert_eq!(path.global_step(), 1);
 }
 

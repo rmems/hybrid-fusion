@@ -28,7 +28,11 @@ spike_train + potentials + iz
   → ModelOutput { embedding, expert_weights: Some(...), selected_experts: Some(...), ... }
 ```
 
-#23 acceptance is an integration path with MoE fields asserted, without checkpoints or SAAQ. Extraction goal: hybrid-fusion owns this orchestration so corinth-canal can become thinner.
+Names above are the **corinth-canal** source API. In the hybrid-fusion contract
+they map to `project_spike_activity(...)` and `ExpertRouter::route(...)`; there
+is no `forward` method on `ExpertRouter`.
+
+Issue #23 acceptance is an integration path with MoE fields asserted, without checkpoints or SAAQ. Extraction goal: hybrid-fusion owns this orchestration so corinth-canal can become thinner.
 
 ---
 
@@ -87,6 +91,11 @@ HybridOutput {
   routing_entropy: ...
 }
 ```
+
+`expert_weights` is **dense** — one entry per expert (`len == num_experts`,
+sum ≈ 1). `selected_experts` is **sparse** — only the top-k indices
+(`len == top_k`, each `< num_experts`). They are not aligned element-wise;
+index into `expert_weights` with a value from `selected_experts`.
 
 ---
 

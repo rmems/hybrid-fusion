@@ -136,7 +136,8 @@ mod tests {
         fn new(num_experts: usize, top_k: usize) -> Self {
             Self {
                 num_experts,
-                top_k: top_k.min(num_experts),
+                // `.max(1)` keeps `1.0 / k` finite; matches tests/reverse_path.rs.
+                top_k: top_k.min(num_experts).max(1),
             }
         }
     }

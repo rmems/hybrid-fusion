@@ -675,7 +675,7 @@ reverse-path orchestrator lands (follow-ups #26 / #23).
 
 With:
 
-```markdown
+````markdown
 `HybridNetwork::forward` (ANN → SNN) always leaves MoE fields as `None`.
 For the reverse path, use [`ReverseHybridPath`](../src/reverse.rs):
 
@@ -710,7 +710,7 @@ use hybrid_fusion::{
 
 **v1 error policy:** reverse-path router/project errors propagate without Sentry
 capture (validation-heavy; avoids flooding on bad activity).
-```
+````
 
 Also update the TOC intro line if it still says only contracts: mention `ReverseHybridPath` once in the section title area.
 
