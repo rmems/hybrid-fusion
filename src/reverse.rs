@@ -51,30 +51,37 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
         })
     }
 
+    /// Projection mode used for spike-to-embedding conversion.
     pub fn mode(&self) -> ProjectionMode {
         self.mode
     }
 
+    /// Number of neurons the reverse path was configured for.
     pub fn n_neurons(&self) -> usize {
         self.n_neurons
     }
 
+    /// Embedding dimensionality produced by the projector.
     pub fn embed_dim(&self) -> usize {
         self.embed_dim
     }
 
+    /// Immutable reference to the configured router.
     pub fn router(&self) -> &R {
         &self.router
     }
 
+    /// Mutable reference to the configured router.
     pub fn router_mut(&mut self) -> &mut R {
         &mut self.router
     }
 
+    /// Current global step counter.
     pub fn global_step(&self) -> u64 {
         self.global_step
     }
 
+    /// Reset the global step counter to zero.
     pub fn reset(&mut self) {
         self.global_step = 0;
     }
@@ -82,10 +89,11 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
     /// Project activity, route through MoE, return `HybridOutput` with MoE fields set.
     ///
     /// Semantics match corinth-canal `Model::forward_activity` (projector + router half):
-    /// 1. `global_step = saturating_add(1)`
+    /// 1. `global_step = saturating_add(1)` (failed calls still count, as documented in tests)
     /// 2. `embedding = project_spike_activity(...)`
     /// 3. `route = router.route(&embedding)` — **no Sentry capture** on reverse v1
-    /// 4. Build `HybridOutput` (empty `stimuli`; `fired_neurons` = last non-empty spike step)
+    /// 4. Validate `ExpertRouteOutput` invariants
+    /// 5. Build `HybridOutput` (empty `stimuli`; `fired_neurons` = last non-empty spike step)
     pub fn forward_activity(&mut self, activity: &SpikeActivity) -> Result<HybridOutput> {
         self.global_step = self.global_step.saturating_add(1);
 
@@ -97,6 +105,50 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
         let route = self.router.route(&embedding)?;
 
         let fired_neurons = last_fired(&activity.spike_train);
+
+        // Defensive validation of the ExpertRouter contract from `src/traits.rs`.
+        let n_experts = self.router.num_experts();
+        let top_k = self.router.top_k();
+        if route.expert_weights.len() != n_experts {
+            return Err(HybridError::InvalidConfig(format!(
+                "ReverseHybridPath: expert_weights.len() ({}) != num_experts ({n_experts})",
+                route.expert_weights.len()
+            )));
+        }
+        if !route
+            .expert_weights
+            .iter()
+            .all(|&w| w.is_finite() && w >= 0.0)
+        {
+            return Err(HybridError::InvalidConfig(
+                "ReverseHybridPath: expert_weights contain non-finite or negative values".into(),
+            ));
+        }
+        let weights_sum: f32 = route.expert_weights.iter().sum();
+        if (weights_sum - 1.0).abs() > 1e-5 {
+            return Err(HybridError::InvalidConfig(format!(
+                "ReverseHybridPath: expert_weights sum {weights_sum} is not normalized to 1.0"
+            )));
+        }
+        if route.selected_experts.len() != top_k {
+            return Err(HybridError::InvalidConfig(format!(
+                "ReverseHybridPath: selected_experts.len() ({}) != top_k ({top_k})",
+                route.selected_experts.len()
+            )));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for &idx in &route.selected_experts {
+            if idx >= n_experts {
+                return Err(HybridError::InvalidConfig(format!(
+                    "ReverseHybridPath: selected expert index {idx} >= num_experts ({n_experts})"
+                )));
+            }
+            if !seen.insert(idx) {
+                return Err(HybridError::InvalidConfig(
+                    "ReverseHybridPath: selected_experts contains duplicate indices".into(),
+                ));
+            }
+        }
 
         Ok(HybridOutput {
             embedding,
