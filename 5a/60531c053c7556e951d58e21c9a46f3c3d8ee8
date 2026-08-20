@@ -1,0 +1,27 @@
+tests/reverse_path.rs
+  s_3efebbdb0c2484::t_89c450f30a9d5f 214-216
+  s_3efebbdb0c2484::t_a60440a0f8fd96 230-232
+docs/superpowers/specs/2026-08-14-reverse-path-orchestrator-design.md
+  s_3efebbdb0c2484::t_f71f683fd93f6e 151,155
+  s_3efebbdb0c2484::t_80d43ab782d937 146-148
+src/reverse.rs
+  s_3efebbdb0c2484::t_03ed920403e353 92-95
+  s_3efebbdb0c2484::t_020f9e64e2d2e7 153-154
+  s_3efebbdb0c2484::t_cbd13edbdd9a37 105-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "5a60531c053c7556e951d58e21c9a46f3c3d8ee8",
+  "prompts": {},
+  "sessions": {
+    "s_3efebbdb0c2484": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "clammy-mouth",
+        "model": "unknown"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
