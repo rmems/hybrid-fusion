@@ -143,16 +143,16 @@ pub fn forward_activity(&mut self, activity: &SpikeActivity) -> Result<HybridOut
 
 Semantics (match corinth `Model::forward_activity`):
 
-1. `global_step = global_step.saturating_add(1)`
-2. `embedding = project_spike_activity(self.mode, activity, self.n_neurons, self.embed_dim)?`
-3. `route = self.router.route(&embedding)?`  
+1. `embedding = project_spike_activity(self.mode, activity, self.n_neurons, self.embed_dim)?`
+2. `route = self.router.route(&embedding)?`
+3. `global_step = global_step.saturating_add(1)`  
    - Optional: capture router errors with `telemetry::capture_error` for consistency with SNN step failures on the forward path (only backend/runtime errors). Prefer capture on `route` errors that are not pure validation; simplest rule: **do not Sentry pure validation; capture other `HybridError` variants if already used that way** — for v1, **propagate without Sentry** unless a clear backend error variant exists. Keep parity with current forward path: capture only when analogous to SNN step. Router errors can be `InvalidConfig` or success-path failures; **v1: no Sentry capture** on reverse path (document; avoids flooding on bad activity).
 4. Build `HybridOutput`:
-   - `embedding` from step 2
+   - `embedding` from step 1
    - `stimuli: Vec::new()`
    - `fired_neurons`: last non-empty step of `activity.spike_train`, else empty  
      (indices already validated by project for this `n_neurons`)
-   - `global_step`
+   - `global_step` from step 3
    - MoE fields from `route`
 
 ### 5.4 Module layout

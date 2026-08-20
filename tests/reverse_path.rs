@@ -211,10 +211,9 @@ fn reverse_path_rejects_bad_activity_from_projector() {
         iz_potentials: vec![],
     };
     assert!(path.forward_activity(&bad).is_err());
-    // global_step still increments before project in current design — verify
-    // design: step increments first, then project. Spec §5.3 step 1 then 2.
-    // If project fails after increment, step is 1.
-    assert_eq!(path.global_step(), 1);
+    // global_step now only increments after projection and routing succeed,
+    // so a failed projector call leaves the counter at 0.
+    assert_eq!(path.global_step(), 0);
 }
 
 #[test]
@@ -228,9 +227,9 @@ fn reverse_path_propagates_router_errors() {
         HybridError::InvalidConfig(msg) => assert!(msg.contains("FailingRouter")),
         other => panic!("expected router InvalidConfig, got {other:?}"),
     }
-    // Same documented step semantics as the projector-error case above:
-    // the increment happens before project/route, so a failed call consumes it.
-    assert_eq!(path.global_step(), 1);
+    // global_step now only increments after projection and routing succeed,
+    // so a failed router call leaves the counter at 0.
+    assert_eq!(path.global_step(), 0);
 }
 
 #[test]

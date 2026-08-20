@@ -89,14 +89,12 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
     /// Project activity, route through MoE, return `HybridOutput` with MoE fields set.
     ///
     /// Semantics match corinth-canal `Model::forward_activity` (projector + router half):
-    /// 1. `global_step = saturating_add(1)` (failed calls still count, as documented in tests)
-    /// 2. `embedding = project_spike_activity(...)`
-    /// 3. `route = router.route(&embedding)` — **no Sentry capture** on reverse v1
-    /// 4. Validate `ExpertRouteOutput` invariants
+    /// 1. `embedding = project_spike_activity(...)`
+    /// 2. `route = router.route(&embedding)` — **no Sentry capture** on reverse v1
+    /// 3. Validate `ExpertRouteOutput` invariants
+    /// 4. `global_step = saturating_add(1)` only after projection/routing succeed
     /// 5. Build `HybridOutput` (empty `stimuli`; `fired_neurons` = last non-empty spike step)
     pub fn forward_activity(&mut self, activity: &SpikeActivity) -> Result<HybridOutput> {
-        self.global_step = self.global_step.saturating_add(1);
-
         let embedding =
             project_spike_activity(self.mode, activity, self.n_neurons, self.embed_dim)?;
 
@@ -104,6 +102,8 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
         // avoid flooding on bad activity / empty embeddings).
         let route = self.router.route(&embedding)?;
 
+        // Spike indices are already validated by `spike_activity_features` inside
+        // `project_spike_activity`; `last_fired` is only called after that succeeds.
         let fired_neurons = last_fired(&activity.spike_train);
 
         // Defensive validation of the ExpertRouter contract from `src/traits.rs`.
@@ -149,6 +149,8 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
                 ));
             }
         }
+
+        self.global_step = self.global_step.saturating_add(1);
 
         Ok(HybridOutput {
             embedding,
