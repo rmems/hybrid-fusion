@@ -124,11 +124,14 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
                 "ReverseHybridPath: expert_weights contain non-finite or negative values".into(),
             ));
         }
-        // Accumulate in f64 to avoid f32 drift for routers with thousands of experts.
+        // Accumulate in f64, but keep the tolerance scale-aware: a few f32
+        // operations per expert can legitimately drift by ~1e-8, so allow
+        // `n_experts * 1e-8` with a floor of `1e-5` to stay strict for small routers.
         let weights_sum: f64 = route.expert_weights.iter().map(|&w| w as f64).sum();
-        if (weights_sum - 1.0).abs() > 1e-5 {
+        let tolerance = (n_experts as f64 * 1e-8).max(1e-5);
+        if (weights_sum - 1.0).abs() > tolerance {
             return Err(HybridError::InvalidConfig(format!(
-                "ReverseHybridPath: expert_weights sum {weights_sum} is not normalized to 1.0"
+                "ReverseHybridPath: expert_weights sum {weights_sum} is not normalized to 1.0 (tolerance {tolerance})"
             )));
         }
         if route.selected_experts.len() != top_k {
