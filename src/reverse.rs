@@ -129,14 +129,26 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
                 "ReverseHybridPath: expert_weights contain non-finite or negative values".into(),
             ));
         }
-        // Accumulate in f64, but keep the tolerance scale-aware and capped:
-        // f32 softmax/accumulation can drift ~1e-8 per expert, so allow n * 1e-8,
-        // but clamp between 1e-5 (small routers stay strict) and 1e-4 (hard ceiling).
+        // f32 softmax/accumulation can drift for large expert counts, so
+        // renormalize in f64 before populating HybridOutput. This keeps valid
+        // trait-backed routers usable without exposing materially unnormalized
+        // weights.
         let weights_sum: f64 = route.expert_weights.iter().map(|&w| w as f64).sum();
-        let tolerance = (n_experts as f64 * 1e-8).clamp(1e-5, 1e-4);
-        if (weights_sum - 1.0).abs() > tolerance {
+        if !weights_sum.is_finite() || weights_sum <= 0.0 {
+            return Err(HybridError::InvalidConfig(
+                "ReverseHybridPath: expert_weights sum is non-finite or non-positive".into(),
+            ));
+        }
+        let scale = 1.0 / weights_sum;
+        let expert_weights: Vec<f32> = route
+            .expert_weights
+            .iter()
+            .map(|&w| (w as f64 * scale) as f32)
+            .collect();
+        let renorm_sum: f64 = expert_weights.iter().map(|&w| w as f64).sum();
+        if (renorm_sum - 1.0).abs() > 1e-4 {
             return Err(HybridError::InvalidConfig(format!(
-                "ReverseHybridPath: expert_weights sum {weights_sum} is not normalized to 1.0 (tolerance {tolerance})"
+                "ReverseHybridPath: renormalized expert_weights sum {renorm_sum} is not within 1e-4 of 1.0"
             )));
         }
         if route.selected_experts.len() != top_k {
@@ -166,7 +178,7 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
             stimuli: Vec::new(),
             fired_neurons,
             global_step: self.global_step,
-            expert_weights: Some(route.expert_weights),
+            expert_weights: Some(expert_weights),
             selected_experts: Some(route.selected_experts),
             routing_entropy: route.routing_entropy,
         })
