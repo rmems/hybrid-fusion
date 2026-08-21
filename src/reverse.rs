@@ -124,7 +124,8 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
                 "ReverseHybridPath: expert_weights contain non-finite or negative values".into(),
             ));
         }
-        let weights_sum: f32 = route.expert_weights.iter().sum();
+        // Accumulate in f64 to avoid f32 drift for routers with thousands of experts.
+        let weights_sum: f64 = route.expert_weights.iter().map(|&w| w as f64).sum();
         if (weights_sum - 1.0).abs() > 1e-5 {
             return Err(HybridError::InvalidConfig(format!(
                 "ReverseHybridPath: expert_weights sum {weights_sum} is not normalized to 1.0"
