@@ -21,7 +21,7 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 7. [Minimal working example](#7-minimal-working-example)
 8. [Common pitfalls](#8-common-pitfalls)
 9. [Error reference](#9-error-reference)
-10. [Reverse path: SpikeActivity + ExpertRouter](#10-reverse-path-spikeactivity--expertrouter)
+10. [Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath](#10-reverse-path-spikeactivity--expertrouter--reversehybridpath)
 
 ---
 
@@ -611,7 +611,7 @@ All errors come from [`src/error.rs`](../src/error.rs):
 
 ---
 
-## 10. Reverse path: SpikeActivity + ExpertRouter
+## 10. Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath
 
 The **ANN → SNN** path above is complete for `HybridNetwork::forward`. A
 second path is being extracted from research (corinth-canal):
@@ -657,8 +657,40 @@ gate distribution and selects `0..top_k`.
 **Out of scope for this crate's trait surface:** GGUF/Safetensors weight load,
 family adapters, real gate matmul (see extraction map / sibling crates).
 
-`HybridNetwork::forward` leaves `HybridOutput` MoE fields as `None` until a
-reverse-path orchestrator lands (follow-ups #26 / #23).
+`HybridNetwork::forward` (ANN → SNN) always leaves MoE fields as `None`.
+For the reverse path, use [`ReverseHybridPath`](../src/reverse.rs):
+
+```rust
+use hybrid_fusion::{
+    ProjectionMode, ReverseHybridPath, SpikeActivity,
+    // with --features backends:
+    // SyntheticExpertRouter,
+};
+
+// let router = my_expert_router; // or SyntheticExpertRouter::new(4, 2)?
+// let mut path = ReverseHybridPath::new(
+//     ProjectionMode::RateSum,
+//     /* n_neurons */ 8,
+//     /* embed_dim */ 16,
+//     router,
+// )?;
+// let activity = SpikeActivity::from_fired(&[0, 2], 8)?;
+// let out = path.forward_activity(&activity)?;
+// assert!(out.expert_weights.is_some());
+// assert!(out.selected_experts.is_some());
+// assert!(out.stimuli.is_empty());
+```
+
+### Plugging in a real MoE backend later
+
+1. Implement `ExpertRouter` with checkpoint-backed gate matmul (engram-parser +
+   cortex-tensor — not in this crate).
+2. Construct `ReverseHybridPath::new(mode, n_neurons, embed_dim, my_router)`.
+3. Call `forward_activity` with live `SpikeActivity` from neuromod / funnel.
+4. Do **not** use this path for SAAQ / latent calibration.
+
+**v1 error policy:** reverse-path router/project errors propagate without Sentry
+capture (validation-heavy; avoids flooding on bad activity).
 
 ### `ProjectionMode` + pure project
 

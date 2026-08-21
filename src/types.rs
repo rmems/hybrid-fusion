@@ -98,8 +98,14 @@ pub struct HybridOutput {
     pub fired_neurons: Vec<usize>,
     pub global_step: u64,
     /// MoE gate weights when reverse-path routing ran; `None` on ANN→SNN only.
+    ///
+    /// Dense when `Some`: one entry per expert (`len == num_experts`, sum ≈ 1),
+    /// carried through unchanged from [`crate::ExpertRouteOutput`].
     pub expert_weights: Option<Vec<f32>>,
     /// Selected expert indices when reverse-path routing ran; `None` otherwise.
+    ///
+    /// Sparse when `Some`: only the top-k indices (`len == top_k`, each
+    /// `< num_experts`) — not aligned element-wise with `expert_weights`.
     pub selected_experts: Option<Vec<usize>>,
     /// Optional routing entropy telemetry from an `ExpertRouter`.
     pub routing_entropy: Option<f32>,

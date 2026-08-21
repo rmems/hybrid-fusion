@@ -14,6 +14,8 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - Reverse-path contracts: `SpikeActivity`, `ExpertRouter`, `ExpertRouteOutput`; MoE fields on `HybridOutput`; `StubExpertRouter` under `backends` (#22).
 - `ProjectionMode` + pure `project_spike_activity` / `spike_activity_features` (SNN→embedding for MoE; no learned W/b, no SAAQ) (#25).
 - Pure MoE math in `routing`: synthetic gates, softmax, top-k, routing entropy; `SyntheticExpertRouter` under `backends` (#26).
+- `ReverseHybridPath<R: ExpertRouter>` reverse-path orchestrator + integration tests
+  (`tests/reverse_path.rs`); dual host alongside `HybridNetwork` (#23).
 
 ### Changed
 
