@@ -130,14 +130,20 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
             ));
         }
         // f32 softmax/accumulation can drift for large expert counts, so
-        // renormalize in f64 before populating HybridOutput. This keeps valid
-        // trait-backed routers usable without exposing materially unnormalized
-        // weights.
+        // renormalize in f64 before populating HybridOutput, but only within a
+        // scale-aware tolerance. This accepts normal f32 drift for routers up to
+        // MAX_REASONABLE_EXPERTS while rejecting materially unnormalized weights.
         let weights_sum: f64 = route.expert_weights.iter().map(|&w| w as f64).sum();
         if !weights_sum.is_finite() || weights_sum <= 0.0 {
             return Err(HybridError::InvalidConfig(
                 "ReverseHybridPath: expert_weights sum is non-finite or non-positive".into(),
             ));
+        }
+        let tolerance = (n_experts as f64 * 1.5e-8).clamp(1e-5, 1e-2);
+        if (weights_sum - 1.0).abs() > tolerance {
+            return Err(HybridError::InvalidConfig(format!(
+                "ReverseHybridPath: expert_weights sum {weights_sum} is outside tolerance {tolerance}"
+            )));
         }
         let scale = 1.0 / weights_sum;
         let expert_weights: Vec<f32> = route
