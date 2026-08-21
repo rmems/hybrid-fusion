@@ -109,6 +109,11 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
         // Defensive validation of the ExpertRouter contract from `src/traits.rs`.
         let n_experts = self.router.num_experts();
         let top_k = self.router.top_k();
+        if n_experts == 0 || top_k == 0 || top_k > n_experts {
+            return Err(HybridError::InvalidConfig(format!(
+                "ReverseHybridPath: router reports invalid num_experts={n_experts} / top_k={top_k}"
+            )));
+        }
         if route.expert_weights.len() != n_experts {
             return Err(HybridError::InvalidConfig(format!(
                 "ReverseHybridPath: expert_weights.len() ({}) != num_experts ({n_experts})",
@@ -124,11 +129,11 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
                 "ReverseHybridPath: expert_weights contain non-finite or negative values".into(),
             ));
         }
-        // Accumulate in f64, but keep the tolerance scale-aware: a few f32
-        // operations per expert can legitimately drift by ~1e-8, so allow
-        // `n_experts * 1e-8` with a floor of `1e-5` to stay strict for small routers.
+        // Accumulate in f64, but keep the tolerance scale-aware and capped:
+        // f32 softmax/accumulation can drift ~1e-8 per expert, so allow n * 1e-8,
+        // but clamp between 1e-5 (small routers stay strict) and 1e-4 (hard ceiling).
         let weights_sum: f64 = route.expert_weights.iter().map(|&w| w as f64).sum();
-        let tolerance = (n_experts as f64 * 1e-8).max(1e-5);
+        let tolerance = (n_experts as f64 * 1e-8).clamp(1e-5, 1e-4);
         if (weights_sum - 1.0).abs() > tolerance {
             return Err(HybridError::InvalidConfig(format!(
                 "ReverseHybridPath: expert_weights sum {weights_sum} is not normalized to 1.0 (tolerance {tolerance})"
@@ -229,6 +234,40 @@ mod tests {
                 selected_experts: selected,
                 routing_entropy: Some(0.5),
             })
+        }
+    }
+
+    /// Router that advertises `top_k() == 0` to test the explicit zero guard.
+    #[derive(Debug)]
+    struct ZeroTopKRouter;
+
+    impl ExpertRouter for ZeroTopKRouter {
+        fn num_experts(&self) -> usize {
+            4
+        }
+
+        fn top_k(&self) -> usize {
+            0
+        }
+
+        fn route(&mut self, _embedding: &[f32]) -> Result<ExpertRouteOutput> {
+            Ok(ExpertRouteOutput {
+                expert_weights: vec![0.25_f32; 4],
+                selected_experts: vec![],
+                routing_entropy: None,
+            })
+        }
+    }
+
+    #[test]
+    fn forward_activity_rejects_zero_top_k() {
+        let mut path =
+            ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, ZeroTopKRouter).unwrap();
+        let act = SpikeActivity::from_fired(&[0], 4).unwrap();
+        let err = path.forward_activity(&act).unwrap_err();
+        match err {
+            HybridError::InvalidConfig(msg) => assert!(msg.contains("top_k=0")),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 
