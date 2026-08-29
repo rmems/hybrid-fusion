@@ -1,0 +1,32 @@
+CHANGELOG.md
+  s_45cc4242154178::t_5eb96633724aa8 23-32
+src/reverse.rs
+  s_45cc4242154178::t_5eb96633724aa8 432-438,488-491,514-517
+  s_45cc4242154178::t_8df873b81a2f9b 14-41,122-127,165-175,177,180,182-184,187-189,194,294-326,422-431,439-487,492-513,518
+src/lib.rs
+  s_45cc4242154178::t_5eb96633724aa8 18
+src/traits.rs
+  s_45cc4242154178::t_5eb96633724aa8 101,104-124,147-151
+src/types.rs
+  s_45cc4242154178::t_5eb96633724aa8 102-111,119-121
+src/routing.rs
+  s_45cc4242154178::t_8df873b81a2f9b 69-78,83-86,185-209
+docs/implementing-backends.md
+  s_45cc4242154178::t_5eb96633724aa8 654-664
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "2327dc75a183ce19019cdc4b469b2b191d92dc63",
+  "prompts": {},
+  "sessions": {
+    "s_45cc4242154178": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ea897af6-09f5-4016-bc06-7c2b44782c39",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
