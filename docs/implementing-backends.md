@@ -22,6 +22,7 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 8. [Common pitfalls](#8-common-pitfalls)
 9. [Error reference](#9-error-reference)
 10. [Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath](#10-reverse-path-spikeactivity--expertrouter--reversehybridpath)
+11. [Dry-run precision planning: PrecisionTier + HybridStagePlanner](#11-dry-run-precision-planning-precisiontier--hybridstageplanner)
 
 ---
 
@@ -600,7 +601,7 @@ All errors come from [`src/error.rs`](../src/error.rs):
 | Variant | When |
 |---------|------|
 | `InputLengthMismatch { expected, got }` | Empty input or exceeds `max_seq_len` |
-| `InvalidConfig(String)` | Hidden-state dim doesn't match `dim()` |
+| `InvalidConfig(String)` | Hidden-state dim doesn't match `dim()`; empty stage name in `HybridStagePlanner::plan` |
 | `SnnStep(String)` | SNN internal error during `step` |
 | `ModelLoad { path, reason }` | File I/O failure during loading |
 | `MissingTensor { name, path }` | Expected tensor not found in checkpoint |
@@ -745,3 +746,101 @@ Always available (no feature flag) for [`ExpertRouter`](../src/traits.rs) backen
 **Feature `backends`:** `SyntheticExpertRouter` implements `ExpertRouter` via
 `route_synthetic`. Uniform stub remains `StubExpertRouter`. Without the feature,
 use the free functions above with your own type.
+
+---
+
+## 11. Dry-run precision planning: PrecisionTier + HybridStagePlanner
+
+A third contract plans **what would happen** to a pipeline, without touching a
+single weight:
+
+```text
+stage names (&[&str]) → HybridStagePlanner::plan
+                     → Vec<PlannedOperation> { stage, PrecisionTier, OperationKind }
+```
+
+### `PrecisionTier`
+
+| Tier | Wire name | Meaning |
+|------|-----------|---------|
+| `Preserve` | `preserve` | Routing-critical / no-touch (MoE routers, expert gates, attention readouts) |
+| `Fp16` | `fp16` | Keep source FP16 — MoE routing gates |
+| `TernarySnn` | `ternary_snn` | Two-bit ternary `{-1, 0, +1}` for the spiking path |
+
+Names match the `xai-dissect` manifest vocabulary exactly; `PrecisionTier` carries
+`#[serde(rename_all = "snake_case")]` so serialization round-trips against those
+manifests. `Default` is `Preserve` — this crate plans, it never quantizes.
+
+### `HybridStagePlanner`
+
+```rust
+pub trait HybridStagePlanner {
+    fn default_tier(&self) -> PrecisionTier;
+    fn plan(&self, stages: &[&str]) -> Result<Vec<PlannedOperation>>;
+}
+```
+
+`plan` returns exactly one `PlannedOperation` per input stage, in input order,
+with `out[i].stage == stages[i]`. `plan(&[])` is `Ok(vec![])` — an empty pipeline
+is valid, exactly as an empty `fired` slice is valid for
+`SpikeActivity::from_fired`. An **empty stage name** is a zero-extent input and
+must fail with `InvalidConfig`, message shape
+`"MyPlanner::plan: stage name must not be empty"`. A stage no rule matches is
+planned at `default_tier()` — that is where grok-ozempic's `TensorClass::Default`
+went, since resolving it there reads `manifest.defaults.precision`, and manifests
+are out of this crate.
+
+**Planning is name-only.** Classification depends on the stage / tensor **name**,
+never on shape, dtype, or bytes. That is why `plan` takes `&[&str]`: the input
+type cannot carry a file handle, a path, or a byte count, so no implementation can
+turn a dry run wet.
+
+### `OperationKind` is not a kernel name
+
+`BackendKernel` belongs to `myelin-accelerator`, not here (see the
+[extraction map](extraction-map.md)). The research planner's four `kernel_method`
+strings collapse losslessly into two backend-neutral variants:
+
+| grok-ozempic `kernel_method` | `PrecisionTier` | `OperationKind` |
+|---|---|---|
+| `quantize_f32` | `TernarySnn` | `Convert` |
+| `convert_f32_to_f16_bytes` | `Fp16` / `Preserve` | `Convert` |
+| `wrap_existing_int8_expert` | `TernarySnn` | `Passthrough` |
+| `wrap_existing_int8_unknown` | `TernarySnn` | `Passthrough` |
+
+Tier and kind are independent: a `Preserve` stage still needs a `Convert`.
+
+### MoE family awareness
+
+Which stages *should* plan at `Preserve` is family-specific — Olmoe, Qwen3Moe,
+Gemma4, DeepSeek2, LlamaMoe and Grok each name their routers and expert gates
+differently. That awareness lives in corinth-canal's MoE adapters and stays
+research: per-family tensor-name tables are on the non-extract list in the
+[extraction map](extraction-map.md). This crate ships the vocabulary; your planner
+brings the names.
+
+**Out of scope for this crate:** GOZ1 packing, real quantize paths, GIF
+thresholds, coverage / inventory arithmetic, `xai-dissect` manifest loading, and
+CUDA kernels. There is no reference planner under `backends` — a dry run is a
+policy decision, not math.
+
+### Usage
+
+```rust
+use hybrid_fusion::{
+    HybridStagePlanner, OperationKind, PlannedOperation, PrecisionTier, Result,
+};
+
+// struct MyPlanner { /* manifest rules live in YOUR crate */ }
+//
+// impl HybridStagePlanner for MyPlanner {
+//     fn default_tier(&self) -> PrecisionTier { PrecisionTier::TernarySnn }
+//     fn plan(&self, stages: &[&str]) -> Result<Vec<PlannedOperation>> {
+//         // name-only rules; never open a file here
+//     }
+// }
+//
+// let plan = my_planner.plan(&["blk.0.moe_gate", "blk.0.expert.0"])?;
+// assert_eq!(plan[0].tier, PrecisionTier::Preserve);
+// assert_eq!(plan[1].kind, OperationKind::Passthrough);
+```

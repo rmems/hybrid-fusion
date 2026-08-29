@@ -16,6 +16,10 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - Pure MoE math in `routing`: synthetic gates, softmax, top-k, routing entropy; `SyntheticExpertRouter` under `backends` (#26).
 - `ReverseHybridPath<R: ExpertRouter>` reverse-path orchestrator + integration tests
   (`tests/reverse_path.rs`); dual host alongside `HybridNetwork` (#23).
+- Dry-run precision-planning contracts: `PrecisionTier` (`preserve` / `fp16` /
+  `ternary_snn`, snake_case on the wire), `PlannedOperation` + `OperationKind`, and the
+  `HybridStagePlanner` trait (stage names → planned ops; no manifest, weight, or GOZ1
+  I/O in this crate) (#24).
 
 ### Changed
 

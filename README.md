@@ -42,6 +42,9 @@ This crate **owns**:
   against checkpoint weights.
 - Reverse-path orchestration (`ReverseHybridPath`): SNN activity → embedding → MoE route
   ([#23](https://github.com/rmems/hybrid-fusion/issues/23)).
+- Dry-run precision-planning contracts (`PrecisionTier`, `HybridStagePlanner`): map stage
+  names to planned operations without reading weights
+  ([#24](https://github.com/rmems/hybrid-fusion/issues/24)).
 
 This crate **does not own**:
 
@@ -53,6 +56,8 @@ This crate **does not own**:
   [`neuromod`](https://github.com/Limen-Neural/neuromod)
   (still under Limen-Neural until that crate returns to `rmems`).
 - SNN runtime / scheduling -> `brainstem-daemon`.
+- Quantization kernels, GOZ1 packing, and any weight-file I/O -> `myelin-accelerator` /
+  `grok-ozempic`. This crate plans; it never converts bytes.
 
 See [issue #5](https://github.com/rmems/hybrid-fusion/issues/5) for the full
 boundary matrix, and [docs/extraction-map.md](docs/extraction-map.md) for the
@@ -82,6 +87,9 @@ use hybrid_fusion::Result;
 | `SpikeActivity` | Pure spike/membrane bag for reverse-path projection. |
 | `ProjectionMode` + `project_spike_activity` | SNN activity → dense embedding for MoE (pure modes). |
 | `routing` helpers | Always-on pure MoE math (gates, softmax, top-k, entropy). |
+| `HybridStagePlanner` trait | Dry-run planning: stage names → planned operations, no weights loaded. |
+| `PrecisionTier` | MoE-aware precision tiers (`preserve` / `fp16` / `ternary_snn`). |
+| `PlannedOperation` / `OperationKind` | Thin plan entries: stage, tier, convert-vs-passthrough. |
 | `SyntheticExpertRouter` / `StubExpertRouter` | File-free `ExpertRouter` impls (**requires `backends` feature**). |
 | `NeuroModulators` | Neuromodulator struct passed to SNN steps. |
 | `HybridConfig` / `TransformerConfig` | Predefined configs (`tiny`, `olmo_1b`). |

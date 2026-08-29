@@ -20,11 +20,14 @@ Copy-paste this into every PR review:
 
 - [ ] No concrete `cortex-tensor`, `neuromod`, or backend-specific types in public API
 - [ ] Pluggable surface stays trait/type contracts: `Transformer`, `SpikingNetwork`,
-      `GgufLoader`, `ExpertRouter`, `SpikeActivity` (plus config/output types)
+      `GgufLoader`, `ExpertRouter`, `SpikeActivity`, `HybridStagePlanner`
+      (plus config/output/plan types)
 - [ ] No new `use` statements pulling in concrete backend crates
 - [ ] Public types are generic over trait bounds, not pinned to implementations
 - [ ] Reverse-path MoE: pure routing math / types here; mmap loaders and gate matmul
       stay in `engram-parser` / `cortex-tensor` (see `docs/extraction-map.md`)
+- [ ] Dry-run planning stays name-only: no `std::fs`, `Path`/`PathBuf`, mmap, byte
+      buffers, `BackendKernel` method names, or GOZ1 symbols in planner types or docs
 - [ ] Reference: issue #5 boundary matrix for ownership rules
 
 ### Invariants

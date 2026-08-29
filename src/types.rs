@@ -23,6 +23,41 @@ pub enum ProjectionMode {
     SpikingTernary,
 }
 
+/// MoE-aware precision tier for **dry-run planning** — not a runtime dtype.
+///
+/// Tier names align with grok-ozempic `TensorPrecision` (`src/types.rs`) and the
+/// `xai-dissect` manifest vocabulary. hybrid-fusion *plans* with these tiers; it
+/// never converts, packs, or writes weights. GOZ1 packing, real quantize paths,
+/// and CUDA kernels stay in `grok-ozempic` / `myelin-accelerator`. Consumed
+/// through [`HybridStagePlanner`](crate::HybridStagePlanner).
+///
+/// # Wire names
+///
+/// The crate's first **wire-vocabulary** type, so unlike in-process knobs such as
+/// [`ProjectionMode`] it carries `#[serde(rename_all = "snake_case")]` and emits
+/// exactly `"preserve"`, `"fp16"`, `"ternary_snn"`. The research enum omits the
+/// attribute and spells the variant `TernarySnN`, emitting `"TernarySnN"`; that
+/// divergence is fixed here deliberately. The `Snn` spelling is also the only one
+/// `rename_all` maps to `"ternary_snn"` (`TernarySnN` yields `"ternary_sn_n"`).
+///
+/// # Default
+///
+/// [`Preserve`](Self::Preserve) — this crate plans but never quantizes, so the
+/// safe default is the tier that changes nothing. The research pipeline defaults
+/// to `ternary_snn` via `manifest.defaults.precision`; that policy travels with
+/// the manifest, which is out of this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PrecisionTier {
+    /// Routing-critical no-touch tier; serializes as `"preserve"`.
+    #[default]
+    Preserve,
+    /// Keep source FP16 — the tier MoE routing gates plan at; serializes as `"fp16"`.
+    Fp16,
+    /// Two-bit ternary `{-1, 0, +1}` for the spiking path; serializes as `"ternary_snn"`.
+    TernarySnn,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransformerConfig {
     pub vocab_size: usize,
@@ -120,4 +155,48 @@ pub struct HybridOutput {
     /// Passed through exactly as the router reported it; it is **not** recomputed
     /// after [`expert_weights`](Self::expert_weights) renormalization.
     pub routing_entropy: Option<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tier names are a wire vocabulary shared with `xai-dissect` manifests and
+    /// grok-ozempic CLI strings; `rename_all` is what keeps them aligned. Without
+    /// it serde emits `"TernarySnn"`, and the research spelling `TernarySnN` would
+    /// emit `"ternary_sn_n"`.
+    #[test]
+    fn precision_tier_serializes_to_manifest_names() {
+        assert_eq!(
+            serde_json::to_string(&PrecisionTier::Preserve).unwrap(),
+            "\"preserve\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PrecisionTier::Fp16).unwrap(),
+            "\"fp16\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PrecisionTier::TernarySnn).unwrap(),
+            "\"ternary_snn\""
+        );
+    }
+
+    #[test]
+    fn precision_tier_round_trips_through_json() {
+        for tier in [
+            PrecisionTier::Preserve,
+            PrecisionTier::Fp16,
+            PrecisionTier::TernarySnn,
+        ] {
+            let json = serde_json::to_string(&tier).unwrap();
+            assert_eq!(serde_json::from_str::<PrecisionTier>(&json).unwrap(), tier);
+        }
+    }
+
+    /// This crate plans, it never quantizes, so the default must be the tier that
+    /// changes nothing — inverting the research pipeline's `ternary_snn`.
+    #[test]
+    fn precision_tier_default_is_preserve() {
+        assert_eq!(PrecisionTier::default(), PrecisionTier::Preserve);
+    }
 }

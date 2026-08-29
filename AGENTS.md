@@ -42,6 +42,8 @@ implementations live here.
 - Projector logic (dimensionality reduction from transformer hidden space to SNN input channels)
 - Configuration and output types (`HybridConfig`, `TransformerConfig`, `HybridOutput`)
 - Reverse-path host `ReverseHybridPath` (activity → embedding → ExpertRouter)
+- Dry-run precision-planning contract `HybridStagePlanner` + `PrecisionTier` /
+  `PlannedOperation` types (plan only; no weight I/O, no GOZ1 packing)
 
 ### This crate does not own
 
@@ -67,8 +69,9 @@ Core traits / types on the pluggable surface:
 - **`SpikingNetwork`** — steps the SNN forward given stimuli + neuromodulator state, returns fired neuron indices. Implementations live in `neuromod` / `brainstem-daemon`.
 - **`GgufLoader`** — loads GGUF model layouts from disk. Implementations live in `engram-parser`.
 - **`ExpertRouter`** + **`SpikeActivity`** — reverse-path MoE routing contract (embedding → expert weights / selection). Pure math lives in `src/routing.rs`; checkpoint backends stay outside this crate.
+- **`HybridStagePlanner`** — dry-run planning: pipeline / tensor stage names → `PlannedOperation` (`PrecisionTier` + convert/passthrough). Name-only by contract: implementations must not open, mmap, or read weight files or manifests. Real quantize kernels live in `myelin-accelerator`; GOZ1 packing stays in `grok-ozempic`.
 
-`HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits; `GgufLoader` / `ExpertRouter` are consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above.
+`HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits; `GgufLoader` / `ExpertRouter` / `HybridStagePlanner` are consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above.
 
 `ReverseHybridPath<R: ExpertRouter>` is the dual reverse-path host (SNN activity →
 project → MoE); do not fold it into `HybridNetwork` generics.

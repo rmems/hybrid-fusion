@@ -2,6 +2,7 @@
 
 use crate::error::Result;
 use crate::tensor::Tensor;
+use crate::types::PrecisionTier;
 use serde::{Deserialize, Serialize};
 
 pub trait Transformer {
@@ -158,4 +159,238 @@ pub trait ExpertRouter {
     ///
     /// Returns [`Err`] for empty embeddings or backend-specific validation failures.
     fn route(&mut self, embedding: &[f32]) -> Result<ExpertRouteOutput>;
+}
+
+// ── Dry-run precision planning: stage names → planned ops (no weights) ─────
+// Reduced from grok-ozempic `DryRunPlanner` / `PlannedKernelCall`. No manifest
+// loader, coverage arithmetic, GIF thresholds, or `BackendKernel` names here —
+// see docs/extraction-map.md section D.
+
+/// What a backend would do to realize a [`PlannedOperation`]'s tier.
+///
+/// Deliberately **not** a kernel name: `BackendKernel` and its methods belong to
+/// `myelin-accelerator`, not to this crate. These two variants carry the only
+/// orchestration-level bit the research planner's four `kernel_method` strings
+/// encoded — whether the stage must be transformed or is already conformant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    /// Backend must transform the stage into its tier; serializes as `"convert"`.
+    Convert,
+    /// Stage already sits at its tier; the backend wraps it with no math.
+    /// Serializes as `"passthrough"`.
+    Passthrough,
+}
+
+/// One planned unit of work from a dry run: a stage name, its tier, and what a
+/// backend would do with it.
+///
+/// Reduced from grok-ozempic `PlannedKernelCall`. Its `class`, `gif_threshold`,
+/// `estimated_tensor_count`, and `kernel_method` fields are all outside this
+/// crate's surface — see [`HybridStagePlanner`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlannedOperation {
+    /// Stage name this entry plans, echoed verbatim from the planner's input.
+    pub stage: String,
+    /// Precision tier the stage is planned at.
+    pub tier: PrecisionTier,
+    /// Whether realizing `tier` needs a conversion or a pass-through wrap.
+    pub kind: OperationKind,
+}
+
+/// Dry-run planning contract: pipeline / tensor stage **names** → planned
+/// operations, with nothing loaded.
+///
+/// Concrete planners — manifest rule sets, model inventories, coverage audits —
+/// live outside this crate; hybrid-fusion owns the vocabulary and the contract
+/// only. There is no reference implementation under `backends`: a dry run is a
+/// policy decision, not math.
+///
+/// # Contract
+///
+/// - Planning is **name-only**. Implementations must not open, mmap, stat, or
+///   read weight files, manifests, or checkpoints. A stage name is a structural
+///   tensor / stage identifier, never a filesystem path. This is what makes the
+///   run "dry", and why the input carries no shape, dtype, or byte count.
+/// - [`plan`](Self::plan) returns exactly one [`PlannedOperation`] per input
+///   stage, in input order: `out.len() == stages.len()` and
+///   `out[i].stage == stages[i]`.
+/// - A stage no rule matches is planned at [`default_tier`](Self::default_tier).
+/// - `plan` is deterministic: the same `&self` and the same `stages` produce an
+///   equal plan.
+/// - [`PrecisionTier`] and [`OperationKind`] are independent axes — a
+///   [`Preserve`](PrecisionTier::Preserve) stage may still need a
+///   [`Convert`](OperationKind::Convert).
+pub trait HybridStagePlanner {
+    /// Tier applied to stages no rule matches (`ternary_snn` in the research pipeline).
+    fn default_tier(&self) -> PrecisionTier;
+
+    /// Plan every stage name into a [`PlannedOperation`], loading nothing.
+    ///
+    /// # Errors
+    ///
+    /// - [`HybridError::InvalidConfig`](crate::HybridError::InvalidConfig) if any
+    ///   `stages` entry is empty — a zero-extent input, rejected the way a
+    ///   zero-length tensor axis is.
+    /// - [`HybridError::InvalidConfig`](crate::HybridError::InvalidConfig) for
+    ///   planner-specific rule conflicts.
+    ///
+    /// An empty `stages` slice is valid and yields an empty plan.
+    fn plan(&self, stages: &[&str]) -> Result<Vec<PlannedOperation>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::HybridError;
+
+    /// Deterministic mock planner (no `backends` feature needed).
+    ///
+    /// Rules are name-substring only — the contract forbids consulting anything
+    /// else — and mirror the research pipeline's MoE intent: routing tensors are
+    /// preserved, experts arrive already ternary, attention is fp16.
+    #[derive(Debug)]
+    struct MockStagePlanner {
+        default_tier: PrecisionTier,
+    }
+
+    impl MockStagePlanner {
+        fn new(default_tier: PrecisionTier) -> Self {
+            Self { default_tier }
+        }
+    }
+
+    impl HybridStagePlanner for MockStagePlanner {
+        fn default_tier(&self) -> PrecisionTier {
+            self.default_tier
+        }
+
+        fn plan(&self, stages: &[&str]) -> Result<Vec<PlannedOperation>> {
+            let mut plan = Vec::with_capacity(stages.len());
+            for &stage in stages {
+                if stage.is_empty() {
+                    return Err(HybridError::InvalidConfig(
+                        "MockStagePlanner::plan: stage name must not be empty".into(),
+                    ));
+                }
+                // Preserve still converts (the research path writes f16 bytes):
+                // tier and kind are independent axes.
+                let (tier, kind) = if stage.contains("gate") || stage.contains("router") {
+                    (PrecisionTier::Preserve, OperationKind::Convert)
+                } else if stage.contains("expert") {
+                    (PrecisionTier::TernarySnn, OperationKind::Passthrough)
+                } else if stage.contains("attn") {
+                    (PrecisionTier::Fp16, OperationKind::Convert)
+                } else {
+                    (self.default_tier, OperationKind::Convert)
+                };
+                plan.push(PlannedOperation {
+                    stage: stage.to_string(),
+                    tier,
+                    kind,
+                });
+            }
+            Ok(plan)
+        }
+    }
+
+    #[test]
+    fn plan_returns_one_operation_per_stage_in_order() {
+        let planner = MockStagePlanner::new(PrecisionTier::TernarySnn);
+        let stages = [
+            "blk.0.moe_gate",
+            "blk.0.expert.0",
+            "blk.0.attn_q",
+            "tok_embd",
+        ];
+        let plan = planner.plan(&stages).unwrap();
+        assert_eq!(plan.len(), stages.len());
+        for (op, name) in plan.iter().zip(stages) {
+            assert_eq!(op.stage, name);
+        }
+    }
+
+    /// An empty pipeline is valid, not an error — the same posture as an empty
+    /// `fired` slice in [`SpikeActivity::from_fired`].
+    #[test]
+    fn plan_of_empty_slice_is_empty_plan() {
+        let planner = MockStagePlanner::new(PrecisionTier::Preserve);
+        assert!(planner.plan(&[]).unwrap().is_empty());
+    }
+
+    /// Zero-extent input: an empty stage name is rejected like a zero-length
+    /// tensor axis, and it fails the whole plan rather than being skipped.
+    #[test]
+    fn plan_rejects_empty_stage_name() {
+        let planner = MockStagePlanner::new(PrecisionTier::Fp16);
+        match planner.plan(&["blk.0.attn_q", ""]).unwrap_err() {
+            HybridError::InvalidConfig(msg) => assert!(msg.contains("stage name"), "{msg}"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// grok-ozempic resolves `TensorClass::Default` by reading
+    /// `manifest.defaults.precision`. That manifest is out of this crate, so the
+    /// fallback is declared by the implementation instead.
+    #[test]
+    fn unmatched_stage_falls_back_to_default_tier() {
+        for tier in [
+            PrecisionTier::Preserve,
+            PrecisionTier::Fp16,
+            PrecisionTier::TernarySnn,
+        ] {
+            let planner = MockStagePlanner::new(tier);
+            let plan = planner.plan(&["blk.0.unknown_thing"]).unwrap();
+            assert_eq!(plan[0].tier, planner.default_tier());
+            assert_eq!(plan[0].tier, tier);
+        }
+    }
+
+    /// MoE-awareness is the point of the tier vocabulary: routing tensors plan at
+    /// `preserve`, never at `ternary_snn`, whatever the default is.
+    #[test]
+    fn moe_routing_stages_plan_at_preserve() {
+        let planner = MockStagePlanner::new(PrecisionTier::TernarySnn);
+        let plan = planner
+            .plan(&["blk.0.moe_gate", "blk.1.expert_router"])
+            .unwrap();
+        assert!(plan.iter().all(|op| op.tier == PrecisionTier::Preserve));
+    }
+
+    /// Tier and kind are independent axes: an already-ternary expert is a
+    /// pass-through, while a preserved tensor still needs a conversion. This is
+    /// the whole content of the research planner's `kernel_method` strings, minus
+    /// the kernel names.
+    #[test]
+    fn tier_and_kind_are_independent() {
+        let planner = MockStagePlanner::new(PrecisionTier::TernarySnn);
+        let plan = planner.plan(&["blk.0.expert.0", "blk.0.moe_gate"]).unwrap();
+        assert_eq!(plan[0].tier, PrecisionTier::TernarySnn);
+        assert_eq!(plan[0].kind, OperationKind::Passthrough);
+        assert_eq!(plan[1].tier, PrecisionTier::Preserve);
+        assert_eq!(plan[1].kind, OperationKind::Convert);
+    }
+
+    #[test]
+    fn plan_is_deterministic() {
+        let planner = MockStagePlanner::new(PrecisionTier::Fp16);
+        let stages = ["blk.0.attn_q", "blk.0.expert.3", "x"];
+        assert_eq!(
+            planner.plan(&stages).unwrap(),
+            planner.plan(&stages).unwrap()
+        );
+    }
+
+    #[test]
+    fn planned_operation_round_trips_through_json() {
+        let op = PlannedOperation {
+            stage: "blk.0.expert.0".into(),
+            tier: PrecisionTier::TernarySnn,
+            kind: OperationKind::Passthrough,
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(json.contains("\"ternary_snn\""), "{json}");
+        assert!(json.contains("\"passthrough\""), "{json}");
+        assert_eq!(serde_json::from_str::<PlannedOperation>(&json).unwrap(), op);
+    }
 }
