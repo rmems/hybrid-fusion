@@ -651,6 +651,17 @@ pub trait ExpertRouter {
 `ExpertRouteOutput` carries `expert_weights`, `selected_experts`, and optional
 `routing_entropy`. Embedding length is **not** fixed to 2048.
 
+**Weight normalization is enforced by the host.** `ReverseHybridPath::forward_activity`
+re-accumulates `expert_weights` in `f64` and requires the sum to be within
+`WEIGHT_SUM_TOLERANCE` (`8 * f32::EPSILON`, ~`9.54e-7`) of `1.0`. Inside that band
+the weights are renormalized in `f64`; outside it — or for an all-zero
+distribution — the call fails with `InvalidConfig` instead of silently rescaling.
+The bound is derived from the `f32` unit round-off and does **not** grow with the
+expert count, so **accumulate your softmax denominator in `f64`**: an `f32`
+denominator drifts by `O(num_experts * 2^-24)` (up to ~`4.8e-2` at
+`MAX_REASONABLE_EXPERTS`) and will be rejected at large expert counts. Return a
+normalized distribution (e.g. via `softmax`), not raw gate scores.
+
 **Reference stub** (feature `backends`): `StubExpertRouter` returns a uniform
 gate distribution and selects `0..top_k`.
 

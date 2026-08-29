@@ -66,12 +66,24 @@ pub fn softmax(scores: &[f32]) -> Vec<f32> {
         .iter()
         .map(|&score| (score - max_score).exp())
         .collect();
-    let sum_exp: f32 = exp_scores.iter().sum();
+    // The normalizer MUST be accumulated in f64. Naive f32 summation of `n`
+    // non-negative terms carries relative error up to `n * u` (u = 2^-24), and
+    // that error lands on the denominator, so it passes essentially undivided
+    // into the sum of the returned weights: at MAX_REASONABLE_EXPERTS the
+    // weights re-accumulate to 1 +/- ~1.5e-2 (worse for score shapes whose tail
+    // absorbs into the running sum, measured up to 4.8e-2). No downstream
+    // tolerance can tell that apart from a genuinely unnormalized distribution.
+    // In f64 the denominator is exact to ~n * 2^-53, leaving one f32 rounding
+    // per weight -- a bound independent of `n`.
+    let sum_exp: f64 = exp_scores.iter().map(|&v| f64::from(v)).sum();
     if sum_exp <= 0.0 || !sum_exp.is_finite() {
         let u = 1.0 / scores.len() as f32;
         return vec![u; scores.len()];
     }
-    exp_scores.into_iter().map(|v| v / sum_exp).collect()
+    exp_scores
+        .into_iter()
+        .map(|v| (f64::from(v) / sum_exp) as f32)
+        .collect()
 }
 
 /// Indices of the `top_k` largest weights (descending). NaN weights sort last.
@@ -168,6 +180,33 @@ mod tests {
         assert_eq!(w.len(), 3);
         assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-5);
         assert!(w[2] > w[1] && w[1] > w[0]);
+    }
+
+    /// Locks the invariant [`crate::ReverseHybridPath`] relies on: re-accumulating
+    /// the returned `f32` weights in `f64` stays within a couple of `f32`
+    /// roundings of `1.0` at **every** expert count and score shape.
+    ///
+    /// The adversarial shape is two-level -- a small head at the max and a long
+    /// tail just small enough that its terms absorb into a running `f32` sum.
+    /// With an `f32` denominator this drifts to ~4.8e-2 at
+    /// [`MAX_REASONABLE_EXPERTS`]; with the `f64` denominator it stays under `2u`.
+    #[test]
+    fn softmax_sum_stays_within_f32_roundoff_at_every_scale() {
+        const U: f64 = 5.960_464_477_539_063e-8; // f32::EPSILON / 2
+        for n in [1_000usize, 100_000, MAX_REASONABLE_EXPERTS] {
+            let hi = (n / 50).max(1); // 2% head: the measured worst case
+            let m = -((hi as f64 * U).ln()) as f32;
+            let mut scores = vec![-m; n];
+            for s in scores.iter_mut().take(hi) {
+                *s = 0.0;
+            }
+            let sum: f64 = softmax(&scores).iter().map(|&w| f64::from(w)).sum();
+            assert!(
+                (sum - 1.0).abs() <= 2.0 * U,
+                "n={n}: f64-re-accumulated softmax sum {sum} drifts {:e} (> 2u)",
+                (sum - 1.0).abs()
+            );
+        }
     }
 
     #[test]

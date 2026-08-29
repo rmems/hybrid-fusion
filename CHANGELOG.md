@@ -20,6 +20,16 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 ### Changed
 
 - **`HybridOutput` gains** optional `expert_weights`, `selected_experts`, `routing_entropy` (struct-literal / exhaustive matches must be updated). ANN→SNN `forward` sets them to `None` (#22).
+- **`routing::softmax` accumulates its denominator in `f64`** (was `f32`). Returned
+  weights now re-accumulate to `1.0` within one `f32` rounding at every expert
+  count; previously they drifted by `O(n * 2^-24)` — up to `4.8e-2` at
+  `MAX_REASONABLE_EXPERTS`. Weight *values* shift by at most one ULP (#23).
+- **`ExpertRouteOutput` weight normalization is now enforced**: `ReverseHybridPath::forward_activity`
+  rejects an `expert_weights` sum deviating from `1.0` by more than the new public
+  `WEIGHT_SUM_TOLERANCE` (`8 * f32::EPSILON`) with `HybridError::InvalidConfig`;
+  sums inside it are renormalized in `f64`. `ExpertRouter` implementors returning
+  raw or partially normalized gate scores must normalize them, accumulating the
+  denominator in `f64` (#23).
 - Bump crate version `0.2.0` → `0.3.0` for the architecture-contracts milestone.
 - Post-transfer hygiene: package `repository`, README CI badge, and docs now point at `rmems/hybrid-fusion` (#28).
 - README sibling-crate links and ownership split clarified (pure MoE math in hybrid-fusion; tensor math in cortex-tensor; parse/mmap in engram-parser; dynamics in neuromod; runtime in brainstem-daemon).

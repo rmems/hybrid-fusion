@@ -15,7 +15,7 @@ pub mod types;
 pub use error::{HybridError, Result};
 pub use hybrid::HybridNetwork;
 pub use projector::{project_spike_activity, spike_activity_features};
-pub use reverse::ReverseHybridPath;
+pub use reverse::{ReverseHybridPath, WEIGHT_SUM_TOLERANCE};
 pub use routing::{
     MAX_REASONABLE_EXPERTS, route_synthetic, routing_entropy, softmax, synthetic_gate_scores,
     top_k_indices,

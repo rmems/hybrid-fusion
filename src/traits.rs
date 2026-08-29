@@ -98,9 +98,30 @@ impl SpikeActivity {
 /// On a successful [`ExpertRouter::route`] call, backends should satisfy:
 /// - `expert_weights.len() == num_experts()`
 /// - every weight is finite and `>= 0`
-/// - weights sum to approximately `1.0` (normalized gate distribution)
+/// - weights sum to `1.0` within the tolerance below (normalized gate distribution)
 /// - `selected_experts.len() == top_k()`
 /// - selected indices are distinct and each `< num_experts()`
+///
+/// # Weight normalization tolerance
+///
+/// "Sums to approximately `1.0`" is an **enforced contract, not advice**.
+/// [`ReverseHybridPath::forward_activity`](crate::ReverseHybridPath::forward_activity)
+/// re-accumulates `expert_weights` in `f64` and requires the sum to be within
+/// [`WEIGHT_SUM_TOLERANCE`](crate::WEIGHT_SUM_TOLERANCE) (`8 * f32::EPSILON`,
+/// ~`9.54e-7`) of `1.0`. That bound is derived from the `f32` unit round-off and
+/// is **independent of `num_experts()`**.
+///
+/// A sum inside the tolerance is renormalized in `f64` before it reaches
+/// [`HybridOutput`](crate::HybridOutput). A sum outside it is **rejected** with
+/// [`HybridError::InvalidConfig`](crate::HybridError::InvalidConfig); it is never
+/// silently rescaled. Return a normalized distribution (e.g. via
+/// [`softmax`](crate::softmax)), not raw gate scores: `f32` drift is tolerated, a
+/// sum such as `0.9` or `2.0` is an error.
+///
+/// Accumulate your normalizer in `f64`. An `f32` denominator drifts by
+/// `O(num_experts * 2^-24)` — up to ~`4.8e-2` at
+/// [`MAX_REASONABLE_EXPERTS`](crate::MAX_REASONABLE_EXPERTS) — and will be
+/// rejected at large expert counts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExpertRouteOutput {
     /// Full gate distribution over experts (`len == num_experts`, sum ≈ 1).
@@ -123,7 +144,11 @@ pub struct ExpertRouteOutput {
 /// - Embedding length is **not** fixed to a research constant (corinth uses 2048);
 ///   backends validate dimensions they care about. Empty embeddings must error.
 /// - Successful [`route`](Self::route) results follow [`ExpertRouteOutput`] invariants
-///   (normalized weights, valid top-k selection).
+///   (normalized weights, valid top-k selection). Hosts enforce them: an
+///   `expert_weights` sum outside
+///   [`WEIGHT_SUM_TOLERANCE`](crate::WEIGHT_SUM_TOLERANCE) fails with
+///   [`HybridError::InvalidConfig`](crate::HybridError::InvalidConfig) rather than
+///   being silently renormalized.
 pub trait ExpertRouter {
     /// Number of experts considered by this router (`> 0`).
     fn num_experts(&self) -> usize;

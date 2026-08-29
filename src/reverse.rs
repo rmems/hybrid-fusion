@@ -11,6 +11,34 @@ use crate::projector::project_spike_activity;
 use crate::traits::{ExpertRouter, SpikeActivity};
 use crate::types::{HybridOutput, ProjectionMode};
 
+/// Maximum accepted deviation of a router's `expert_weights` sum from `1.0`.
+///
+/// # Derivation (not a tuned constant)
+///
+/// A gate distribution emitted as `f32` cannot re-accumulate to exactly `1.0`:
+/// each weight carries at most one `f32` rounding, so re-summing them in `f64`
+/// differs from the router's own normalizer by at most
+///
+/// ```text
+/// sum_i |w_i| * u  =  1 * u  =  2^-24  ~=  5.96e-8      (u = f32::EPSILON / 2)
+/// ```
+///
+/// plus at most `n * 2^-53 ~= 1.1e-10` for re-accumulating
+/// `n <= MAX_REASONABLE_EXPERTS` terms in `f64`. Total: `< 5.97e-8`.
+///
+/// **The bound does not depend on the expert count.** It is a property of the
+/// `f32` weight format, not of `n` -- provided the router builds its normalizer
+/// in `f64`, as [`crate::routing::softmax`] does. A router that accumulates an
+/// `f32` denominator instead drifts by `O(n * u)` (measured up to `4.8e-2` at
+/// [`MAX_REASONABLE_EXPERTS`](crate::routing::MAX_REASONABLE_EXPERTS)), which is
+/// larger than any error a caller can absorb; that is a bug to fix in the
+/// router, not a tolerance to widen.
+///
+/// `8 * f32::EPSILON` leaves ~16x headroom over the `5.97e-8` bound while still
+/// rejecting every materially unnormalized distribution (e.g. `[2.0, 0.0]`, or a
+/// sum of `0.991`) by three or more orders of magnitude.
+pub const WEIGHT_SUM_TOLERANCE: f64 = 8.0 * f32::EPSILON as f64; // ~= 9.54e-7
+
 /// Reverse-path host: SNN activity → embedding → MoE route.
 ///
 /// Extracted from corinth-canal `Model` (`projector` + `router` half of
@@ -91,7 +119,12 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
     /// Semantics match corinth-canal `Model::forward_activity` (projector + router half):
     /// 1. `embedding = project_spike_activity(...)`
     /// 2. `route = router.route(&embedding)` — **no Sentry capture** on reverse v1
-    /// 3. Validate `ExpertRouteOutput` invariants
+    /// 3. Validate [`ExpertRouteOutput`](crate::ExpertRouteOutput) invariants,
+    ///    including that `expert_weights` sums to `1.0` within
+    ///    [`WEIGHT_SUM_TOLERANCE`]; accepted weights are renormalized in `f64`,
+    ///    a sum outside the tolerance is an
+    ///    [`InvalidConfig`](crate::HybridError::InvalidConfig) error rather than
+    ///    a silent rescale
     /// 4. `global_step = saturating_add(1)` only after projection/routing succeed
     /// 5. Build `HybridOutput` (empty `stimuli`; `fired_neurons` = last non-empty spike step)
     pub fn forward_activity(&mut self, activity: &SpikeActivity) -> Result<HybridOutput> {
@@ -129,34 +162,37 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
                 "ReverseHybridPath: expert_weights contain non-finite or negative values".into(),
             ));
         }
-        // f32 softmax/accumulation can drift for large expert counts, so
-        // renormalize in f64 before populating HybridOutput, but only within a
-        // scale-aware tolerance. This accepts normal f32 drift for routers up to
-        // MAX_REASONABLE_EXPERTS while rejecting materially unnormalized weights.
-        let weights_sum: f64 = route.expert_weights.iter().map(|&w| w as f64).sum();
-        if !weights_sum.is_finite() || weights_sum <= 0.0 {
+        // A conforming router returns weights that re-accumulate to 1.0 within
+        // WEIGHT_SUM_TOLERANCE regardless of expert count (see its derivation).
+        // Accepted weights are still renormalized in f64 so the emitted vector
+        // is exact wherever in the band the router landed.
+        let weights_sum: f64 = route.expert_weights.iter().map(|&w| f64::from(w)).sum();
+        // Every weight is already known finite and >= 0, so the f64 sum can be
+        // neither non-finite nor negative (even usize::MAX terms of f32::MAX sum
+        // to 6.3e57, far inside f64 range). The one degenerate case left is an
+        // all-zero distribution; name it rather than letting it fall through to
+        // the tolerance message below.
+        if weights_sum == 0.0 {
             return Err(HybridError::InvalidConfig(
-                "ReverseHybridPath: expert_weights sum is non-finite or non-positive".into(),
+                "ReverseHybridPath: expert_weights are all zero".into(),
             ));
         }
-        let tolerance = (n_experts as f64 * 1.5e-8).clamp(1e-5, 1e-2);
-        if (weights_sum - 1.0).abs() > tolerance {
+        if (weights_sum - 1.0).abs() > WEIGHT_SUM_TOLERANCE {
             return Err(HybridError::InvalidConfig(format!(
-                "ReverseHybridPath: expert_weights sum {weights_sum} is outside tolerance {tolerance}"
+                "ReverseHybridPath: expert_weights sum {weights_sum} is outside tolerance \
+                 {WEIGHT_SUM_TOLERANCE} of 1.0; routers with many experts must accumulate \
+                 their softmax denominator in f64 (see ExpertRouteOutput docs)"
             )));
         }
+        // No post-check on the renormalized sum: by the bound above it is within
+        // ~5.97e-8 of 1.0 by construction, so any threshold loose enough to be
+        // meaningful would be unreachable.
         let scale = 1.0 / weights_sum;
         let expert_weights: Vec<f32> = route
             .expert_weights
             .iter()
-            .map(|&w| (w as f64 * scale) as f32)
+            .map(|&w| (f64::from(w) * scale) as f32)
             .collect();
-        let renorm_sum: f64 = expert_weights.iter().map(|&w| w as f64).sum();
-        if (renorm_sum - 1.0).abs() > 1e-4 {
-            return Err(HybridError::InvalidConfig(format!(
-                "ReverseHybridPath: renormalized expert_weights sum {renorm_sum} is not within 1e-4 of 1.0"
-            )));
-        }
         if route.selected_experts.len() != top_k {
             return Err(HybridError::InvalidConfig(format!(
                 "ReverseHybridPath: selected_experts.len() ({}) != top_k ({top_k})",
@@ -255,6 +291,39 @@ mod tests {
         }
     }
 
+    /// Router returning a caller-supplied weight vector verbatim, so tests can
+    /// pin the [`WEIGHT_SUM_TOLERANCE`] boundary. `selected_experts` is the first
+    /// `top_k` indices, which always satisfies the selection checks that follow.
+    #[derive(Debug)]
+    struct FixedWeightsRouter {
+        weights: Vec<f32>,
+        top_k: usize,
+    }
+
+    impl FixedWeightsRouter {
+        fn new(weights: Vec<f32>, top_k: usize) -> Self {
+            Self { weights, top_k }
+        }
+    }
+
+    impl ExpertRouter for FixedWeightsRouter {
+        fn num_experts(&self) -> usize {
+            self.weights.len()
+        }
+
+        fn top_k(&self) -> usize {
+            self.top_k
+        }
+
+        fn route(&mut self, _embedding: &[f32]) -> Result<ExpertRouteOutput> {
+            Ok(ExpertRouteOutput {
+                expert_weights: self.weights.clone(),
+                selected_experts: (0..self.top_k).collect(),
+                routing_entropy: Some(0.25),
+            })
+        }
+    }
+
     /// Router that advertises `top_k() == 0` to test the explicit zero guard.
     #[derive(Debug)]
     struct ZeroTopKRouter;
@@ -348,6 +417,105 @@ mod tests {
         let selected = out.selected_experts.expect("selected");
         assert_eq!(selected.len(), 2);
         assert!(out.routing_entropy.is_some());
+    }
+
+    /// Drives the rejection branch from both directions and pins the documented
+    /// step semantics: a rejected route must not consume a `global_step`.
+    #[test]
+    fn forward_activity_rejects_weights_outside_tolerance() {
+        let act = SpikeActivity::from_fired(&[0], 4).unwrap();
+
+        for (weights, label) in [
+            (vec![2.0_f32, 0.0], "sum far above 1.0"),
+            (vec![0.25_f32, 0.25], "sum far below 1.0"),
+        ] {
+            let mut path = ReverseHybridPath::new(
+                ProjectionMode::RateSum,
+                4,
+                8,
+                FixedWeightsRouter::new(weights, 1),
+            )
+            .unwrap();
+            match path.forward_activity(&act).unwrap_err() {
+                HybridError::InvalidConfig(msg) => {
+                    assert!(msg.contains("outside tolerance"), "{label}: {msg}")
+                }
+                other => panic!("{label}: unexpected {other:?}"),
+            }
+            // Step 4 of `forward_activity` bumps the counter only after every
+            // route invariant holds, so a rejected route leaves it at 0.
+            assert_eq!(path.global_step(), 0, "{label}");
+        }
+    }
+
+    /// An all-zero distribution gets its own diagnosis rather than falling
+    /// through to the tolerance message.
+    #[test]
+    fn forward_activity_rejects_all_zero_weights() {
+        let mut path = ReverseHybridPath::new(
+            ProjectionMode::RateSum,
+            4,
+            8,
+            FixedWeightsRouter::new(vec![0.0, 0.0], 1),
+        )
+        .unwrap();
+        let act = SpikeActivity::from_fired(&[0], 4).unwrap();
+        match path.forward_activity(&act).unwrap_err() {
+            HybridError::InvalidConfig(msg) => assert!(msg.contains("all zero"), "{msg}"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(path.global_step(), 0);
+    }
+
+    /// The accept side: ordinary `f32` drift (three thirds sum to 1 + ~3e-8)
+    /// must pass. This deviation is below what `tests/reverse_path.rs` already
+    /// requires accepting, so it holds under any sane tolerance.
+    #[test]
+    fn forward_activity_accepts_normal_f32_drift() {
+        let w = 1.0_f32 / 3.0;
+        let mut path = ReverseHybridPath::new(
+            ProjectionMode::RateSum,
+            4,
+            8,
+            FixedWeightsRouter::new(vec![w, w, w], 2),
+        )
+        .unwrap();
+        let act = SpikeActivity::from_fired(&[0], 4).unwrap();
+        let out = path.forward_activity(&act).unwrap();
+
+        let weights = out.expert_weights.expect("MoE weights");
+        let sum: f64 = weights.iter().map(|&x| f64::from(x)).sum();
+        assert!(
+            (sum - 1.0).abs() <= WEIGHT_SUM_TOLERANCE,
+            "renormalized sum {sum}"
+        );
+        assert_eq!(path.global_step(), 1);
+    }
+
+    /// Renormalization is observable: a sum inside the tolerance but several
+    /// `f32` ULPs off 1.0 comes back rescaled, not passed through.
+    #[test]
+    fn forward_activity_renormalizes_weights_inside_tolerance() {
+        // sum = 1.0 + ~5e-7: inside WEIGHT_SUM_TOLERANCE (9.54e-7) yet ~8 ULPs
+        // of 0.5, so the rescale changes the emitted weights.
+        let mut path = ReverseHybridPath::new(
+            ProjectionMode::RateSum,
+            4,
+            8,
+            FixedWeightsRouter::new(vec![0.5, 0.500_000_5], 2),
+        )
+        .unwrap();
+        let act = SpikeActivity::from_fired(&[0], 4).unwrap();
+        let out = path.forward_activity(&act).unwrap();
+
+        let weights = out.expert_weights.expect("MoE weights");
+        assert!(weights[0] < 0.5, "weights not renormalized: {weights:?}");
+        let sum: f64 = weights.iter().map(|&x| f64::from(x)).sum();
+        assert!(
+            (sum - 1.0).abs() <= WEIGHT_SUM_TOLERANCE,
+            "renormalized sum {sum}"
+        );
+        assert_eq!(path.global_step(), 1);
     }
 
     #[test]
