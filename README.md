@@ -40,6 +40,8 @@ This crate **owns**:
 - Pure MoE routing math (top-k, normalize, synthetic gate scores) in `routing`
   ([#26](https://github.com/rmems/hybrid-fusion/issues/26)); not tensor matmul
   against checkpoint weights.
+- Reverse-path orchestration (`ReverseHybridPath`): SNN activity → embedding → MoE route
+  ([#23](https://github.com/rmems/hybrid-fusion/issues/23)).
 
 This crate **does not own**:
 
@@ -73,6 +75,7 @@ use hybrid_fusion::Result;
 | Item | Purpose |
 |------|---------|
 | `HybridNetwork<T, S>` | Generic orchestrator over any `Transformer` + `SpikingNetwork`. |
+| `ReverseHybridPath<R>` | Reverse-path host: activity → project → `ExpertRouter` → MoE fields. |
 | `Transformer` trait | Backend-agnostic transformer interface. |
 | `SpikingNetwork` trait | Backend-agnostic SNN interface. |
 | `ExpertRouter` trait | MoE routing: embedding → expert weights / selection. |
