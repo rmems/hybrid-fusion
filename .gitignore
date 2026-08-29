@@ -32,3 +32,6 @@ Thumbs.db
 .cursor/
 .codex/
 .beads/
+
+# Superpowers / agent worktrees
+.worktrees/

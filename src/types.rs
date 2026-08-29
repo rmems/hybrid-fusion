@@ -98,9 +98,26 @@ pub struct HybridOutput {
     pub fired_neurons: Vec<usize>,
     pub global_step: u64,
     /// MoE gate weights when reverse-path routing ran; `None` on ANN→SNN only.
+    ///
+    /// Dense when `Some`: one entry per expert (`len == num_experts`, sum ≈ 1).
+    ///
+    /// Sourced from [`crate::ExpertRouteOutput`] but **renormalized, not carried
+    /// through verbatim**: [`ReverseHybridPath::forward_activity`](crate::ReverseHybridPath::forward_activity)
+    /// rejects a router weight sum outside [`crate::WEIGHT_SUM_TOLERANCE`], then
+    /// rescales the accepted weights by `1 / sum` in `f64`. The rescale is exactly
+    /// a no-op when the router already sums to `1.0`; otherwise each weight moves
+    /// by a relative amount on the order of that tolerance.
+    /// [`routing_entropy`](Self::routing_entropy) is **not** recomputed, so it
+    /// still describes the router's pre-rescale distribution.
     pub expert_weights: Option<Vec<f32>>,
     /// Selected expert indices when reverse-path routing ran; `None` otherwise.
+    ///
+    /// Sparse when `Some`: only the top-k indices (`len == top_k`, each
+    /// `< num_experts`) — not aligned element-wise with `expert_weights`.
     pub selected_experts: Option<Vec<usize>>,
     /// Optional routing entropy telemetry from an `ExpertRouter`.
+    ///
+    /// Passed through exactly as the router reported it; it is **not** recomputed
+    /// after [`expert_weights`](Self::expert_weights) renormalization.
     pub routing_entropy: Option<f32>,
 }

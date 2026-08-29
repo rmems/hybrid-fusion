@@ -73,8 +73,8 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
             stimuli,
             fired_neurons,
             global_step: self.global_step,
-            // Reverse-path MoE fields stay unset on the ANN→SNN forward pass
-            // (see ExpertRouter / SpikeActivity; full reverse orchestration is later).
+            // Reverse-path MoE fields stay unset on the ANN→SNN forward pass.
+            // Use ReverseHybridPath::forward_activity for activity → MoE.
             expert_weights: None,
             selected_experts: None,
             routing_entropy: None,

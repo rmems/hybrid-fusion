@@ -41,6 +41,7 @@ implementations live here.
 - The public `HybridNetwork<T, S>` API and its error boundaries
 - Projector logic (dimensionality reduction from transformer hidden space to SNN input channels)
 - Configuration and output types (`HybridConfig`, `TransformerConfig`, `HybridOutput`)
+- Reverse-path host `ReverseHybridPath` (activity → embedding → ExpertRouter)
 
 ### This crate does not own
 
@@ -68,6 +69,9 @@ Core traits / types on the pluggable surface:
 - **`ExpertRouter`** + **`SpikeActivity`** — reverse-path MoE routing contract (embedding → expert weights / selection). Pure math lives in `src/routing.rs`; checkpoint backends stay outside this crate.
 
 `HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits; `GgufLoader` / `ExpertRouter` are consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above.
+
+`ReverseHybridPath<R: ExpertRouter>` is the dual reverse-path host (SNN activity →
+project → MoE); do not fold it into `HybridNetwork` generics.
 
 ## Sibling crates
 
