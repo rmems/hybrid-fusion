@@ -1,0 +1,39 @@
+README.md
+  s_45cc4242154178::t_4ba33f6c386da8 45-47,59-60,90-92
+src/lib.rs
+  s_45cc4242154178::t_61c0bf5cf2af48 28
+  s_45cc4242154178::t_c7efa2be8dd545 25-26
+REVIEW.md
+  s_45cc4242154178::t_4ba33f6c386da8 23-24,29-30
+AGENTS.md
+  s_45cc4242154178::t_4ba33f6c386da8 45-46,72,74
+CHANGELOG.md
+  s_45cc4242154178::t_4ba33f6c386da8 19-22
+src/types.rs
+  s_45cc4242154178::t_47f249b3193707 26-60,159-201
+tests/stage_planner.rs
+  s_45cc4242154178::t_f16ba84547a868 1-98
+docs/implementing-backends.md
+  s_45cc4242154178::t_4ba33f6c386da8 25,604
+  s_45cc4242154178::t_ed216e1488de34 749-846
+src/traits.rs
+  s_45cc4242154178::t_975b0b92d25930 241-396
+  s_45cc4242154178::t_c72c4816f2a3be 5
+  s_45cc4242154178::t_3f8a65ef6d8068 163-240
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "86b06b83cd145b6b041de23933e44c302e67ed11",
+  "prompts": {},
+  "sessions": {
+    "s_45cc4242154178": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ea897af6-09f5-4016-bc06-7c2b44782c39",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Raul Montoya Cardenas <montoyaraul34@gmail.com>"
+    }
+  }
+}
