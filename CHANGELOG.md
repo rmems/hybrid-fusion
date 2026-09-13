@@ -34,6 +34,10 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - Post-transfer hygiene: package `repository`, README CI badge, and docs now point at `rmems/hybrid-fusion` (#28).
 - README sibling-crate links and ownership split clarified (pure MoE math in hybrid-fusion; tensor math in cortex-tensor; parse/mmap in engram-parser; dynamics in neuromod; runtime in brainstem-daemon).
 
+### Removed
+
+- Qodana Cloud scan (`qodana-rust` + `QODANA_TOKEN`) after JetBrains membership expired (#35).
+
 ## [0.2.0] - 2026-07-10
 
 First tagged release (`v0.2.0` → commit `796ca41`).
