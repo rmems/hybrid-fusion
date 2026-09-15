@@ -10,6 +10,9 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- Structured forward-path contract errors: `HiddenStateRank`, `HiddenStateSeqLen`,
+  `HiddenStateDim`, `HiddenStateDataLen`, `NonFinite { stage, index }` (with
+  `ForwardValueStage`), and `ZeroSnnChannels` (RM-1356).
 - `docs/extraction-map.md` — maps extractable LLM/SNN/MoE architecture from corinth-canal and grok-ozempic into hybrid-fusion traits vs sibling crates (#21).
 - Reverse-path contracts: `SpikeActivity`, `ExpertRouter`, `ExpertRouteOutput`; MoE fields on `HybridOutput`; `StubExpertRouter` under `backends` (#22).
 - `ProjectionMode` + pure `project_spike_activity` / `spike_activity_features` (SNN→embedding for MoE; no learned W/b, no SAAQ) (#25).
@@ -19,6 +22,11 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Changed
 
+- **`HybridNetwork::forward` preflights transformer hidden-state rank, sequence
+  length, dimension, backing length, and finiteness**, and rejects a zero-channel
+  SNN, before pooling or `snn.step`. Rank 2 `[seq, dim]` remains canonical; rank 1
+  `[dim]` stays an explicit pre-pooled layout. Contract errors do not increment
+  `global_step` and are not reported to Sentry (RM-1356).
 - **`HybridOutput` gains** optional `expert_weights`, `selected_experts`, `routing_entropy` (struct-literal / exhaustive matches must be updated). ANN→SNN `forward` sets them to `None` (#22).
 - **`routing::softmax` accumulates its denominator in `f64`** (was `f32`). Returned
   weights now re-accumulate to `1.0` within one `f32` rounding at every expert
