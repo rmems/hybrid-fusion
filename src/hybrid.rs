@@ -357,7 +357,6 @@ mod tests {
     #[test]
     fn preflight_rejects_rank3_without_stepping() {
         let (dim, channels) = tiny_dims();
-        let seq = 2;
         let mut net = scripted_net(Tensor::from_vec(vec![0.0; 8], &[2, 2, 2]), dim, channels);
         match net.forward(&[1, 2], None).unwrap_err() {
             HybridError::HiddenStateRank { got: 3 } => {}
