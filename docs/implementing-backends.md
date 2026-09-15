@@ -57,6 +57,9 @@ Returns the model's hidden-state representation for the given token sequence.
   `dim`); mismatches return `HybridError::HiddenStateDataLen`.
 - Every value must be finite (no NaN or ±Inf); otherwise
   `HybridError::NonFinite { stage: HiddenState, … }`.
+- `dim()` must be `> 0`. A zero hidden dimension is rejected as
+  `HiddenStateDim { expected: 1, got: 0 }` before pooling or `step`, even
+  if a deserialized tensor uses a matching zero-extent axis.
 - All shape dimensions must be `> 0`. `Tensor::from_vec` panics on zero-dim
   shapes.
 

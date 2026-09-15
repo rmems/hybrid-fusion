@@ -21,8 +21,15 @@ pub(crate) fn validate_snn_width(snn_width: usize) -> Result<()> {
 /// Validate transformer hidden-state rank, axes, storage length, and finiteness.
 ///
 /// `seq_len` is `token_ids.len()` (already known non-empty by the caller).
-/// `dim` is [`crate::Transformer::dim`].
+/// `dim` is [`crate::Transformer::dim`] and must be `> 0` (same floor as
+/// empty `token_ids` → [`HybridError::InputLengthMismatch`] `{ expected: 1, got: 0 }`).
 pub(crate) fn validate_hidden_state(hidden: &Tensor, seq_len: usize, dim: usize) -> Result<()> {
+    if dim == 0 {
+        return Err(HybridError::HiddenStateDim {
+            expected: 1,
+            got: 0,
+        });
+    }
     match hidden.ndim() {
         1 => validate_rank1(hidden, dim),
         2 => validate_rank2(hidden, seq_len, dim),
@@ -216,6 +223,20 @@ mod tests {
             HybridError::NonFinite {
                 stage: ForwardValueStage::HiddenState,
                 index: 5,
+            } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_zero_transformer_dim() {
+        // `Tensor::from_vec` panics on a zero-extent axis; serde can still
+        // materialize shape `[0]` that agrees with `dim() == 0`.
+        let t = deserialize_tensor(vec![], vec![0]);
+        match validate_hidden_state(&t, SEQ, 0).unwrap_err() {
+            HybridError::HiddenStateDim {
+                expected: 1,
+                got: 0,
             } => {}
             other => panic!("unexpected {other:?}"),
         }

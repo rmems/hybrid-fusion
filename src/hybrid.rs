@@ -488,6 +488,21 @@ mod tests {
     }
 
     #[test]
+    fn preflight_rejects_zero_transformer_dim_without_stepping() {
+        let (_, channels) = tiny_dims();
+        let hidden = tensor_parts(vec![], vec![0]);
+        let mut net = scripted_net(hidden, 0, channels);
+        match net.forward(&[1, 2], None).unwrap_err() {
+            HybridError::HiddenStateDim {
+                expected: 1,
+                got: 0,
+            } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_preflight_frozen(&net);
+    }
+
+    #[test]
     fn valid_rank2_preserves_pooled_embedding_and_steps_once() {
         let (dim, channels) = tiny_dims();
         let seq = 4;
