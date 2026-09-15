@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     let snn = DemoSnn {
         channels: cfg.snn_input_channels,
     };
-    let mut net = HybridNetwork::new(transformer, snn, cfg);
+    let mut net = HybridNetwork::try_new(transformer, snn, cfg)?;
 
     let token_ids: Vec<u32> = vec![1, 2, 3, 4];
     let out = net.forward(&token_ids, None)?;

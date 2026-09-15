@@ -58,7 +58,7 @@ fn main() -> hybrid_fusion::Result<()> {
     let snn = DemoSnn {
         channels: cfg.snn_input_channels,
     };
-    let mut net = HybridNetwork::new(transformer, snn, cfg);
+    let mut net = HybridNetwork::try_new(transformer, snn, cfg)?;
     println!(
         "HybridNetwork ready | transformer params ~ {} | snn channels = {}",
         net.transformer.param_count(),

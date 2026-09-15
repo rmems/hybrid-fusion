@@ -10,6 +10,13 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- `HybridNetwork::try_new` validates transformer dim, max sequence length, and
+  SNN input channels against backend-reported capabilities before the first
+  forward call (Linear [RM-1357](https://linear.app/rpd-34/issue/RM-1357)).
+- `HybridError::ConfigMismatch { field, configured, backend }` names the
+  disagreeing construction field plus both values. Zero capacities use the
+  same variant (`configured` and/or `backend` is `0`).
+
 - `docs/extraction-map.md` — maps extractable LLM/SNN/MoE architecture from corinth-canal and grok-ozempic into hybrid-fusion traits vs sibling crates (#21).
 - Reverse-path contracts: `SpikeActivity`, `ExpertRouter`, `ExpertRouteOutput`; MoE fields on `HybridOutput`; `StubExpertRouter` under `backends` (#22).
 - `ProjectionMode` + pure `project_spike_activity` / `spike_activity_features` (SNN→embedding for MoE; no learned W/b, no SAAQ) (#25).
@@ -18,6 +25,11 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   (`tests/reverse_path.rs`); dual host alongside `HybridNetwork` (#23).
 
 ### Changed
+
+- Docs and examples prefer `HybridNetwork::try_new`. `HybridNetwork::new`
+  remains an unvalidated pre-1.0 compatibility wrapper and does not panic
+  (Linear [RM-1357](https://linear.app/rpd-34/issue/RM-1357)).
+- **`HybridError` gains** `ConfigMismatch` (exhaustive matches must be updated).
 
 - **`HybridOutput` gains** optional `expert_weights`, `selected_experts`, `routing_entropy` (struct-literal / exhaustive matches must be updated). ANN→SNN `forward` sets them to `None` (#22).
 - **`routing::softmax` accumulates its denominator in `f64`** (was `f32`). Returned

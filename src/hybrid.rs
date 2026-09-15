@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! ANN → SNN forward-path host: transformer hidden states → bounded SNN stimuli.
+
 use crate::error::{HybridError, Result};
 use crate::projector;
 use crate::telemetry;
@@ -7,6 +9,12 @@ use crate::tensor::Tensor;
 use crate::traits::{NeuroModulators, SpikingNetwork, Transformer};
 use crate::types::{HybridConfig, HybridOutput};
 
+/// Generic orchestrator over any [`Transformer`] + [`SpikingNetwork`].
+///
+/// Prefer [`Self::try_new`] so transformer dimensions, maximum sequence length,
+/// and SNN input width are checked against the injected backends before the
+/// first [`Self::forward`] call. [`Self::new`] remains as an unvalidated
+/// pre-1.0 compatibility constructor.
 pub struct HybridNetwork<T: Transformer, S: SpikingNetwork> {
     pub transformer: T,
     pub snn: S,
@@ -15,6 +23,14 @@ pub struct HybridNetwork<T: Transformer, S: SpikingNetwork> {
 }
 
 impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
+    /// Construct without validating `config` against backend capabilities.
+    ///
+    /// Prefer [`Self::try_new`], which rejects zero or disagreeing transformer
+    /// dimensions, maximum sequence lengths, and SNN channel counts.
+    ///
+    /// This infallible constructor is retained as a pre-1.0 compatibility path
+    /// so existing callers keep compiling without handling [`Result`]. It does
+    /// not call [`Transformer::hidden_states`] or [`SpikingNetwork::step`].
     pub fn new(transformer: T, snn: S, config: HybridConfig) -> Self {
         Self {
             transformer,
@@ -22,6 +38,84 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
             config,
             global_step: 0,
         }
+    }
+
+    /// Construct after proving `config` agrees with backend-reported capabilities.
+    ///
+    /// Validates, without running inference or mutating either backend:
+    /// - `config.transformer.dim` against [`Transformer::dim`]
+    /// - `config.transformer.max_seq_len` against [`Transformer::max_seq_len`]
+    /// - `config.snn_input_channels` against [`SpikingNetwork::num_channels`]
+    ///
+    /// Each check requires both sides to be non-zero and equal. Failures return
+    /// [`HybridError::ConfigMismatch`] naming the field plus configured vs
+    /// backend values. The fields are
+    /// [`HybridError::FIELD_TRANSFORMER_DIM`],
+    /// [`HybridError::FIELD_TRANSFORMER_MAX_SEQ_LEN`], and
+    /// [`HybridError::FIELD_SNN_INPUT_CHANNELS`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hybrid_fusion::{
+    ///     HybridConfig, HybridNetwork, NeuroModulators, Result, SpikingNetwork, Tensor,
+    ///     Transformer,
+    /// };
+    ///
+    /// struct TinyTransformer {
+    ///     dim: usize,
+    ///     max_seq_len: usize,
+    /// }
+    ///
+    /// impl Transformer for TinyTransformer {
+    ///     fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    ///         let seq = token_ids.len();
+    ///         Tensor::from_vec(vec![0.1; seq * self.dim], &[seq, self.dim])
+    ///     }
+    ///     fn dim(&self) -> usize {
+    ///         self.dim
+    ///     }
+    ///     fn max_seq_len(&self) -> usize {
+    ///         self.max_seq_len
+    ///     }
+    ///     fn param_count(&self) -> usize {
+    ///         0
+    ///     }
+    /// }
+    ///
+    /// struct TinySnn {
+    ///     channels: usize,
+    /// }
+    ///
+    /// impl SpikingNetwork for TinySnn {
+    ///     fn step(
+    ///         &mut self,
+    ///         _stimuli: &[f32],
+    ///         _modulators: &NeuroModulators,
+    ///     ) -> Result<Vec<usize>> {
+    ///         Ok(Vec::new())
+    ///     }
+    ///     fn num_channels(&self) -> usize {
+    ///         self.channels
+    ///     }
+    /// }
+    ///
+    /// let config = HybridConfig::tiny();
+    /// let transformer = TinyTransformer {
+    ///     dim: config.transformer.dim,
+    ///     max_seq_len: config.transformer.max_seq_len,
+    /// };
+    /// let snn = TinySnn {
+    ///     channels: config.snn_input_channels,
+    /// };
+    /// let mut net = HybridNetwork::try_new(transformer, snn, config)?;
+    /// let out = net.forward(&[1u32, 2, 3, 4], None)?;
+    /// assert_eq!(out.embedding.len(), 128);
+    /// # Ok::<(), hybrid_fusion::HybridError>(())
+    /// ```
+    pub fn try_new(transformer: T, snn: S, config: HybridConfig) -> Result<Self> {
+        validate_construction(&transformer, &snn, &config)?;
+        Ok(Self::new(transformer, snn, config))
     }
 
     pub fn forward(
@@ -92,6 +186,41 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     pub fn reset(&mut self) {
         self.global_step = 0;
     }
+}
+
+/// Compare `config` against trait-reported backend sizes. Reads only
+/// [`Transformer::dim`], [`Transformer::max_seq_len`], and
+/// [`SpikingNetwork::num_channels`] — never hidden states or an SNN step.
+fn validate_construction<T: Transformer, S: SpikingNetwork>(
+    transformer: &T,
+    snn: &S,
+    config: &HybridConfig,
+) -> Result<()> {
+    check_capacity(
+        HybridError::FIELD_TRANSFORMER_DIM,
+        config.transformer.dim,
+        transformer.dim(),
+    )?;
+    check_capacity(
+        HybridError::FIELD_TRANSFORMER_MAX_SEQ_LEN,
+        config.transformer.max_seq_len,
+        transformer.max_seq_len(),
+    )?;
+    check_capacity(
+        HybridError::FIELD_SNN_INPUT_CHANNELS,
+        config.snn_input_channels,
+        snn.num_channels(),
+    )?;
+    Ok(())
+}
+
+fn check_capacity(field: &'static str, configured: usize, backend: usize) -> Result<()> {
+    // Both-zero would otherwise look like a match (`configured == backend`).
+    let both_positive_and_equal = configured > 0 && configured == backend;
+    if !both_positive_and_equal {
+        return Err(HybridError::config_mismatch(field, configured, backend));
+    }
+    Ok(())
 }
 
 fn pool_embedding(hidden: &Tensor, dim: usize) -> Vec<f32> {
@@ -224,9 +353,25 @@ mod tests {
             max_seq: cfg.transformer.max_seq_len,
         };
         let s = MockSnn { channels: 7 };
-        let mut net = HybridNetwork::new(t, s, cfg);
+        let mut net = HybridNetwork::try_new(t, s, cfg).expect("custom width is valid");
         let out = net.forward(&[0, 1, 2], None).unwrap();
         assert_eq!(out.stimuli.len(), 7);
         assert_eq!(out.embedding.len(), 128);
+    }
+
+    #[test]
+    fn test_try_new_accepts_tiny_config() {
+        let cfg = HybridConfig::tiny();
+        let t = MockTransformer {
+            dim: cfg.transformer.dim,
+            max_seq: cfg.transformer.max_seq_len,
+        };
+        let s = MockSnn {
+            channels: cfg.snn_input_channels,
+        };
+        let net = HybridNetwork::try_new(t, s, cfg).expect("tiny config should construct");
+        assert_eq!(net.config().transformer.dim, 128);
+        assert_eq!(net.config().snn_input_channels, 64);
+        assert_eq!(net.global_step(), 0);
     }
 }
