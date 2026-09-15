@@ -3,8 +3,8 @@
 `hybrid-fusion` is backend-agnostic: it defines the `Transformer`, `SpikingNetwork`,
 `GgufLoader`, `ExpertRouter`, `SpikeActivity`, and `NeuroModulators` contracts but
 ships no concrete math. This guide explains every trait method, how data flows
-through `HybridNetwork::forward`, and provides a minimal compilable example you can
-adapt for your own backend.
+through `HybridNetwork::try_new` / `HybridNetwork::forward`, and provides a
+minimal compilable example you can adapt for your own backend.
 
 For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs).
 
@@ -16,7 +16,7 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 2. [SpikingNetwork trait](#2-spikingnetwork-trait)
 3. [NeuroModulators](#3-neuromodulators)
 4. [GgufLoader / GgufLayout](#4-ggufloader--gguflayout)
-5. [How the forward pipeline works](#5-how-the-forward-pipeline-works)
+5. [How construction and the forward pipeline work](#5-how-construction-and-the-forward-pipeline-work)
 6. [Tensor shape conventions](#6-tensor-shape-conventions)
 7. [Minimal working example](#7-minimal-working-example)
 8. [Common pitfalls](#8-common-pitfalls)
@@ -262,7 +262,21 @@ assert_eq!(layout.architecture, "my-arch");
 
 ---
 
-## 5. How the forward pipeline works
+## 5. How construction and the forward pipeline work
+
+Prefer `HybridNetwork::try_new`. It compares `HybridConfig` against
+backend-reported sizes **without** calling `Transformer::hidden_states` or
+`SpikingNetwork::step`:
+
+| Config field | Backend method | Error on mismatch or zero |
+|--------------|----------------|---------------------------|
+| `transformer.dim` | `Transformer::dim()` | `HybridError::ConfigMismatch` (`field = "transformer.dim"`) |
+| `transformer.max_seq_len` | `Transformer::max_seq_len()` | `HybridError::ConfigMismatch` (`field = "transformer.max_seq_len"`) |
+| `snn_input_channels` | `SpikingNetwork::num_channels()` | `HybridError::ConfigMismatch` (`field = "snn_input_channels"`) |
+
+`HybridNetwork::new` still exists as an unvalidated pre-1.0 compatibility
+constructor. It does not panic, does not return `Result`, and does not prove
+the backends match the config. New code should use `try_new`.
 
 When you call `HybridNetwork::forward`, this is what happens internally
 (see [`src/hybrid.rs`](../src/hybrid.rs)):
@@ -481,7 +495,7 @@ fn main() -> Result<()> {
 
     let snn = MySnn::new(config.snn_input_channels, 0.5); // 64 channels
 
-    let mut net = HybridNetwork::new(transformer, snn, config);
+    let mut net = HybridNetwork::try_new(transformer, snn, config)?;
 
     // Forward pass with default modulators
     let output: HybridOutput = net.forward(&[1, 2, 3, 4], None)?;
@@ -517,12 +531,26 @@ fn main() -> Result<()> {
   dopamine lowers it (more excitable), cortisol raises it (more conservative).
 - After firing, the membrane potential resets to `0.0` (leaky
   integrate-and-fire style).
-- `HybridNetwork::new` accepts the transformer, SNN, and config. The
-  config's `snn_input_channels` must match `snn.num_channels()`.
+- `HybridNetwork::try_new` validates the transformer, SNN, and config. The
+  config's `snn_input_channels` must match `snn.num_channels()`, and
+  transformer `dim` / `max_seq_len` must match the trait reports. Zero
+  capacities are rejected. `HybridNetwork::new` skips this check (compatibility).
 
 ---
 
 ## 8. Common pitfalls
+
+### Config vs backend mismatch at construction
+
+`HybridNetwork::try_new` returns `HybridError::ConfigMismatch` when a
+configured size is zero or disagrees with the backend:
+
+```
+configuration mismatch for transformer.dim: configured 64, backend 128
+```
+
+**Fix:** Set `HybridConfig` from the same values your `Transformer` /
+`SpikingNetwork` report (`dim()`, `max_seq_len()`, `num_channels()`).
 
 ### Shape mismatch: `hidden_states` dim vs `dim()`
 
@@ -600,6 +628,7 @@ All errors come from [`src/error.rs`](../src/error.rs):
 | Variant | When |
 |---------|------|
 | `InputLengthMismatch { expected, got }` | Empty input or exceeds `max_seq_len` |
+| `ConfigMismatch { field, configured, backend }` | `try_new`: config vs backend dim / max sequence / SNN channels (including zeros) |
 | `InvalidConfig(String)` | Hidden-state dim doesn't match `dim()` |
 | `SnnStep(String)` | SNN internal error during `step` |
 | `ModelLoad { path, reason }` | File I/O failure during loading |

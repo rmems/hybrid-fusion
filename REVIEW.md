@@ -33,6 +33,8 @@ Copy-paste this into every PR review:
 - [ ] Tensor dimension extents are always > 0 (reject any axis of length 0; rank-0 scalars are allowed)
 - [ ] `token_ids` is never empty (validated in `HybridNetwork::forward`)
 - [ ] `token_ids.len()` never exceeds `transformer.max_seq_len()`
+- [ ] `HybridNetwork::try_new` rejects zero or disagreeing transformer dim,
+      max sequence length, and SNN channel counts (`HybridError::ConfigMismatch`)
 - [ ] No silent fallback on shape mismatches — return an error
 
 ### Safety
