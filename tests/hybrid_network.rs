@@ -438,6 +438,17 @@ impl SpikingNetwork for CountingSnn {
     }
 }
 
+fn construction_error<T, S>(transformer: T, snn: S, config: HybridConfig) -> HybridError
+where
+    T: Transformer,
+    S: SpikingNetwork,
+{
+    match HybridNetwork::try_new(transformer, snn, config) {
+        Ok(_) => panic!("expected HybridNetwork::try_new to fail"),
+        Err(err) => err,
+    }
+}
+
 fn matching_tiny() -> (HybridConfig, MockTransformer, MockSnn) {
     let cfg = HybridConfig::tiny();
     let t = MockTransformer {
@@ -479,7 +490,7 @@ fn test_try_new_rejects_transformer_dim_mismatch() {
     let (mut cfg, t, s) = matching_tiny();
     let backend = t.dim;
     cfg.transformer.dim = backend + 8;
-    let err = HybridNetwork::try_new(t, s, cfg).expect_err("dim mismatch");
+    let err = construction_error(t, s, cfg);
     assert_config_mismatch(
         err,
         HybridError::FIELD_TRANSFORMER_DIM,
@@ -493,7 +504,7 @@ fn test_try_new_rejects_max_seq_len_mismatch() {
     let (mut cfg, t, s) = matching_tiny();
     let backend = t.max_seq;
     cfg.transformer.max_seq_len = backend + 4;
-    let err = HybridNetwork::try_new(t, s, cfg).expect_err("max_seq_len mismatch");
+    let err = construction_error(t, s, cfg);
     assert_config_mismatch(
         err,
         HybridError::FIELD_TRANSFORMER_MAX_SEQ_LEN,
@@ -507,7 +518,7 @@ fn test_try_new_rejects_snn_channels_mismatch() {
     let (mut cfg, t, s) = matching_tiny();
     let backend = s.channels;
     cfg.snn_input_channels = backend + 13;
-    let err = HybridNetwork::try_new(t, s, cfg).expect_err("channel mismatch");
+    let err = construction_error(t, s, cfg);
     assert_config_mismatch(
         err,
         HybridError::FIELD_SNN_INPUT_CHANNELS,
@@ -521,7 +532,7 @@ fn test_try_new_rejects_zero_transformer_dim() {
     let (mut cfg, t, s) = matching_tiny();
     let backend = t.dim;
     cfg.transformer.dim = 0;
-    let err = HybridNetwork::try_new(t, s, cfg).expect_err("zero dim");
+    let err = construction_error(t, s, cfg);
     assert_config_mismatch(err, HybridError::FIELD_TRANSFORMER_DIM, 0, backend);
 }
 
@@ -530,7 +541,7 @@ fn test_try_new_rejects_zero_max_seq_len() {
     let (mut cfg, t, s) = matching_tiny();
     let backend = t.max_seq;
     cfg.transformer.max_seq_len = 0;
-    let err = HybridNetwork::try_new(t, s, cfg).expect_err("zero max_seq_len");
+    let err = construction_error(t, s, cfg);
     assert_config_mismatch(err, HybridError::FIELD_TRANSFORMER_MAX_SEQ_LEN, 0, backend);
 }
 
@@ -539,7 +550,7 @@ fn test_try_new_rejects_zero_snn_channels() {
     let (mut cfg, t, s) = matching_tiny();
     let backend = s.channels;
     cfg.snn_input_channels = 0;
-    let err = HybridNetwork::try_new(t, s, cfg).expect_err("zero channels");
+    let err = construction_error(t, s, cfg);
     assert_config_mismatch(err, HybridError::FIELD_SNN_INPUT_CHANNELS, 0, backend);
 }
 
@@ -550,7 +561,7 @@ fn test_try_new_rejects_zero_backend_dim() {
         dim: 0,
         max_seq: cfg.transformer.max_seq_len,
     };
-    let err = HybridNetwork::try_new(t, s, cfg.clone()).expect_err("zero backend dim");
+    let err = construction_error(t, s, cfg.clone());
     assert_config_mismatch(
         err,
         HybridError::FIELD_TRANSFORMER_DIM,
@@ -566,7 +577,7 @@ fn test_try_new_rejects_zero_backend_max_seq_len() {
         dim: cfg.transformer.dim,
         max_seq: 0,
     };
-    let err = HybridNetwork::try_new(t, s, cfg.clone()).expect_err("zero backend max_seq");
+    let err = construction_error(t, s, cfg.clone());
     assert_config_mismatch(
         err,
         HybridError::FIELD_TRANSFORMER_MAX_SEQ_LEN,
@@ -579,7 +590,7 @@ fn test_try_new_rejects_zero_backend_max_seq_len() {
 fn test_try_new_rejects_zero_backend_channels() {
     let (cfg, t, _) = matching_tiny();
     let s = MockSnn::new(0);
-    let err = HybridNetwork::try_new(t, s, cfg.clone()).expect_err("zero backend channels");
+    let err = construction_error(t, s, cfg.clone());
     assert_config_mismatch(
         err,
         HybridError::FIELD_SNN_INPUT_CHANNELS,
@@ -596,7 +607,7 @@ fn test_try_new_rejects_both_zero_transformer_dim() {
         dim: 0,
         max_seq: cfg.transformer.max_seq_len,
     };
-    let err = HybridNetwork::try_new(t, s, cfg).expect_err("both-zero dim");
+    let err = construction_error(t, s, cfg);
     assert_config_mismatch(err, HybridError::FIELD_TRANSFORMER_DIM, 0, 0);
 }
 
