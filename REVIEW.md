@@ -33,6 +33,10 @@ Copy-paste this into every PR review:
 - [ ] Tensor dimension extents are always > 0 (reject any axis of length 0; rank-0 scalars are allowed)
 - [ ] `token_ids` is never empty (validated in `HybridNetwork::forward`)
 - [ ] `token_ids.len()` never exceeds `transformer.max_seq_len()`
+- [ ] Hidden-state rank is 1 (`[dim]`) or 2 (`[seq, dim]`); other ranks error before `snn.step`
+- [ ] Rank-2 `shape[0] == token_ids.len()` and hidden width equals `Transformer::dim()`
+- [ ] Hidden / pooled / stimuli buffers are finite; zero-channel SNNs are rejected
+- [ ] `global_step` is unchanged on every forward-path validation failure
 - [ ] No silent fallback on shape mismatches — return an error
 
 ### Safety
