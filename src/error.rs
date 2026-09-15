@@ -19,6 +19,9 @@ pub enum HybridError {
     #[error("GGUF parse failed: {0}")]
     GgufParse(String),
 
+    #[error("Safetensors parse failed: {0}")]
+    SafetensorsParse(String),
+
     #[error("input length mismatch: expected {expected}, got {got}")]
     InputLengthMismatch { expected: usize, got: usize },
 

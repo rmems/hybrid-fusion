@@ -11,6 +11,7 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 ### Added
 
 - `docs/extraction-map.md` — maps extractable LLM/SNN/MoE architecture from corinth-canal and grok-ozempic into hybrid-fusion traits vs sibling crates (#21).
+- Dual checkpoint contract: `SafetensorsLoader` / `SafetensorsLayout` / `TensorManifestEntry`, plus `Dtype`, `TensorRole` (name-heuristic classifier), and `HybridError::SafetensorsParse` ([#27](https://github.com/rmems/hybrid-fusion/issues/27)).
 - Reverse-path contracts: `SpikeActivity`, `ExpertRouter`, `ExpertRouteOutput`; MoE fields on `HybridOutput`; `StubExpertRouter` under `backends` (#22).
 - `ProjectionMode` + pure `project_spike_activity` / `spike_activity_features` (SNN→embedding for MoE; no learned W/b, no SAAQ) (#25).
 - Pure MoE math in `routing`: synthetic gates, softmax, top-k, routing entropy; `SyntheticExpertRouter` under `backends` (#26).

@@ -61,7 +61,8 @@ SpikeActivity → ProjectionMode → ExpertRouter (MoE)
 
 Checkpoint inventory for MoE onboarding stays **format-agnostic** at the
 orchestration layer: GGUF (`GgufLoader`) **and** Safetensors
-(`SafetensorsLoader` / layout types, [#27](https://github.com/rmems/hybrid-fusion/issues/27)).
+(`SafetensorsLoader` / `SafetensorsLayout` / `TensorRole`,
+[#27](https://github.com/rmems/hybrid-fusion/issues/27) — landed).
 
 ---
 
@@ -94,8 +95,8 @@ inventory talk to layout types, not payload parsers.
 | Source module | Local path | Target hybrid-fusion type/trait | Owner crate | Issue | Notes |
 |---------------|------------|----------------------------------|-------------|-------|-------|
 | GGUF layout façade | hybrid-fusion `GgufLoader` / `GgufLayout`; corinth-canal `src/moe/gguf/` | keep/extend layout trait; no mmap here | **hybrid-fusion** (trait); **engram-parser** (parse/mmap/dequant) | existing | Concrete GGUF stays out of this crate |
-| Safetensors header inspect / manifest | corinth-canal `src/moe/safetensors.rs`, `moe/safetensors/discovery.rs` | **`SafetensorsLoader` + layout/manifest types** (name, dtype, shape, shard refs, labels) — primary public contract for [#27](https://github.com/rmems/hybrid-fusion/issues/27), symmetric to existing `GgufLoader` | **hybrid-fusion** (trait); **engram-parser** (parse/mmap I/O) | [#27](https://github.com/rmems/hybrid-fusion/issues/27) | Optional later: a thin `CheckpointLoader` wrapper over GGUF+ST for format-agnostic callers; **not** the #27 deliverable. Do not introduce a second competing ST symbol. |
-| MoE router/expert candidates | corinth-canal safetensors discovery | candidate / router-tensor **role** types for #22 / #24 / #26 | **hybrid-fusion** | [#27](https://github.com/rmems/hybrid-fusion/issues/27) | Name + shape heuristics only at trait layer |
+| Safetensors header inspect / manifest | corinth-canal `src/moe/safetensors.rs`, `moe/safetensors/discovery.rs` | **`SafetensorsLoader` + `SafetensorsLayout` / `TensorManifestEntry`** (name, dtype, shape, shard refs, labels) — public contract for [#27](https://github.com/rmems/hybrid-fusion/issues/27), symmetric to existing `GgufLoader` | **hybrid-fusion** (trait); **engram-parser** (parse/mmap I/O) | [#27](https://github.com/rmems/hybrid-fusion/issues/27) (landed) | Optional later: a thin `CheckpointLoader` wrapper over GGUF+ST for format-agnostic callers; **not** a second ST symbol. Do not introduce a competing Safetensors trait. |
+| MoE router/expert candidates | corinth-canal safetensors discovery | `TensorRole` + `SafetensorsLayout::entries_with_role` for #22 / #24 / #26 | **hybrid-fusion** | [#27](https://github.com/rmems/hybrid-fusion/issues/27) (landed) | Name + shape heuristics only at trait layer (`TensorRole::from_name`) |
 | GGUF checkpoint façade | corinth-canal `src/moe/checkpoint.rs`, `gguf/*` | not promoted into hybrid-fusion body | **engram-parser** | — | Research status: **reference** |
 
 ### D. Precision tiers + dry-run planner (grok-ozempic)
@@ -141,7 +142,7 @@ Do **not** copy these into `hybrid-fusion` as implementation work:
 
 | Crate | Responsibility relative to this map |
 |-------|-------------------------------------|
-| **hybrid-fusion** | Orchestration traits/types; pure projector + pure MoE math (no checkpoint matmul); dual checkpoint **contracts** (`GgufLoader`, `SafetensorsLoader`) |
+| **hybrid-fusion** | Orchestration traits/types; pure projector + pure MoE math (no checkpoint matmul); dual checkpoint **contracts** (`GgufLoader`, `SafetensorsLoader` — both landed) |
 | **cortex-tensor** | Transformer / tensor math backends implementing `Transformer`; real-weight gate matmul |
 | **engram-parser** | Concrete GGUF + Safetensors parse, mmap, layout discovery implementing loader traits |
 | **neuromod** | Neuron dynamics implementing `SpikingNetwork` |
@@ -165,7 +166,7 @@ Do **not** copy these into `hybrid-fusion` as implementation work:
  ├─ 4. #26  pure MoE router math
  ├─ 5. #24  precision-tier + HybridStagePlanner
  ├─ 6. #23  mock reverse-path tests
- └─ 7. #27  SafetensorsLoader / layout types
+ └─ 7. #27  SafetensorsLoader / layout types  ← landed (this crate: trait; engram-parser: I/O)
 ```
 
 Issue `#9` (optional Sentry) is **outside** this epic and is already implemented in-tree.
@@ -176,7 +177,7 @@ Issue `#9` (optional Sentry) is **outside** this epic and is already implemented
 
 - [x] Map covers projector, MoE ExpertRouter / routing math, precision tiers, dry-run planner, SpikeActivity types
 - [x] Map covers `moe/safetensors` → hybrid-fusion SafetensorsLoader/layout traits (#27); concrete ST/GGUF I/O → `engram-parser`
-- [x] Dual checkpoint row: existing `GgufLoader` + planned Safetensors; MoE path format-agnostic at orchestration layer
+- [x] Dual checkpoint row: existing `GgufLoader` + existing `SafetensorsLoader`; MoE path format-agnostic at orchestration layer
 - [x] Explicit non-extract list: SAAQ, GGUF/ST mmap parse, GIF dynamics, CUDA, GOZ1, machine-local paths
 - [x] Links to local source paths + sibling crate owners
 - [x] Status ladder note (reference → stabilizing → proven → frozen)
@@ -185,7 +186,7 @@ Issue `#9` (optional Sentry) is **outside** this epic and is already implemented
 
 ## Related docs
 
-- [Implementing a Backend](implementing-backends.md) — how to implement `Transformer` / `SpikingNetwork` / `GgufLoader` today
+- [Implementing a Backend](implementing-backends.md) — how to implement `Transformer` / `SpikingNetwork` / `GgufLoader` / `SafetensorsLoader` today
 - [AGENTS.md](../AGENTS.md) — crate boundaries for coding agents
 - Epic: [#20](https://github.com/rmems/hybrid-fusion/issues/20)
 - Milestone: [v0.3 — LLM/SNN architecture contracts](https://github.com/rmems/hybrid-fusion/milestone/2)

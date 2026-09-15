@@ -48,7 +48,7 @@ implementations live here.
 | Concern | Owned by |
 |---|---|
 | Tensor / transformer math | `cortex-tensor` |
-| GGUF (GPT-Generated Unified Format) model parsing | `engram-parser` |
+| GGUF / Safetensors model parsing | `engram-parser` |
 | SNN neuron dynamics (leaky integrate-and-fire (LIF), Izhikevich) | `neuromod` |
 | SNN runtime / scheduling | `brainstem-daemon` |
 | Neuromodulator mapping / critic signals | `limbic-critic` |
@@ -65,10 +65,10 @@ Core traits / types on the pluggable surface:
 
 - **`Transformer`** — produces hidden-state tensors from token IDs. Implementations live in downstream crates (e.g. `cortex-tensor`).
 - **`SpikingNetwork`** — steps the SNN forward given stimuli + neuromodulator state, returns fired neuron indices. Implementations live in `neuromod` / `brainstem-daemon`.
-- **`GgufLoader`** — loads GGUF model layouts from disk. Implementations live in `engram-parser`.
+- **`GgufLoader`** / **`SafetensorsLoader`** — checkpoint layout contracts (GGUF + Safetensors). Implementations live in `engram-parser`.
 - **`ExpertRouter`** + **`SpikeActivity`** — reverse-path MoE routing contract (embedding → expert weights / selection). Pure math lives in `src/routing.rs`; checkpoint backends stay outside this crate.
 
-`HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits; `GgufLoader` / `ExpertRouter` are consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above.
+`HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits; `GgufLoader` / `SafetensorsLoader` / `ExpertRouter` are consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above.
 
 `ReverseHybridPath<R: ExpertRouter>` is the dual reverse-path host (SNN activity →
 project → MoE); do not fold it into `HybridNetwork` generics.
