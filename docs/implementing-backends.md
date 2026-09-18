@@ -377,8 +377,8 @@ Downstream:
 - **#24 `HybridStagePlanner`** — classify stage names (router vs expert vs
   attention) for dry-run precision tiers without loading weights.
 
-`Dtype` is the Safetensors header vocabulary (`F32`, `BF16`, `BOOL`, …), not a
-precision-planning policy.
+`Dtype` is the Safetensors header vocabulary (`F32`, `BF16`, `BOOL`, `U16`,
+`F8_E4M3`, `C64`, …), not a precision-planning policy.
 
 ---
 

@@ -79,7 +79,7 @@ project → MoE); do not fold it into `HybridNetwork` generics.
 |---|---|
 | `neuromod` | SNN neuron dynamics (LIF, Izhikevich models) |
 | `cortex-tensor` | Tensor math and transformer inference |
-| `engram-parser` | GGUF file parsing and model layout extraction |
+| `engram-parser` | GGUF and Safetensors file parsing and model layout extraction |
 | `brainstem-daemon` | SNN runtime scheduling and execution |
 | `limbic-critic` | Neuromodulator-to-critic signal mapping |
 | `axon-encoder` | Sensory input encoding |

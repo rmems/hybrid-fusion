@@ -61,15 +61,32 @@ pub struct GgufLayout {
 /// [`SafetensorsParse`](crate::HybridError::SafetensorsParse) — do not add a
 /// second competing Safetensors symbol.
 pub trait SafetensorsLoader {
+    /// Inventory a Safetensors file or Hugging Face shard index at `path`.
+    ///
+    /// `path` is a filesystem path to a `.safetensors` file or
+    /// `model.safetensors.index.json`. This crate does not open it; backends
+    /// in `engram-parser` perform header parse and mmap.
+    ///
+    /// Returns a header-only [`SafetensorsLayout`] (architecture, manifest,
+    /// inferred roles). Typical errors:
+    /// [`HybridError::SafetensorsParse`](crate::HybridError::SafetensorsParse)
+    /// for header / shard-index failures,
+    /// [`HybridError::ModelLoad`](crate::HybridError::ModelLoad) for I/O,
+    /// [`HybridError::UnsupportedFormat`](crate::HybridError::UnsupportedFormat)
+    /// when the file is not Safetensors, and
+    /// [`HybridError::MissingTensor`](crate::HybridError::MissingTensor) when a
+    /// required tensor is absent from the inventory.
     fn load(&self, path: &str) -> Result<SafetensorsLayout>;
 }
 
 /// Header-only Safetensors inventory (name, dtype, shape, shard refs, roles).
 ///
 /// Richer than [`GgufLayout`] so MoE candidate discovery can stay
-/// format-agnostic at the orchestration layer. `tensor_count` should equal
-/// `tensors.len()`.
+/// format-agnostic at the orchestration layer. `tensor_count` equals
+/// `tensors.len()` after [`SafetensorsLayout::new`] and after deserialization
+/// (a mismatched `tensor_count` in JSON is recomputed from `tensors`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SafetensorsLayoutDe")]
 pub struct SafetensorsLayout {
     /// Architecture tag from config / header metadata (empty if unknown).
     pub architecture: String,
@@ -95,6 +112,20 @@ impl SafetensorsLayout {
     /// in inventory order. Pure filter — no I/O.
     pub fn entries_with_role(&self, role: TensorRole) -> Vec<&TensorManifestEntry> {
         self.tensors.iter().filter(|e| e.role == role).collect()
+    }
+}
+
+/// Deserialize helper: ignore a caller-supplied `tensor_count` and rebuild
+/// through [`SafetensorsLayout::new`] so the public count matches `tensors`.
+#[derive(Deserialize)]
+struct SafetensorsLayoutDe {
+    architecture: String,
+    tensors: Vec<TensorManifestEntry>,
+}
+
+impl From<SafetensorsLayoutDe> for SafetensorsLayout {
+    fn from(raw: SafetensorsLayoutDe) -> Self {
+        Self::new(raw.architecture, raw.tensors)
     }
 }
 
@@ -275,6 +306,26 @@ mod tests {
         let json = serde_json::to_string(&layout).unwrap();
         let back: SafetensorsLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(back, layout);
+    }
+
+    #[test]
+    fn layout_deserialize_recomputes_mismatched_tensor_count() {
+        let json = r#"{
+            "architecture": "mixtral",
+            "tensor_count": 0,
+            "tensors": [{
+                "name": "model.layers.0.mlp.gate.weight",
+                "dtype": "F16",
+                "shape": [8, 16],
+                "shard": null,
+                "role": "Router",
+                "labels": []
+            }]
+        }"#;
+        let layout: SafetensorsLayout = serde_json::from_str(json).unwrap();
+        assert_eq!(layout.tensor_count, 1);
+        assert_eq!(layout.tensor_count, layout.tensors.len());
+        assert_eq!(layout.tensors[0].name, "model.layers.0.mlp.gate.weight");
     }
 
     struct MemorySafetensorsLoader {
