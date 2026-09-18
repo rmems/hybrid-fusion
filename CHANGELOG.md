@@ -11,6 +11,7 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 ### Added
 
 - `docs/extraction-map.md` — maps extractable LLM/SNN/MoE architecture from corinth-canal and grok-ozempic into hybrid-fusion traits vs sibling crates (#21).
+- Dual checkpoint contract: `SafetensorsLoader` / `SafetensorsLayout` / `TensorManifestEntry`, plus `Dtype` (full Safetensors header vocabulary), `TensorRole` (name-heuristic classifier), and `HybridError::SafetensorsParse` ([#27](https://github.com/rmems/hybrid-fusion/issues/27)).
 - Reverse-path contracts: `SpikeActivity`, `ExpertRouter`, `ExpertRouteOutput`; MoE fields on `HybridOutput`; `StubExpertRouter` under `backends` (#22).
 - `ProjectionMode` + pure `project_spike_activity` / `spike_activity_features` (SNN→embedding for MoE; no learned W/b, no SAAQ) (#25).
 - Pure MoE math in `routing`: synthetic gates, softmax, top-k, routing entropy; `SyntheticExpertRouter` under `backends` (#26).
@@ -19,6 +20,8 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Changed
 
+- **BREAKING**: `HybridError` gains `SafetensorsParse`. The enum is exhaustive (no `#[non_exhaustive]`); downstream `match` arms must be updated (#27).
+- **BREAKING**: `Dtype` now includes the full Safetensors header vocabulary (`U16`/`U32`/`U64`, `F4`, `F6_*`, `F8_*`, `C64`). Exhaustive matches must be updated (#27).
 - **`HybridOutput` gains** optional `expert_weights`, `selected_experts`, `routing_entropy` (struct-literal / exhaustive matches must be updated). ANN→SNN `forward` sets them to `None` (#22).
 - **`routing::softmax` accumulates its denominator in `f64`** (was `f32`). Returned
   weights now re-accumulate to `1.0` within one `f32` rounding at every expert
