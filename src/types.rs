@@ -81,7 +81,7 @@ pub enum TensorRole {
     Attention,
     /// Token / position embeddings and output head (`embed_tokens`, `lm_head`).
     Embedding,
-    /// Normalization (`layernorm`, `rms_norm`, `*.norm.*`).
+    /// Normalization (`layernorm`, `rms_norm`, `*.norm.*`, GPT-style `ln_*`).
     Norm,
     /// Unclassified (FFN `up_proj` / `gate_proj`, biases, unknown families).
     #[default]
@@ -103,10 +103,7 @@ impl TensorRole {
         if parts.iter().any(|p| p.contains("expert")) {
             return Self::ExpertWeight;
         }
-        if parts
-            .iter()
-            .any(|p| *p == "gate" || *p == "router" || p.starts_with("router"))
-        {
+        if parts.iter().any(|p| *p == "gate" || p.contains("router")) {
             return Self::Router;
         }
         if is_norm_component(&parts) {
@@ -152,6 +149,7 @@ fn is_embedding_component(parts: &[&str]) -> bool {
         "lm_head",
         "tok_embeddings",
         "token_embd",
+        "shared",
     ];
     parts
         .iter()
@@ -159,7 +157,9 @@ fn is_embedding_component(parts: &[&str]) -> bool {
 }
 
 fn is_norm_component(parts: &[&str]) -> bool {
-    parts.iter().any(|p| p.contains("norm"))
+    parts.iter().any(|p| {
+        p.contains("norm") || *p == "ln_1" || *p == "ln_2" || *p == "ln_f" || p.starts_with("ln_")
+    })
 }
 
 /// One named tensor in a Safetensors (or HF-sharded) inventory.
@@ -386,6 +386,22 @@ mod tests {
         assert_eq!(
             TensorRole::from_name("model.layers.0.input_layernorm.weight"),
             TensorRole::Norm
+        );
+        assert_eq!(
+            TensorRole::from_name("transformer.h.0.ln_1.weight"),
+            TensorRole::Norm
+        );
+        assert_eq!(
+            TensorRole::from_name("transformer.ln_f.weight"),
+            TensorRole::Norm
+        );
+        assert_eq!(
+            TensorRole::from_name("shared.weight"),
+            TensorRole::Embedding
+        );
+        assert_eq!(
+            TensorRole::from_name("model.layers.0.mlp.moe_router.weight"),
+            TensorRole::Router
         );
     }
 

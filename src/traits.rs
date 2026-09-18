@@ -120,6 +120,11 @@ impl SafetensorsLayout {
 #[derive(Deserialize)]
 struct SafetensorsLayoutDe {
     architecture: String,
+    /// Present in the serialized form so positional formats keep field order;
+    /// [`SafetensorsLayout::new`] recomputes the public count from `tensors`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    tensor_count: usize,
     tensors: Vec<TensorManifestEntry>,
 }
 
