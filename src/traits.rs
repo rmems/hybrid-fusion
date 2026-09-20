@@ -4,6 +4,26 @@ use crate::error::Result;
 use crate::tensor::Tensor;
 use serde::{Deserialize, Serialize};
 
+/// Transformer backend: token IDs → hidden-state tensor.
+///
+/// # Hidden-state contract
+///
+/// [`crate::HybridNetwork::forward`] validates the tensor returned by
+/// [`hidden_states`](Self::hidden_states) **before** pooling, projection, or
+/// [`SpikingNetwork::step`]. Failures are structured [`crate::HybridError`]
+/// contract variants (not Sentry runtime failures).
+///
+/// Supported layouts:
+///
+/// - **Rank 2** `[seq_len, dim]` — per-token hidden states. `seq_len` must
+///   equal `token_ids.len()` and `dim` must equal [`dim`](Self::dim). This is
+///   the canonical shape.
+/// - **Rank 1** `[dim]` — a pre-pooled embedding vector. The single axis must
+///   equal [`dim`](Self::dim). Sequence length is not encoded in this layout.
+///
+/// Every other rank (0, 3, …) is rejected. Backing `data.len()` must equal the
+/// layout product (`seq_len * dim` or `dim`). Every value must be finite
+/// (no NaN or ±Inf).
 pub trait Transformer {
     fn hidden_states(&self, token_ids: &[u32]) -> Tensor;
     fn dim(&self) -> usize;
@@ -11,6 +31,10 @@ pub trait Transformer {
     fn param_count(&self) -> usize;
 }
 
+/// Spiking backend: bounded stimuli → fired neuron indices.
+///
+/// [`crate::HybridNetwork::forward`] rejects a zero [`num_channels`](Self::num_channels)
+/// result before projection or [`step`](Self::step).
 pub trait SpikingNetwork {
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>;
     fn num_channels(&self) -> usize;
