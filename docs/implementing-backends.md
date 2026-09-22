@@ -366,6 +366,14 @@ let routers = layout.entries_with_role(TensorRole::Router);
 // Use router/expert candidates to wire ExpertRouter / dry-run planner
 ```
 
+**Manifest metadata vs runtime `Tensor`:** checkpoint inventory uses
+`TensorManifestEntry::shape` as reported by the Safetensors header. Zero-length
+dimensions and rank-0 shapes (`[]`) are valid in that metadata; they are **not**
+subject to the runtime rule that [`Tensor::from_vec`](../src/tensor.rs) rejects
+zero-extent axes. After JSON deserialization, `SafetensorsLayout.tensor_count` is
+always recomputed from `tensors.len()` so a stale count in the wire format cannot
+desync the manifest.
+
 ### TensorRole (MoE candidate discovery)
 
 `TensorRole` is a **name-heuristic** classifier — no parsing, no family
@@ -373,11 +381,11 @@ adapters. `TensorManifestEntry::new` fills `role` from the tensor name:
 
 | Role | Typical names |
 |------|----------------|
-| `Router` | `…mlp.gate.weight`, `…block_sparse_moe.gate…`, `…router…` |
-| `ExpertWeight` | `…experts.{i}…` (wins over `gate` so expert `gate_proj` stays expert) |
-| `Attention` | `self_attn`, `q_proj`, … |
-| `Embedding` | `embed_tokens`, `lm_head`, … |
-| `Norm` | `layernorm`, `rms_norm`, `*.norm.*` |
+| `Router` | `…mlp.gate.weight`, `…block_sparse_moe.gate…`, `…moe_router…`, any component containing `router` |
+| `ExpertWeight` | `…experts.{i}…` (wins over `gate` / `router` so expert `gate_proj` stays expert) |
+| `Attention` | `self_attn`, `SelfAttention`, `q_proj`, … |
+| `Embedding` | `embed_tokens`, `lm_head`, T5-style `shared`, … |
+| `Norm` | `layernorm`, `rms_norm`, `*.norm.*`, GPT-style `ln_1` / `ln_f` / `ln_*` |
 | `Other` (default) | dense FFN `gate_proj` / `up_proj`, unknown names |
 
 Downstream:

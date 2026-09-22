@@ -1,6 +1,6 @@
 # AGENTS.md — hybrid-fusion
 
-**Version:** 0.3.0 (last updated 2026-08-11)
+**Version:** 0.3.0 (last updated 2026-09-22)
 
 Context file for AI coding agents working in this repository.
 
