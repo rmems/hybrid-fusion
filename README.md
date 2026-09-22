@@ -82,6 +82,7 @@ use hybrid_fusion::Result;
 | `SpikeActivity` | Pure spike/membrane bag for reverse-path projection. |
 | `ProjectionMode` + `project_spike_activity` | SNN activity → dense embedding for MoE (pure modes). |
 | `routing` helpers | Always-on pure MoE math (gates, softmax, top-k, entropy). |
+| `GgufLoader` / `SafetensorsLoader` | Dual checkpoint **layout** contracts (parse/mmap → `engram-parser`). |
 | `SyntheticExpertRouter` / `StubExpertRouter` | File-free `ExpertRouter` impls (**requires `backends` feature**). |
 | `NeuroModulators` | Neuromodulator struct passed to SNN steps. |
 | `HybridConfig` / `TransformerConfig` | Predefined configs (`tiny`, `olmo_1b`). |

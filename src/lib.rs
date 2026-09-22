@@ -23,10 +23,13 @@ pub use routing::{
 };
 pub use tensor::Tensor;
 pub use traits::{
-    ExpertRouteOutput, ExpertRouter, GgufLayout, GgufLoader, NeuroModulators, SpikeActivity,
-    SpikingNetwork, Transformer,
+    ExpertRouteOutput, ExpertRouter, GgufLayout, GgufLoader, NeuroModulators, SafetensorsLayout,
+    SafetensorsLoader, SpikeActivity, SpikingNetwork, Transformer,
 };
-pub use types::{HybridConfig, HybridOutput, ProjectionMode, TransformerConfig};
+pub use types::{
+    Dtype, HybridConfig, HybridOutput, ProjectionMode, TensorManifestEntry, TensorRole,
+    TransformerConfig,
+};
 
 /// Re-export of the `sentry` crate when the `sentry` feature is enabled.
 ///

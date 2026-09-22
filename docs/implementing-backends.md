@@ -1,10 +1,10 @@
 # Implementing a Backend
 
 `hybrid-fusion` is backend-agnostic: it defines the `Transformer`, `SpikingNetwork`,
-`GgufLoader`, `ExpertRouter`, `SpikeActivity`, and `NeuroModulators` contracts but
-ships no concrete math. This guide explains every trait method, how data flows
-through `HybridNetwork::forward`, and provides a minimal compilable example you can
-adapt for your own backend.
+`GgufLoader`, `SafetensorsLoader`, `ExpertRouter`, `SpikeActivity`, and
+`NeuroModulators` contracts but ships no concrete math. This guide explains every
+trait method, how data flows through `HybridNetwork::forward`, and provides a
+minimal compilable example you can adapt for your own backend.
 
 For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs).
 
@@ -16,12 +16,13 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 2. [SpikingNetwork trait](#2-spikingnetwork-trait)
 3. [NeuroModulators](#3-neuromodulators)
 4. [GgufLoader / GgufLayout](#4-ggufloader--gguflayout)
-5. [How the forward pipeline works](#5-how-the-forward-pipeline-works)
-6. [Tensor shape conventions](#6-tensor-shape-conventions)
-7. [Minimal working example](#7-minimal-working-example)
-8. [Common pitfalls](#8-common-pitfalls)
-9. [Error reference](#9-error-reference)
-10. [Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath](#10-reverse-path-spikeactivity--expertrouter--reversehybridpath)
+5. [SafetensorsLoader / SafetensorsLayout](#5-safetensorsloader--safetensorslayout)
+6. [How the forward pipeline works](#6-how-the-forward-pipeline-works)
+7. [Tensor shape conventions](#7-tensor-shape-conventions)
+8. [Minimal working example](#8-minimal-working-example)
+9. [Common pitfalls](#9-common-pitfalls)
+10. [Error reference](#10-error-reference)
+11. [Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath](#11-reverse-path-spikeactivity--expertrouter--reversehybridpath)
 
 ---
 
@@ -273,7 +274,134 @@ assert_eq!(layout.architecture, "my-arch");
 
 ---
 
-## 5. How the forward pipeline works
+## 5. SafetensorsLoader / SafetensorsLayout
+
+```rust
+pub trait SafetensorsLoader {
+    fn load(&self, path: &str) -> Result<SafetensorsLayout>;
+}
+
+pub struct SafetensorsLayout {
+    pub architecture: String,
+    pub tensor_count: usize,
+    pub tensors: Vec<TensorManifestEntry>,
+}
+
+pub struct TensorManifestEntry {
+    pub name: String,
+    pub dtype: Dtype,
+    pub shape: Vec<usize>,
+    pub shard: Option<String>,
+    pub role: TensorRole,
+    pub labels: Vec<String>,
+}
+```
+
+`SafetensorsLoader` is the Safetensors counterpart of [`GgufLoader`](#4-ggufloader--gguflayout).
+It is **not** called by the forward pipeline — it exists so backend
+implementations can inventory a `.safetensors` file or a Hugging Face shard
+index (`model.safetensors.index.json`) without this crate parsing bytes.
+
+Concrete header parse, mmap, and payload extract stay in
+[`engram-parser`](https://github.com/rmems/engram-parser) (off-by-default
+`safetensors` feature). Do **not** add a Safetensors crate dependency here.
+
+### Implementing SafetensorsLoader
+
+```rust
+use hybrid_fusion::{
+    Dtype, HybridError, Result, SafetensorsLayout, SafetensorsLoader,
+    TensorManifestEntry, TensorRole,
+};
+
+struct MySafetensorsLoader;
+
+impl SafetensorsLoader for MySafetensorsLoader {
+    fn load(&self, path: &str) -> Result<SafetensorsLayout> {
+        // Parse headers at `path` in engram-parser — not in this crate.
+        // Return Err(HybridError::ModelLoad { path, reason }) on I/O failure
+        // Return Err(HybridError::SafetensorsParse(...)) for header errors
+        // Return Err(HybridError::UnsupportedFormat(...)) for unknown formats
+        // Return Err(HybridError::MissingTensor { name, path }) if a required
+        //   tensor is absent from the inventory
+
+        let file = std::fs::File::open(path)
+            .map_err(|e| HybridError::ModelLoad {
+                path: path.to_string(),
+                reason: e.to_string(),
+            })?;
+
+        // ... inspect header JSON, shard index, count tensors ...
+        let _ = file;
+
+        let tensors = vec![TensorManifestEntry::new(
+            "model.layers.0.mlp.gate.weight".into(),
+            Dtype::F16,
+            vec![8, 16],
+            Some("model-00001-of-00002.safetensors".into()),
+            vec![],
+        )];
+        Ok(SafetensorsLayout::new("my-arch".into(), tensors))
+    }
+}
+```
+
+### When to use it
+
+- Header-only inspect of a Safetensors checkpoint or HF shard index.
+- Building a deterministic tensor manifest (name, dtype, shape, shard refs).
+- Discovering MoE router / expert **candidates** via [`TensorRole`] before
+  constructing an `ExpertRouter` (issues #22 / #24 / #26).
+- Validating that a checkpoint matches the expected architecture before
+  constructing backend types.
+
+Typical wiring:
+
+```rust
+let loader = MySafetensorsLoader;
+let layout = loader.load("model.safetensors")?;
+assert_eq!(layout.architecture, "my-arch");
+assert_eq!(layout.tensor_count, layout.tensors.len());
+let routers = layout.entries_with_role(TensorRole::Router);
+// Use router/expert candidates to wire ExpertRouter / dry-run planner
+```
+
+**Manifest metadata vs runtime `Tensor`:** checkpoint inventory uses
+`TensorManifestEntry::shape` as reported by the Safetensors header. Zero-length
+dimensions and rank-0 shapes (`[]`) are valid in that metadata; they are **not**
+subject to the runtime rule that [`Tensor::from_vec`](../src/tensor.rs) rejects
+zero-extent axes. After JSON deserialization, `SafetensorsLayout.tensor_count` is
+always recomputed from `tensors.len()` so a stale count in the wire format cannot
+desync the manifest.
+
+### TensorRole (MoE candidate discovery)
+
+`TensorRole` is a **name-heuristic** classifier — no parsing, no family
+adapters. `TensorManifestEntry::new` fills `role` from the tensor name:
+
+| Role | Typical names |
+|------|----------------|
+| `Router` | `…mlp.gate.weight`, `…block_sparse_moe.gate…`, `…moe_router…`, any component containing `router` |
+| `ExpertWeight` | `…experts.{i}…` (wins over `gate` / `router` so expert `gate_proj` stays expert) |
+| `Attention` | `self_attn`, `SelfAttention`, `q_proj`, … |
+| `Embedding` | `embed_tokens`, `lm_head`, T5-style `shared`, … |
+| `Norm` | `layernorm`, `rms_norm`, `*.norm.*`, GPT-style `ln_1` / `ln_f` / `ln_*` |
+| `Other` (default) | dense FFN `gate_proj` / `up_proj`, unknown names |
+
+Downstream:
+
+- **#22 `ExpertRouter`** — locate gate tensors to bind a checkpoint-backed router.
+- **#26 pure MoE math** — file-free; roles are unused until a real gate matmul
+  backend lands in `cortex-tensor` + `engram-parser`.
+- **#24 `HybridStagePlanner`** — classify stage names (router vs expert vs
+  attention) for dry-run precision tiers without loading weights.
+
+`Dtype` is the Safetensors header vocabulary (`F32`, `BF16`, `BOOL`, `U16`,
+`F8_E4M3`, `C64`, …), not a precision-planning policy.
+
+---
+
+## 6. How the forward pipeline works
 
 When you call `HybridNetwork::forward`, this is what happens internally
 (see [`src/hybrid.rs`](../src/hybrid.rs)):
@@ -342,7 +470,7 @@ pub struct HybridOutput {
 
 ---
 
-## 6. Tensor shape conventions
+## 7. Tensor shape conventions
 
 `Tensor` is a lightweight owned type: `data: Vec<f32>` + `shape: Vec<usize>`
 (see [`src/tensor.rs`](../src/tensor.rs)).
@@ -375,7 +503,7 @@ let t = Tensor::zeros(&[8, 256]);
 
 ---
 
-## 7. Minimal working example
+## 8. Minimal working example
 
 This example implements both traits with trivial math and wires them into
 `HybridNetwork`. It compiles against the `hybrid-fusion` public API.
@@ -537,7 +665,7 @@ fn main() -> Result<()> {
 
 ---
 
-## 8. Common pitfalls
+## 9. Common pitfalls
 
 ### Shape mismatch: `hidden_states` dim vs `dim()`
 
@@ -612,7 +740,7 @@ it to the caller. Don't panic — `HybridNetwork::forward` expects a
 
 ---
 
-## 9. Error reference
+## 10. Error reference
 
 All errors come from [`src/error.rs`](../src/error.rs):
 
@@ -630,13 +758,14 @@ All errors come from [`src/error.rs`](../src/error.rs):
 | `ModelLoad { path, reason }` | File I/O failure during loading |
 | `MissingTensor { name, path }` | Expected tensor not found in checkpoint |
 | `GgufParse(String)` | GGUF file parse failure |
+| `SafetensorsParse(String)` | Safetensors header / shard-index parse failure |
 | `UnsupportedFormat(String)` | Unknown checkpoint format |
 | `Io(...)` | std::io error (propagated via `From`) |
 | `Json(...)` | serde_json error (propagated via `From`) |
 
 ---
 
-## 10. Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath
+## 11. Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath
 
 The **ANN → SNN** path above is complete for `HybridNetwork::forward`. A
 second path is being extracted from research (corinth-canal):
@@ -690,8 +819,11 @@ normalized distribution (e.g. via `softmax`), not raw gate scores.
 **Reference stub** (feature `backends`): `StubExpertRouter` returns a uniform
 gate distribution and selects `0..top_k`.
 
-**Out of scope for this crate's trait surface:** GGUF/Safetensors weight load,
-family adapters, real gate matmul (see extraction map / sibling crates).
+**Out of scope for this crate:** Safetensors **parsing / mmap / payload extract**
+(and GGUF parse/mmap) stay in `engram-parser`. Family adapters and real gate
+matmul stay in sibling crates. The **trait/layout contract**
+(`SafetensorsLoader`, `SafetensorsLayout`, `TensorRole`) now lives here,
+symmetric to `GgufLoader`.
 
 `HybridNetwork::forward` (ANN → SNN) always leaves MoE fields as `None`.
 For the reverse path, use [`ReverseHybridPath`](../src/reverse.rs):
