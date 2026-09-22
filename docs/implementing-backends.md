@@ -46,14 +46,21 @@ Returns the model's hidden-state representation for the given token sequence.
 - `token_ids` is guaranteed non-empty and `<= max_seq_len()` by the time
   `HybridNetwork::forward` calls this method. You do not need to validate
   length yourself, but defensive checks are fine.
-- The returned `Tensor` **must** have one of these shapes:
-  - **1-D** `[dim]` — a single pooled embedding vector. This is the simplest
-    form; the projector will use it directly.
-  - **2-D** `[seq_len, dim]` — per-token hidden states. The projector will
-    mean-pool across the sequence dimension, then resize to match the SNN
-    input width.
-- If the tensor is 2-D, `shape[1]` **must equal** `dim()`. The forward
-  pipeline checks this and returns `HybridError::InvalidConfig` on mismatch.
+- The returned `Tensor` **must** have one of these shapes. Every other rank
+  (0, 3, …) is rejected with `HybridError::HiddenStateRank` **before**
+  pooling or `SpikingNetwork::step`:
+  - **2-D** `[seq_len, dim]` — canonical per-token hidden states.
+    `shape[0]` **must equal** `token_ids.len()` (`HiddenStateSeqLen`) and
+    `shape[1]` **must equal** `dim()` (`HiddenStateDim`).
+  - **1-D** `[dim]` — an explicitly supported pre-pooled embedding. The
+    single axis **must equal** `dim()`. Sequence length is not encoded.
+- Backing `data.len()` must equal the layout product (`seq_len * dim` or
+  `dim`); mismatches return `HybridError::HiddenStateDataLen`.
+- Every value must be finite (no NaN or ±Inf); otherwise
+  `HybridError::NonFinite { stage: HiddenState, … }`.
+- `dim()` must be `> 0`. A zero hidden dimension is rejected as
+  `HiddenStateDim { expected: 1, got: 0 }` before pooling or `step`, even
+  if a deserialized tensor uses a matching zero-extent axis.
 - All shape dimensions must be `> 0`. `Tensor::from_vec` panics on zero-dim
   shapes.
 
@@ -71,8 +78,8 @@ fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
 ### `dim(&self) -> usize`
 
 The hidden-state embedding dimension. This must be consistent with the
-tensor shapes returned by `hidden_states`. For 2-D tensors, the pipeline
-validates `shape[1] == dim()`.
+tensor shapes returned by `hidden_states`. The pipeline validates
+`shape[1] == dim()` for rank 2 and `shape[0] == dim()` for rank 1.
 
 ### `max_seq_len(&self) -> usize`
 
@@ -135,6 +142,10 @@ fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<
 The number of input channels the SNN expects. This determines the length
 of the `stimuli` slice passed to `step`. The projector resizes the
 transformer embedding to match this width.
+
+**Zero channels are rejected.** `HybridNetwork::forward` returns
+`HybridError::ZeroSnnChannels` before projection or `step` when
+`num_channels()` is `0`.
 
 **Note:** `num_channels` is independent from `Transformer::dim()`. The
 transformer might produce a 128-dim embedding while the SNN only has 64
@@ -391,20 +402,24 @@ When you call `HybridNetwork::forward`, this is what happens internally
 token_ids: &[u32]
      |
      |  1. Validate: non-empty, len <= max_seq_len()
+     |     Validate: snn.num_channels() > 0  (else ZeroSnnChannels)
      v
      |  2. Transformer::hidden_states(token_ids)
      v
 Tensor [seq_len, dim]  or  Tensor [dim]
      |
-     |  3. Validate: if 2-D, shape[1] == dim()
+     |  3. Preflight: rank ∈ {1,2}, seq/dim/data length, all-finite
      v
      |  4. pool_embedding: mean-pool across seq dimension -> Vec<f32> of len dim
+     |     (reject non-finite pooled values)
      |  5. embed_to_stimuli_with_width:
      |       mean_pool -> resize_to(snn_width) -> tanh squash
+     |     (reject non-finite stimuli)
      v
 stimuli: Vec<f32>     len == snn.num_channels(),  all values in [-1, 1]
      |
      |  6. SpikingNetwork::step(&stimuli, &modulators)
+     |     (only after every preflight check passed; global_step still 0 on error)
      v
 fired_neurons: Vec<usize>
 ```
@@ -647,14 +662,18 @@ fn main() -> Result<()> {
 ### Shape mismatch: `hidden_states` dim vs `dim()`
 
 If your 2-D tensor's second dimension doesn't match `dim()`, the pipeline
-returns `HybridError::InvalidConfig`:
+returns `HybridError::HiddenStateDim { expected, got }` (not a Sentry
+runtime failure):
 
 ```
-invalid configuration: hidden state dim=64 does not match transformer.dim()=128
+hidden-state dimension mismatch: expected 128, got 64
 ```
+
+Rank-2 `shape[0]` must also equal `token_ids.len()` (`HiddenStateSeqLen`).
+Rank 0 / 3+ is `HiddenStateRank`. NaN / ±Inf is `NonFinite`.
 
 **Fix:** Ensure `Tensor::from_vec(data, &[seq_len, self.dim])` uses the same
-`dim` value as `fn dim(&self) -> usize`.
+`dim` value as `fn dim(&self) -> usize`, and `seq_len == token_ids.len()`.
 
 ### Zero-dim tensors panic
 
@@ -720,8 +739,14 @@ All errors come from [`src/error.rs`](../src/error.rs):
 | Variant | When |
 |---------|------|
 | `InputLengthMismatch { expected, got }` | Empty input or exceeds `max_seq_len` |
-| `InvalidConfig(String)` | Hidden-state dim doesn't match `dim()` |
-| `SnnStep(String)` | SNN internal error during `step` |
+| `HiddenStateRank { got }` | Hidden-state rank is not 1 or 2 |
+| `HiddenStateSeqLen { expected, got }` | Rank-2 `shape[0]` ≠ `token_ids.len()` |
+| `HiddenStateDim { expected, got }` | Hidden width ≠ `Transformer::dim()` |
+| `HiddenStateDataLen { expected, got }` | Backing `data.len()` ≠ layout product |
+| `NonFinite { stage, index }` | NaN or ±Inf in hidden / embedding / stimuli |
+| `ZeroSnnChannels` | `SpikingNetwork::num_channels()` is 0 |
+| `InvalidConfig(String)` | Other host/config contract failures |
+| `SnnStep(String)` | SNN internal error during `step` (Sentry when enabled) |
 | `ModelLoad { path, reason }` | File I/O failure during loading |
 | `MissingTensor { name, path }` | Expected tensor not found in checkpoint |
 | `GgufParse(String)` | GGUF file parse failure |

@@ -11,8 +11,9 @@ pub mod telemetry;
 pub mod tensor;
 pub mod traits;
 pub mod types;
+mod validate;
 
-pub use error::{HybridError, Result};
+pub use error::{ForwardValueStage, HybridError, Result};
 pub use hybrid::HybridNetwork;
 pub use projector::{project_spike_activity, spike_activity_features};
 pub use reverse::{ReverseHybridPath, WEIGHT_SUM_TOLERANCE};

@@ -88,6 +88,7 @@ use hybrid_fusion::Result;
 | `HybridConfig` / `TransformerConfig` | Predefined configs (`tiny`, `olmo_1b`). |
 | `projector::embed_to_stimuli_with_width` | Pool -> resize -> tanh adapter. |
 | `Tensor` | Lightweight owned tensor (data + shape). |
+| `HybridError` / `ForwardValueStage` | Orchestration errors, including hidden-state contract diagnostics. |
 
 ## Guides
 
