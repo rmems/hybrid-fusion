@@ -9,8 +9,8 @@
 //! surface; tests prefer `config()` / output fields when possible.
 
 use hybrid_fusion::{
-    HybridConfig, HybridError, HybridNetwork, HybridOutput, NeuroModulators, SpikingNetwork,
-    Tensor, Transformer,
+    ForwardValueStage, HybridConfig, HybridError, HybridNetwork, HybridOutput, NeuroModulators,
+    SpikingNetwork, Tensor, Transformer,
 };
 use std::cell::Cell;
 
@@ -363,13 +363,15 @@ fn test_tensor_accepts_rank0_scalar() {
 }
 
 /// Hidden-state width that disagrees with Transformer::dim() is rejected via
-/// the public forward API (InvalidConfig) rather than silently projected.
+/// the public forward API rather than silently projected.
 #[test]
 fn test_forward_rejects_hidden_dim_mismatch() {
     let cfg = HybridConfig::tiny();
+    let reported_dim = cfg.transformer.dim;
+    let actual_dim = reported_dim + 8;
     let t = MismatchedDimTransformer {
-        reported_dim: cfg.transformer.dim,
-        actual_dim: cfg.transformer.dim + 8,
+        reported_dim,
+        actual_dim,
         max_seq: cfg.transformer.max_seq_len,
     };
     let s = MockSnn::new(cfg.snn_input_channels);
@@ -378,10 +380,38 @@ fn test_forward_rejects_hidden_dim_mismatch() {
     let err = net
         .forward(&[1, 2, 3], None)
         .expect_err("mismatched hidden dim should fail");
-    // Assert the public error variant only — do not pin free-form message text.
     match err {
-        HybridError::InvalidConfig(_) => {}
-        other => panic!("expected InvalidConfig, got {other:?}"),
+        HybridError::HiddenStateDim { expected, got } => {
+            assert_eq!(expected, reported_dim);
+            assert_eq!(got, actual_dim);
+        }
+        other => panic!("expected HiddenStateDim, got {other:?}"),
+    }
+    assert_eq!(net.global_step(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Preflight contract errors (public API)
+// ---------------------------------------------------------------------------
+
+struct ScriptedTransformer {
+    dim: usize,
+    max_seq: usize,
+    hidden: Tensor,
+}
+
+impl Transformer for ScriptedTransformer {
+    fn hidden_states(&self, _token_ids: &[u32]) -> Tensor {
+        self.hidden.clone()
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn max_seq_len(&self) -> usize {
+        self.max_seq
+    }
+    fn param_count(&self) -> usize {
+        self.dim
     }
 }
 
@@ -430,6 +460,35 @@ impl SpikingNetwork for CountingSnn {
         _modulators: &NeuroModulators,
     ) -> hybrid_fusion::Result<Vec<usize>> {
         self.step_calls.set(self.step_calls.get() + 1);
+        Ok(Vec::new())
+    }
+
+    fn num_channels(&self) -> usize {
+        self.channels
+    }
+}
+
+struct SpySnn {
+    channels: usize,
+    step_calls: usize,
+}
+
+impl SpySnn {
+    fn new(channels: usize) -> Self {
+        Self {
+            channels,
+            step_calls: 0,
+        }
+    }
+}
+
+impl SpikingNetwork for SpySnn {
+    fn step(
+        &mut self,
+        _stimuli: &[f32],
+        _modulators: &NeuroModulators,
+    ) -> hybrid_fusion::Result<Vec<usize>> {
+        self.step_calls += 1;
         Ok(Vec::new())
     }
 
@@ -620,6 +679,41 @@ fn test_try_new_accepts_tiny_config() {
     assert_eq!(net.config().snn_input_channels, 64);
     assert_eq!(net.transformer.dim(), 128);
     assert_eq!(net.snn.num_channels(), 64);
+}
+
+fn scripted_forward(
+    hidden: Tensor,
+    dim: usize,
+    channels: usize,
+    tokens: &[u32],
+) -> (
+    HybridNetwork<ScriptedTransformer, SpySnn>,
+    hybrid_fusion::Result<HybridOutput>,
+) {
+    let cfg = HybridConfig::tiny();
+    let mut net = HybridNetwork::new(
+        ScriptedTransformer {
+            dim,
+            max_seq: cfg.transformer.max_seq_len,
+            hidden,
+        },
+        SpySnn::new(channels),
+        cfg,
+    );
+    let result = net.forward(tokens, None);
+    (net, result)
+}
+
+#[test]
+fn public_forward_rejects_rank0_and_does_not_step() {
+    let dim = HybridConfig::tiny().transformer.dim;
+    let channels = HybridConfig::tiny().snn_input_channels;
+    let (net, result) = scripted_forward(Tensor::from_vec(vec![1.0], &[]), dim, channels, &[1, 2]);
+    match result.unwrap_err() {
+        HybridError::HiddenStateRank { got: 0 } => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
     assert_eq!(net.global_step(), 0);
 }
 
@@ -684,4 +778,139 @@ fn test_new_skips_validation_compatibility() {
     let s = MockSnn::new(mock_channels);
     let net = HybridNetwork::new(t, s, cfg);
     assert_ne!(net.snn.num_channels(), net.config().snn_input_channels);
+}
+
+#[test]
+fn public_forward_rejects_rank1_and_rank3() {
+    let dim = HybridConfig::tiny().transformer.dim;
+    let channels = HybridConfig::tiny().snn_input_channels;
+
+    let (net, result) =
+        scripted_forward(Tensor::from_vec(vec![0.0; 3], &[3]), dim, channels, &[1, 2]);
+    match result.unwrap_err() {
+        HybridError::HiddenStateDim { expected, got: 3 } if expected == dim => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
+
+    let (net, result) = scripted_forward(
+        Tensor::from_vec(vec![0.0; 8], &[2, 2, 2]),
+        dim,
+        channels,
+        &[1, 2],
+    );
+    match result.unwrap_err() {
+        HybridError::HiddenStateRank { got: 3 } => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
+    assert_eq!(net.global_step(), 0);
+}
+
+#[test]
+fn public_forward_rejects_seq_len_and_non_finite() {
+    let dim = HybridConfig::tiny().transformer.dim;
+    let channels = HybridConfig::tiny().snn_input_channels;
+    let data: Vec<f32> = (0..3 * dim).map(|i| i as f32 * 0.01).collect();
+    let (net, result) = scripted_forward(Tensor::from_vec(data, &[3, dim]), dim, channels, &[1, 2]);
+    match result.unwrap_err() {
+        HybridError::HiddenStateSeqLen {
+            expected: 2,
+            got: 3,
+        } => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
+
+    let mut hidden = Tensor::from_vec(vec![0.1; 2 * dim], &[2, dim]);
+    hidden.data_mut()[0] = f32::NAN;
+    let (net, result) = scripted_forward(hidden, dim, channels, &[1, 2]);
+    match result.unwrap_err() {
+        HybridError::NonFinite {
+            stage: ForwardValueStage::HiddenState,
+            index: 0,
+        } => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
+
+    let mut hidden = Tensor::from_vec(vec![0.1; 2 * dim], &[2, dim]);
+    hidden.data_mut()[1] = f32::INFINITY;
+    let (net, result) = scripted_forward(hidden, dim, channels, &[1, 2]);
+    match result.unwrap_err() {
+        HybridError::NonFinite {
+            stage: ForwardValueStage::HiddenState,
+            index: 1,
+        } => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
+
+    let mut hidden = Tensor::from_vec(vec![0.1; 2 * dim], &[2, dim]);
+    hidden.data_mut()[2] = f32::NEG_INFINITY;
+    let (net, result) = scripted_forward(hidden, dim, channels, &[1, 2]);
+    match result.unwrap_err() {
+        HybridError::NonFinite {
+            stage: ForwardValueStage::HiddenState,
+            index: 2,
+        } => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
+}
+
+#[test]
+fn public_forward_rejects_empty_and_inconsistent_storage() {
+    let dim = HybridConfig::tiny().transformer.dim;
+    let channels = HybridConfig::tiny().snn_input_channels;
+    let empty: Tensor = serde_json::from_value(serde_json::json!({
+        "data": [],
+        "shape": [2, dim],
+    }))
+    .unwrap();
+    let (net, result) = scripted_forward(empty, dim, channels, &[1, 2]);
+    match result.unwrap_err() {
+        HybridError::HiddenStateDataLen { expected, got: 0 } if expected == 2 * dim => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
+
+    let inconsistent: Tensor = serde_json::from_value(serde_json::json!({
+        "data": [0.0, 1.0],
+        "shape": [2, dim],
+    }))
+    .unwrap();
+    let (net, result) = scripted_forward(inconsistent, dim, channels, &[1, 2]);
+    match result.unwrap_err() {
+        HybridError::HiddenStateDataLen { expected, got: 2 } if expected == 2 * dim => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
+    assert_eq!(net.global_step(), 0);
+}
+
+#[test]
+fn public_forward_rejects_zero_snn_channels() {
+    let dim = HybridConfig::tiny().transformer.dim;
+    let hidden = Tensor::from_vec(vec![0.1; 2 * dim], &[2, dim]);
+    let (net, result) = scripted_forward(hidden, dim, 0, &[1, 2]);
+    match result.unwrap_err() {
+        HybridError::ZeroSnnChannels => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
+    assert_eq!(net.global_step(), 0);
+}
+
+#[test]
+fn public_forward_valid_rank2_regression() {
+    let mut net = build_network();
+    let tokens = [1u32, 2, 3, 4];
+    let out = net.forward(&tokens, None).unwrap();
+    assert_eq!(out.embedding.len(), net.transformer.dim());
+    assert_eq!(out.stimuli.len(), net.snn.num_channels());
+    assert_eq!(out.global_step, 1);
+    let dim = net.transformer.dim();
+    let expected_0 = 0.01 * dim as f32 * (tokens.len() - 1) as f32 / 2.0;
+    assert!((out.embedding[0] - expected_0).abs() < 1e-5);
 }

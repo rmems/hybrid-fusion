@@ -16,8 +16,11 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - `HybridError::ConfigMismatch { field, configured, backend }` names the
   disagreeing construction field plus both values. Zero capacities use the
   same variant (`configured` and/or `backend` is `0`).
-
+- Structured forward-path contract errors: `HiddenStateRank`, `HiddenStateSeqLen`,
+  `HiddenStateDim`, `HiddenStateDataLen`, `NonFinite { stage, index }` (with
+  `ForwardValueStage`), and `ZeroSnnChannels` ([#39](https://github.com/rmems/hybrid-fusion/pull/39)).
 - `docs/extraction-map.md` — maps extractable LLM/SNN/MoE architecture from corinth-canal and grok-ozempic into hybrid-fusion traits vs sibling crates (#21).
+- Dual checkpoint contract: `SafetensorsLoader` / `SafetensorsLayout` / `TensorManifestEntry`, plus `Dtype` (full Safetensors header vocabulary), `TensorRole` (name-heuristic classifier), and `HybridError::SafetensorsParse` ([#27](https://github.com/rmems/hybrid-fusion/issues/27)).
 - Reverse-path contracts: `SpikeActivity`, `ExpertRouter`, `ExpertRouteOutput`; MoE fields on `HybridOutput`; `StubExpertRouter` under `backends` (#22).
 - `ProjectionMode` + pure `project_spike_activity` / `spike_activity_features` (SNN→embedding for MoE; no learned W/b, no SAAQ) (#25).
 - Pure MoE math in `routing`: synthetic gates, softmax, top-k, routing entropy; `SyntheticExpertRouter` under `backends` (#26).
@@ -29,8 +32,16 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - Docs and examples prefer `HybridNetwork::try_new`. `HybridNetwork::new`
   remains an unvalidated pre-1.0 compatibility wrapper and does not panic
   (Linear [RM-1357](https://linear.app/rpd-34/issue/RM-1357)).
-- **`HybridError` gains** `ConfigMismatch` (exhaustive matches must be updated).
-
+- **`HybridNetwork::forward` preflights transformer hidden-state rank, sequence
+  length, dimension, backing length, and finiteness**, and rejects a zero-channel
+  SNN, before pooling or `snn.step`. Rank 2 `[seq, dim]` remains canonical; rank 1
+  `[dim]` stays an explicit pre-pooled layout. Contract errors do not increment
+  `global_step` and are not reported to Sentry ([#39](https://github.com/rmems/hybrid-fusion/pull/39)).
+- **BREAKING**: `HybridError` gains `ConfigMismatch`, `SafetensorsParse`, and
+  structured forward-contract variants. The enum is exhaustive (no
+  `#[non_exhaustive]`); downstream `match` arms must be updated (RM-1357, #27,
+  #39).
+- **BREAKING**: `Dtype` now includes the full Safetensors header vocabulary (`U16`/`U32`/`U64`, `F4`, `F6_*`, `F8_*`, `C64`). Exhaustive matches must be updated (#27).
 - **`HybridOutput` gains** optional `expert_weights`, `selected_experts`, `routing_entropy` (struct-literal / exhaustive matches must be updated). ANN→SNN `forward` sets them to `None` (#22).
 - **`routing::softmax` accumulates its denominator in `f64`** (was `f32`). Returned
   weights now re-accumulate to `1.0` within one `f32` rounding at every expert

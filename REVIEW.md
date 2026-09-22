@@ -20,7 +20,7 @@ Copy-paste this into every PR review:
 
 - [ ] No concrete `cortex-tensor`, `neuromod`, or backend-specific types in public API
 - [ ] Pluggable surface stays trait/type contracts: `Transformer`, `SpikingNetwork`,
-      `GgufLoader`, `ExpertRouter`, `SpikeActivity` (plus config/output types)
+      `GgufLoader`, `SafetensorsLoader`, `ExpertRouter`, `SpikeActivity` (plus config/output types)
 - [ ] No new `use` statements pulling in concrete backend crates
 - [ ] Public types are generic over trait bounds, not pinned to implementations
 - [ ] Reverse-path MoE: pure routing math / types here; mmap loaders and gate matmul
@@ -35,6 +35,10 @@ Copy-paste this into every PR review:
 - [ ] `token_ids.len()` never exceeds `transformer.max_seq_len()`
 - [ ] `HybridNetwork::try_new` rejects zero or disagreeing transformer dim,
       max sequence length, and SNN channel counts (`HybridError::ConfigMismatch`)
+- [ ] Hidden-state rank is 1 (`[dim]`) or 2 (`[seq, dim]`); other ranks error before `snn.step`
+- [ ] `Transformer::dim()` is `> 0`; Rank-2 `shape[0] == token_ids.len()` and hidden width equals `Transformer::dim()`
+- [ ] Hidden / pooled / stimuli buffers are finite; zero-channel SNNs are rejected
+- [ ] `global_step` is unchanged on every forward-path validation failure
 - [ ] No silent fallback on shape mismatches — return an error
 
 ### Safety

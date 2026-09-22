@@ -1,9 +1,10 @@
 # Implementing a Backend
 
 `hybrid-fusion` is backend-agnostic: it defines the `Transformer`, `SpikingNetwork`,
-`GgufLoader`, `ExpertRouter`, `SpikeActivity`, and `NeuroModulators` contracts but
-ships no concrete math. This guide explains every trait method, how data flows
-through `HybridNetwork::try_new` / `HybridNetwork::forward`, and provides a
+`GgufLoader`, `SafetensorsLoader`, `ExpertRouter`, `SpikeActivity`, and
+`NeuroModulators` contracts but ships no concrete math. This guide explains every
+trait method, how data flows through `HybridNetwork::try_new` /
+`HybridNetwork::forward`, and provides a
 minimal compilable example you can adapt for your own backend.
 
 For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs).
@@ -16,12 +17,13 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 2. [SpikingNetwork trait](#2-spikingnetwork-trait)
 3. [NeuroModulators](#3-neuromodulators)
 4. [GgufLoader / GgufLayout](#4-ggufloader--gguflayout)
-5. [How construction and the forward pipeline work](#5-how-construction-and-the-forward-pipeline-work)
-6. [Tensor shape conventions](#6-tensor-shape-conventions)
-7. [Minimal working example](#7-minimal-working-example)
-8. [Common pitfalls](#8-common-pitfalls)
-9. [Error reference](#9-error-reference)
-10. [Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath](#10-reverse-path-spikeactivity--expertrouter--reversehybridpath)
+5. [SafetensorsLoader / SafetensorsLayout](#5-safetensorsloader--safetensorslayout)
+6. [How construction and the forward pipeline work](#6-how-construction-and-the-forward-pipeline-work)
+7. [Tensor shape conventions](#7-tensor-shape-conventions)
+8. [Minimal working example](#8-minimal-working-example)
+9. [Common pitfalls](#9-common-pitfalls)
+10. [Error reference](#10-error-reference)
+11. [Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath](#11-reverse-path-spikeactivity--expertrouter--reversehybridpath)
 
 ---
 
@@ -45,14 +47,21 @@ Returns the model's hidden-state representation for the given token sequence.
 - `token_ids` is guaranteed non-empty and `<= max_seq_len()` by the time
   `HybridNetwork::forward` calls this method. You do not need to validate
   length yourself, but defensive checks are fine.
-- The returned `Tensor` **must** have one of these shapes:
-  - **1-D** `[dim]` — a single pooled embedding vector. This is the simplest
-    form; the projector will use it directly.
-  - **2-D** `[seq_len, dim]` — per-token hidden states. The projector will
-    mean-pool across the sequence dimension, then resize to match the SNN
-    input width.
-- If the tensor is 2-D, `shape[1]` **must equal** `dim()`. The forward
-  pipeline checks this and returns `HybridError::InvalidConfig` on mismatch.
+- The returned `Tensor` **must** have one of these shapes. Every other rank
+  (0, 3, …) is rejected with `HybridError::HiddenStateRank` **before**
+  pooling or `SpikingNetwork::step`:
+  - **2-D** `[seq_len, dim]` — canonical per-token hidden states.
+    `shape[0]` **must equal** `token_ids.len()` (`HiddenStateSeqLen`) and
+    `shape[1]` **must equal** `dim()` (`HiddenStateDim`).
+  - **1-D** `[dim]` — an explicitly supported pre-pooled embedding. The
+    single axis **must equal** `dim()`. Sequence length is not encoded.
+- Backing `data.len()` must equal the layout product (`seq_len * dim` or
+  `dim`); mismatches return `HybridError::HiddenStateDataLen`.
+- Every value must be finite (no NaN or ±Inf); otherwise
+  `HybridError::NonFinite { stage: HiddenState, … }`.
+- `dim()` must be `> 0`. A zero hidden dimension is rejected as
+  `HiddenStateDim { expected: 1, got: 0 }` before pooling or `step`, even
+  if a deserialized tensor uses a matching zero-extent axis.
 - All shape dimensions must be `> 0`. `Tensor::from_vec` panics on zero-dim
   shapes.
 
@@ -70,8 +79,8 @@ fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
 ### `dim(&self) -> usize`
 
 The hidden-state embedding dimension. This must be consistent with the
-tensor shapes returned by `hidden_states`. For 2-D tensors, the pipeline
-validates `shape[1] == dim()`.
+tensor shapes returned by `hidden_states`. The pipeline validates
+`shape[1] == dim()` for rank 2 and `shape[0] == dim()` for rank 1.
 
 ### `max_seq_len(&self) -> usize`
 
@@ -134,6 +143,10 @@ fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<
 The number of input channels the SNN expects. This determines the length
 of the `stimuli` slice passed to `step`. The projector resizes the
 transformer embedding to match this width.
+
+**Zero channels are rejected.** `HybridNetwork::forward` returns
+`HybridError::ZeroSnnChannels` before projection or `step` when
+`num_channels()` is `0`.
 
 **Note:** `num_channels` is independent from `Transformer::dim()`. The
 transformer might produce a 128-dim embedding while the SNN only has 64
@@ -262,7 +275,134 @@ assert_eq!(layout.architecture, "my-arch");
 
 ---
 
-## 5. How construction and the forward pipeline work
+## 5. SafetensorsLoader / SafetensorsLayout
+
+```rust
+pub trait SafetensorsLoader {
+    fn load(&self, path: &str) -> Result<SafetensorsLayout>;
+}
+
+pub struct SafetensorsLayout {
+    pub architecture: String,
+    pub tensor_count: usize,
+    pub tensors: Vec<TensorManifestEntry>,
+}
+
+pub struct TensorManifestEntry {
+    pub name: String,
+    pub dtype: Dtype,
+    pub shape: Vec<usize>,
+    pub shard: Option<String>,
+    pub role: TensorRole,
+    pub labels: Vec<String>,
+}
+```
+
+`SafetensorsLoader` is the Safetensors counterpart of [`GgufLoader`](#4-ggufloader--gguflayout).
+It is **not** called by the forward pipeline — it exists so backend
+implementations can inventory a `.safetensors` file or a Hugging Face shard
+index (`model.safetensors.index.json`) without this crate parsing bytes.
+
+Concrete header parse, mmap, and payload extract stay in
+[`engram-parser`](https://github.com/rmems/engram-parser) (off-by-default
+`safetensors` feature). Do **not** add a Safetensors crate dependency here.
+
+### Implementing SafetensorsLoader
+
+```rust
+use hybrid_fusion::{
+    Dtype, HybridError, Result, SafetensorsLayout, SafetensorsLoader,
+    TensorManifestEntry, TensorRole,
+};
+
+struct MySafetensorsLoader;
+
+impl SafetensorsLoader for MySafetensorsLoader {
+    fn load(&self, path: &str) -> Result<SafetensorsLayout> {
+        // Parse headers at `path` in engram-parser — not in this crate.
+        // Return Err(HybridError::ModelLoad { path, reason }) on I/O failure
+        // Return Err(HybridError::SafetensorsParse(...)) for header errors
+        // Return Err(HybridError::UnsupportedFormat(...)) for unknown formats
+        // Return Err(HybridError::MissingTensor { name, path }) if a required
+        //   tensor is absent from the inventory
+
+        let file = std::fs::File::open(path)
+            .map_err(|e| HybridError::ModelLoad {
+                path: path.to_string(),
+                reason: e.to_string(),
+            })?;
+
+        // ... inspect header JSON, shard index, count tensors ...
+        let _ = file;
+
+        let tensors = vec![TensorManifestEntry::new(
+            "model.layers.0.mlp.gate.weight".into(),
+            Dtype::F16,
+            vec![8, 16],
+            Some("model-00001-of-00002.safetensors".into()),
+            vec![],
+        )];
+        Ok(SafetensorsLayout::new("my-arch".into(), tensors))
+    }
+}
+```
+
+### When to use it
+
+- Header-only inspect of a Safetensors checkpoint or HF shard index.
+- Building a deterministic tensor manifest (name, dtype, shape, shard refs).
+- Discovering MoE router / expert **candidates** via [`TensorRole`] before
+  constructing an `ExpertRouter` (issues #22 / #24 / #26).
+- Validating that a checkpoint matches the expected architecture before
+  constructing backend types.
+
+Typical wiring:
+
+```rust
+let loader = MySafetensorsLoader;
+let layout = loader.load("model.safetensors")?;
+assert_eq!(layout.architecture, "my-arch");
+assert_eq!(layout.tensor_count, layout.tensors.len());
+let routers = layout.entries_with_role(TensorRole::Router);
+// Use router/expert candidates to wire ExpertRouter / dry-run planner
+```
+
+**Manifest metadata vs runtime `Tensor`:** checkpoint inventory uses
+`TensorManifestEntry::shape` as reported by the Safetensors header. Zero-length
+dimensions and rank-0 shapes (`[]`) are valid in that metadata; they are **not**
+subject to the runtime rule that [`Tensor::from_vec`](../src/tensor.rs) rejects
+zero-extent axes. After JSON deserialization, `SafetensorsLayout.tensor_count` is
+always recomputed from `tensors.len()` so a stale count in the wire format cannot
+desync the manifest.
+
+### TensorRole (MoE candidate discovery)
+
+`TensorRole` is a **name-heuristic** classifier — no parsing, no family
+adapters. `TensorManifestEntry::new` fills `role` from the tensor name:
+
+| Role | Typical names |
+|------|----------------|
+| `Router` | `…mlp.gate.weight`, `…block_sparse_moe.gate…`, `…moe_router…`, any component containing `router` |
+| `ExpertWeight` | `…experts.{i}…` (wins over `gate` / `router` so expert `gate_proj` stays expert) |
+| `Attention` | `self_attn`, `SelfAttention`, `q_proj`, … |
+| `Embedding` | `embed_tokens`, `lm_head`, T5-style `shared`, … |
+| `Norm` | `layernorm`, `rms_norm`, `*.norm.*`, GPT-style `ln_1` / `ln_f` / `ln_*` |
+| `Other` (default) | dense FFN `gate_proj` / `up_proj`, unknown names |
+
+Downstream:
+
+- **#22 `ExpertRouter`** — locate gate tensors to bind a checkpoint-backed router.
+- **#26 pure MoE math** — file-free; roles are unused until a real gate matmul
+  backend lands in `cortex-tensor` + `engram-parser`.
+- **#24 `HybridStagePlanner`** — classify stage names (router vs expert vs
+  attention) for dry-run precision tiers without loading weights.
+
+`Dtype` is the Safetensors header vocabulary (`F32`, `BF16`, `BOOL`, `U16`,
+`F8_E4M3`, `C64`, …), not a precision-planning policy.
+
+---
+
+## 6. How construction and the forward pipeline work
 
 Prefer `HybridNetwork::try_new`. It compares `HybridConfig` against
 backend-reported sizes **without** calling `Transformer::hidden_states` or
@@ -285,20 +425,24 @@ When you call `HybridNetwork::forward`, this is what happens internally
 token_ids: &[u32]
      |
      |  1. Validate: non-empty, len <= max_seq_len()
+     |     Validate: snn.num_channels() > 0  (else ZeroSnnChannels)
      v
      |  2. Transformer::hidden_states(token_ids)
      v
 Tensor [seq_len, dim]  or  Tensor [dim]
      |
-     |  3. Validate: if 2-D, shape[1] == dim()
+     |  3. Preflight: rank ∈ {1,2}, seq/dim/data length, all-finite
      v
      |  4. pool_embedding: mean-pool across seq dimension -> Vec<f32> of len dim
+     |     (reject non-finite pooled values)
      |  5. embed_to_stimuli_with_width:
      |       mean_pool -> resize_to(snn_width) -> tanh squash
+     |     (reject non-finite stimuli)
      v
 stimuli: Vec<f32>     len == snn.num_channels(),  all values in [-1, 1]
      |
      |  6. SpikingNetwork::step(&stimuli, &modulators)
+     |     (only after every preflight check passed; global_step still 0 on error)
      v
 fired_neurons: Vec<usize>
 ```
@@ -341,7 +485,7 @@ pub struct HybridOutput {
 
 ---
 
-## 6. Tensor shape conventions
+## 7. Tensor shape conventions
 
 `Tensor` is a lightweight owned type: `data: Vec<f32>` + `shape: Vec<usize>`
 (see [`src/tensor.rs`](../src/tensor.rs)).
@@ -374,7 +518,7 @@ let t = Tensor::zeros(&[8, 256]);
 
 ---
 
-## 7. Minimal working example
+## 8. Minimal working example
 
 This example implements both traits with trivial math and wires them into
 `HybridNetwork`. It compiles against the `hybrid-fusion` public API.
@@ -538,7 +682,7 @@ fn main() -> Result<()> {
 
 ---
 
-## 8. Common pitfalls
+## 9. Common pitfalls
 
 ### Config vs backend mismatch at construction
 
@@ -555,14 +699,18 @@ configuration mismatch for transformer.dim: configured 64, backend 128
 ### Shape mismatch: `hidden_states` dim vs `dim()`
 
 If your 2-D tensor's second dimension doesn't match `dim()`, the pipeline
-returns `HybridError::InvalidConfig`:
+returns `HybridError::HiddenStateDim { expected, got }` (not a Sentry
+runtime failure):
 
 ```
-invalid configuration: hidden state dim=64 does not match transformer.dim()=128
+hidden-state dimension mismatch: expected 128, got 64
 ```
+
+Rank-2 `shape[0]` must also equal `token_ids.len()` (`HiddenStateSeqLen`).
+Rank 0 / 3+ is `HiddenStateRank`. NaN / ±Inf is `NonFinite`.
 
 **Fix:** Ensure `Tensor::from_vec(data, &[seq_len, self.dim])` uses the same
-`dim` value as `fn dim(&self) -> usize`.
+`dim` value as `fn dim(&self) -> usize`, and `seq_len == token_ids.len()`.
 
 ### Zero-dim tensors panic
 
@@ -621,7 +769,7 @@ it to the caller. Don't panic — `HybridNetwork::forward` expects a
 
 ---
 
-## 9. Error reference
+## 10. Error reference
 
 All errors come from [`src/error.rs`](../src/error.rs):
 
@@ -629,18 +777,25 @@ All errors come from [`src/error.rs`](../src/error.rs):
 |---------|------|
 | `InputLengthMismatch { expected, got }` | Empty input or exceeds `max_seq_len` |
 | `ConfigMismatch { field, configured, backend }` | `try_new`: config vs backend dim / max sequence / SNN channels (including zeros) |
-| `InvalidConfig(String)` | Hidden-state dim doesn't match `dim()` |
-| `SnnStep(String)` | SNN internal error during `step` |
+| `HiddenStateRank { got }` | Hidden-state rank is not 1 or 2 |
+| `HiddenStateSeqLen { expected, got }` | Rank-2 `shape[0]` ≠ `token_ids.len()` |
+| `HiddenStateDim { expected, got }` | Hidden width ≠ `Transformer::dim()` |
+| `HiddenStateDataLen { expected, got }` | Backing `data.len()` ≠ layout product |
+| `NonFinite { stage, index }` | NaN or ±Inf in hidden / embedding / stimuli |
+| `ZeroSnnChannels` | `SpikingNetwork::num_channels()` is 0 |
+| `InvalidConfig(String)` | Other host/config contract failures |
+| `SnnStep(String)` | SNN internal error during `step` (Sentry when enabled) |
 | `ModelLoad { path, reason }` | File I/O failure during loading |
 | `MissingTensor { name, path }` | Expected tensor not found in checkpoint |
 | `GgufParse(String)` | GGUF file parse failure |
+| `SafetensorsParse(String)` | Safetensors header / shard-index parse failure |
 | `UnsupportedFormat(String)` | Unknown checkpoint format |
 | `Io(...)` | std::io error (propagated via `From`) |
 | `Json(...)` | serde_json error (propagated via `From`) |
 
 ---
 
-## 10. Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath
+## 11. Reverse path: SpikeActivity + ExpertRouter + ReverseHybridPath
 
 The **ANN → SNN** path above is complete for `HybridNetwork::forward`. A
 second path is being extracted from research (corinth-canal):
@@ -694,8 +849,11 @@ normalized distribution (e.g. via `softmax`), not raw gate scores.
 **Reference stub** (feature `backends`): `StubExpertRouter` returns a uniform
 gate distribution and selects `0..top_k`.
 
-**Out of scope for this crate's trait surface:** GGUF/Safetensors weight load,
-family adapters, real gate matmul (see extraction map / sibling crates).
+**Out of scope for this crate:** Safetensors **parsing / mmap / payload extract**
+(and GGUF parse/mmap) stay in `engram-parser`. Family adapters and real gate
+matmul stay in sibling crates. The **trait/layout contract**
+(`SafetensorsLoader`, `SafetensorsLayout`, `TensorRole`) now lives here,
+symmetric to `GgufLoader`.
 
 `HybridNetwork::forward` (ANN → SNN) always leaves MoE fields as `None`.
 For the reverse path, use [`ReverseHybridPath`](../src/reverse.rs):

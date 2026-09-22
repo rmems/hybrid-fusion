@@ -11,8 +11,9 @@ pub mod telemetry;
 pub mod tensor;
 pub mod traits;
 pub mod types;
+mod validate;
 
-pub use error::{HybridError, Result};
+pub use error::{ForwardValueStage, HybridError, Result};
 pub use hybrid::HybridNetwork;
 pub use projector::{project_spike_activity, spike_activity_features};
 pub use reverse::{ReverseHybridPath, WEIGHT_SUM_TOLERANCE};
@@ -22,10 +23,13 @@ pub use routing::{
 };
 pub use tensor::Tensor;
 pub use traits::{
-    ExpertRouteOutput, ExpertRouter, GgufLayout, GgufLoader, NeuroModulators, SpikeActivity,
-    SpikingNetwork, Transformer,
+    ExpertRouteOutput, ExpertRouter, GgufLayout, GgufLoader, NeuroModulators, SafetensorsLayout,
+    SafetensorsLoader, SpikeActivity, SpikingNetwork, Transformer,
 };
-pub use types::{HybridConfig, HybridOutput, ProjectionMode, TransformerConfig};
+pub use types::{
+    Dtype, HybridConfig, HybridOutput, ProjectionMode, TensorManifestEntry, TensorRole,
+    TransformerConfig,
+};
 
 /// Re-export of the `sentry` crate when the `sentry` feature is enabled.
 ///
