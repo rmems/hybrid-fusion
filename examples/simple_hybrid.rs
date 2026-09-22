@@ -14,7 +14,8 @@ fn main() {
     let transformer = SimpleTransformer::new(config.transformer.clone());
     let snn = SimpleSnn::new(config.snn_input_channels);
 
-    let mut network = HybridNetwork::new(transformer, snn, config);
+    let mut network =
+        HybridNetwork::try_new(transformer, snn, config).expect("config matches backends");
 
     let token_ids: Vec<u32> = vec![42, 17, 8, 99];
     let modulators = NeuroModulators {

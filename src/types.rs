@@ -240,6 +240,12 @@ impl TransformerConfig {
     }
 }
 
+/// Orchestrator configuration for a transformer plus SNN pair.
+///
+/// [`crate::HybridNetwork::try_new`] requires `transformer.dim`,
+/// `transformer.max_seq_len`, and `snn_input_channels` to be non-zero and to
+/// match the injected [`crate::Transformer`] / [`crate::SpikingNetwork`].
+/// [`crate::HybridNetwork::new`] skips that check (pre-1.0 compatibility).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridConfig {
     pub transformer: TransformerConfig,

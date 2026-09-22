@@ -60,21 +60,73 @@ v0.3 ownership plan.
 
 ## Quick start
 
-```rust
-use hybrid_fusion::{HybridConfig, HybridNetwork, NeuroModulators, Transformer, SpikingNetwork};
-use hybrid_fusion::Tensor;
-use hybrid_fusion::Result;
+Prefer [`HybridNetwork::try_new`](https://docs.rs/hybrid-fusion/latest/hybrid_fusion/struct.HybridNetwork.html#method.try_new)
+so transformer dim, max sequence length, and SNN channel count are checked
+against the backends before the first forward call.
+[`HybridNetwork::new`](https://docs.rs/hybrid-fusion/latest/hybrid_fusion/struct.HybridNetwork.html#method.new)
+remains as an unvalidated pre-1.0 compatibility constructor.
 
-// Implement traits for your backend, then wire them:
-// let mut net = HybridNetwork::new(my_transformer, my_snn, HybridConfig::tiny());
-// let out = net.forward(&[1u32, 2, 3, 4], None)?;
+```rust
+use hybrid_fusion::{
+    HybridConfig, HybridNetwork, NeuroModulators, Result, SpikingNetwork, Tensor, Transformer,
+};
+
+struct TinyTransformer {
+    dim: usize,
+    max_seq_len: usize,
+}
+
+impl Transformer for TinyTransformer {
+    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+        let seq = token_ids.len();
+        Tensor::from_vec(vec![0.1; seq * self.dim], &[seq, self.dim])
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+    fn param_count(&self) -> usize {
+        0
+    }
+}
+
+struct TinySnn {
+    channels: usize,
+}
+
+impl SpikingNetwork for TinySnn {
+    fn step(
+        &mut self,
+        _stimuli: &[f32],
+        _modulators: &NeuroModulators,
+    ) -> Result<Vec<usize>> {
+        Ok(Vec::new())
+    }
+    fn num_channels(&self) -> usize {
+        self.channels
+    }
+}
+
+let config = HybridConfig::tiny();
+let transformer = TinyTransformer {
+    dim: config.transformer.dim,
+    max_seq_len: config.transformer.max_seq_len,
+};
+let snn = TinySnn {
+    channels: config.snn_input_channels,
+};
+let mut net = HybridNetwork::try_new(transformer, snn, config).unwrap();
+let out = net.forward(&[1u32, 2, 3, 4], None).unwrap();
+assert_eq!(out.embedding.len(), 128);
 ```
 
 ## Public surface
 
 | Item | Purpose |
 |------|---------|
-| `HybridNetwork<T, S>` | Generic orchestrator over any `Transformer` + `SpikingNetwork`. |
+| `HybridNetwork<T, S>` | Generic orchestrator over any `Transformer` + `SpikingNetwork`. Prefer `try_new` for construction. |
 | `ReverseHybridPath<R>` | Reverse-path host: activity → project → `ExpertRouter` → MoE fields. |
 | `Transformer` trait | Backend-agnostic transformer interface. |
 | `SpikingNetwork` trait | Backend-agnostic SNN interface. |
@@ -105,8 +157,8 @@ use hybrid_fusion::Result;
    applications share the same crate version and global hub as the library.
 2. `HybridNetwork::forward` captures **backend/runtime** failures (e.g. SNN
    step errors) via `telemetry::capture_error`. Caller validation errors
-   (`InputLengthMismatch`, config mismatches) are returned without capture
-   so routine bad requests do not flood Sentry quota.
+   (`InputLengthMismatch`, `ConfigMismatch`, other config mismatches) are
+   returned without capture so routine bad requests do not flood Sentry quota.
 3. Panic capture is enabled through the underlying Sentry client features.
    Apps can also call `hybrid_fusion::telemetry::capture_error` for their
    own error paths.

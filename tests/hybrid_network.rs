@@ -12,6 +12,7 @@ use hybrid_fusion::{
     ForwardValueStage, HybridConfig, HybridError, HybridNetwork, HybridOutput, NeuroModulators,
     SpikingNetwork, Tensor, Transformer,
 };
+use std::cell::Cell;
 
 // ---------------------------------------------------------------------------
 // Mock backends
@@ -414,6 +415,59 @@ impl Transformer for ScriptedTransformer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// HybridNetwork::try_new construction validation
+// ---------------------------------------------------------------------------
+
+struct CountingTransformer {
+    dim: usize,
+    max_seq: usize,
+    hidden_calls: Cell<usize>,
+    param_calls: Cell<usize>,
+}
+
+impl Transformer for CountingTransformer {
+    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+        self.hidden_calls.set(self.hidden_calls.get() + 1);
+        let seq = token_ids.len().max(1);
+        let data = vec![0.1f32; seq * self.dim.max(1)];
+        Tensor::from_vec(data, &[seq, self.dim.max(1)])
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+
+    fn max_seq_len(&self) -> usize {
+        self.max_seq
+    }
+
+    fn param_count(&self) -> usize {
+        self.param_calls.set(self.param_calls.get() + 1);
+        self.dim
+    }
+}
+
+struct CountingSnn {
+    channels: usize,
+    step_calls: Cell<usize>,
+}
+
+impl SpikingNetwork for CountingSnn {
+    fn step(
+        &mut self,
+        _stimuli: &[f32],
+        _modulators: &NeuroModulators,
+    ) -> hybrid_fusion::Result<Vec<usize>> {
+        self.step_calls.set(self.step_calls.get() + 1);
+        Ok(Vec::new())
+    }
+
+    fn num_channels(&self) -> usize {
+        self.channels
+    }
+}
+
 struct SpySnn {
     channels: usize,
     step_calls: usize,
@@ -441,6 +495,190 @@ impl SpikingNetwork for SpySnn {
     fn num_channels(&self) -> usize {
         self.channels
     }
+}
+
+fn construction_error<T, S>(transformer: T, snn: S, config: HybridConfig) -> HybridError
+where
+    T: Transformer,
+    S: SpikingNetwork,
+{
+    match HybridNetwork::try_new(transformer, snn, config) {
+        Ok(_) => panic!("expected HybridNetwork::try_new to fail"),
+        Err(err) => err,
+    }
+}
+
+fn matching_tiny() -> (HybridConfig, MockTransformer, MockSnn) {
+    let cfg = HybridConfig::tiny();
+    let t = MockTransformer {
+        dim: cfg.transformer.dim,
+        max_seq: cfg.transformer.max_seq_len,
+    };
+    let s = MockSnn::new(cfg.snn_input_channels);
+    (cfg, t, s)
+}
+
+fn assert_config_mismatch(
+    err: HybridError,
+    field: &'static str,
+    configured: usize,
+    backend: usize,
+) {
+    match &err {
+        HybridError::ConfigMismatch {
+            field: got_field,
+            configured: got_configured,
+            backend: got_backend,
+        } => {
+            assert_eq!(*got_field, field, "mismatch field");
+            assert_eq!(*got_configured, configured, "configured value");
+            assert_eq!(*got_backend, backend, "backend value");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "configuration mismatch for {field}: configured {configured}, backend {backend}"
+                )
+            );
+        }
+        other => panic!("expected ConfigMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_try_new_rejects_transformer_dim_mismatch() {
+    let (mut cfg, t, s) = matching_tiny();
+    let backend = t.dim;
+    cfg.transformer.dim = backend + 8;
+    let err = construction_error(t, s, cfg);
+    assert_config_mismatch(
+        err,
+        HybridError::FIELD_TRANSFORMER_DIM,
+        backend + 8,
+        backend,
+    );
+}
+
+#[test]
+fn test_try_new_rejects_max_seq_len_mismatch() {
+    let (mut cfg, t, s) = matching_tiny();
+    let backend = t.max_seq;
+    cfg.transformer.max_seq_len = backend + 4;
+    let err = construction_error(t, s, cfg);
+    assert_config_mismatch(
+        err,
+        HybridError::FIELD_TRANSFORMER_MAX_SEQ_LEN,
+        backend + 4,
+        backend,
+    );
+}
+
+#[test]
+fn test_try_new_rejects_snn_channels_mismatch() {
+    let (mut cfg, t, s) = matching_tiny();
+    let backend = s.channels;
+    cfg.snn_input_channels = backend + 13;
+    let err = construction_error(t, s, cfg);
+    assert_config_mismatch(
+        err,
+        HybridError::FIELD_SNN_INPUT_CHANNELS,
+        backend + 13,
+        backend,
+    );
+}
+
+#[test]
+fn test_try_new_rejects_zero_transformer_dim() {
+    let (mut cfg, t, s) = matching_tiny();
+    let backend = t.dim;
+    cfg.transformer.dim = 0;
+    let err = construction_error(t, s, cfg);
+    assert_config_mismatch(err, HybridError::FIELD_TRANSFORMER_DIM, 0, backend);
+}
+
+#[test]
+fn test_try_new_rejects_zero_max_seq_len() {
+    let (mut cfg, t, s) = matching_tiny();
+    let backend = t.max_seq;
+    cfg.transformer.max_seq_len = 0;
+    let err = construction_error(t, s, cfg);
+    assert_config_mismatch(err, HybridError::FIELD_TRANSFORMER_MAX_SEQ_LEN, 0, backend);
+}
+
+#[test]
+fn test_try_new_rejects_zero_snn_channels() {
+    let (mut cfg, t, s) = matching_tiny();
+    let backend = s.channels;
+    cfg.snn_input_channels = 0;
+    let err = construction_error(t, s, cfg);
+    assert_config_mismatch(err, HybridError::FIELD_SNN_INPUT_CHANNELS, 0, backend);
+}
+
+#[test]
+fn test_try_new_rejects_zero_backend_dim() {
+    let (cfg, _, s) = matching_tiny();
+    let t = MockTransformer {
+        dim: 0,
+        max_seq: cfg.transformer.max_seq_len,
+    };
+    let err = construction_error(t, s, cfg.clone());
+    assert_config_mismatch(
+        err,
+        HybridError::FIELD_TRANSFORMER_DIM,
+        cfg.transformer.dim,
+        0,
+    );
+}
+
+#[test]
+fn test_try_new_rejects_zero_backend_max_seq_len() {
+    let (cfg, _, s) = matching_tiny();
+    let t = MockTransformer {
+        dim: cfg.transformer.dim,
+        max_seq: 0,
+    };
+    let err = construction_error(t, s, cfg.clone());
+    assert_config_mismatch(
+        err,
+        HybridError::FIELD_TRANSFORMER_MAX_SEQ_LEN,
+        cfg.transformer.max_seq_len,
+        0,
+    );
+}
+
+#[test]
+fn test_try_new_rejects_zero_backend_channels() {
+    let (cfg, t, _) = matching_tiny();
+    let s = MockSnn::new(0);
+    let err = construction_error(t, s, cfg.clone());
+    assert_config_mismatch(
+        err,
+        HybridError::FIELD_SNN_INPUT_CHANNELS,
+        cfg.snn_input_channels,
+        0,
+    );
+}
+
+#[test]
+fn test_try_new_rejects_both_zero_transformer_dim() {
+    let (mut cfg, _, s) = matching_tiny();
+    cfg.transformer.dim = 0;
+    let t = MockTransformer {
+        dim: 0,
+        max_seq: cfg.transformer.max_seq_len,
+    };
+    let err = construction_error(t, s, cfg);
+    assert_config_mismatch(err, HybridError::FIELD_TRANSFORMER_DIM, 0, 0);
+}
+
+#[test]
+fn test_try_new_accepts_tiny_config() {
+    let (cfg, t, s) = matching_tiny();
+    let net = HybridNetwork::try_new(t, s, cfg).expect("tiny config should construct");
+    assert_eq!(net.config().transformer.dim, 128);
+    assert_eq!(net.config().transformer.max_seq_len, 64);
+    assert_eq!(net.config().snn_input_channels, 64);
+    assert_eq!(net.transformer.dim(), 128);
+    assert_eq!(net.snn.num_channels(), 64);
 }
 
 fn scripted_forward(
@@ -477,6 +715,69 @@ fn public_forward_rejects_rank0_and_does_not_step() {
     }
     assert_eq!(net.snn.step_calls, 0);
     assert_eq!(net.global_step(), 0);
+}
+
+#[test]
+fn test_try_new_accepts_custom_width() {
+    let mut cfg = HybridConfig::tiny();
+    cfg.transformer.dim = 16;
+    cfg.transformer.max_seq_len = 8;
+    cfg.snn_input_channels = 7;
+    let t = MockTransformer {
+        dim: 16,
+        max_seq: 8,
+    };
+    let s = MockSnn::new(7);
+    let mut net = HybridNetwork::try_new(t, s, cfg).expect("custom width should construct");
+    let out = net.forward(&[1, 2], None).expect("forward ok");
+    assert_eq!(out.embedding.len(), 16);
+    assert_eq!(out.stimuli.len(), 7);
+}
+
+#[test]
+fn test_try_new_does_not_run_inference() {
+    let cfg = HybridConfig::tiny();
+    let t = CountingTransformer {
+        dim: cfg.transformer.dim,
+        max_seq: cfg.transformer.max_seq_len,
+        hidden_calls: Cell::new(0),
+        param_calls: Cell::new(0),
+    };
+    let s = CountingSnn {
+        channels: cfg.snn_input_channels,
+        step_calls: Cell::new(0),
+    };
+    let net = HybridNetwork::try_new(t, s, cfg).expect("valid tiny");
+    assert_eq!(
+        net.transformer.hidden_calls.get(),
+        0,
+        "try_new must not call Transformer::hidden_states"
+    );
+    assert_eq!(
+        net.transformer.param_calls.get(),
+        0,
+        "try_new must not call Transformer::param_count"
+    );
+    assert_eq!(
+        net.snn.step_calls.get(),
+        0,
+        "try_new must not call SpikingNetwork::step"
+    );
+}
+
+#[test]
+fn test_new_skips_validation_compatibility() {
+    // HybridNetwork::new remains an unvalidated pre-1.0 compatibility path.
+    let cfg = HybridConfig::tiny();
+    let mock_channels = cfg.snn_input_channels.saturating_add(13).max(1);
+    assert_ne!(mock_channels, cfg.snn_input_channels);
+    let t = MockTransformer {
+        dim: cfg.transformer.dim,
+        max_seq: cfg.transformer.max_seq_len,
+    };
+    let s = MockSnn::new(mock_channels);
+    let net = HybridNetwork::new(t, s, cfg);
+    assert_ne!(net.snn.num_channels(), net.config().snn_input_channels);
 }
 
 #[test]

@@ -10,6 +10,12 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- `HybridNetwork::try_new` validates transformer dim, max sequence length, and
+  SNN input channels against backend-reported capabilities before the first
+  forward call (Linear [RM-1357](https://linear.app/rpd-34/issue/RM-1357)).
+- `HybridError::ConfigMismatch { field, configured, backend }` names the
+  disagreeing construction field plus both values. Zero capacities use the
+  same variant (`configured` and/or `backend` is `0`).
 - Structured forward-path contract errors: `HiddenStateRank`, `HiddenStateSeqLen`,
   `HiddenStateDim`, `HiddenStateDataLen`, `NonFinite { stage, index }` (with
   `ForwardValueStage`), and `ZeroSnnChannels` ([#39](https://github.com/rmems/hybrid-fusion/pull/39)).
@@ -23,12 +29,18 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Changed
 
+- Docs and examples prefer `HybridNetwork::try_new`. `HybridNetwork::new`
+  remains an unvalidated pre-1.0 compatibility wrapper and does not panic
+  (Linear [RM-1357](https://linear.app/rpd-34/issue/RM-1357)).
 - **`HybridNetwork::forward` preflights transformer hidden-state rank, sequence
   length, dimension, backing length, and finiteness**, and rejects a zero-channel
   SNN, before pooling or `snn.step`. Rank 2 `[seq, dim]` remains canonical; rank 1
   `[dim]` stays an explicit pre-pooled layout. Contract errors do not increment
   `global_step` and are not reported to Sentry ([#39](https://github.com/rmems/hybrid-fusion/pull/39)).
-- **BREAKING**: `HybridError` gains `SafetensorsParse`. The enum is exhaustive (no `#[non_exhaustive]`); downstream `match` arms must be updated (#27).
+- **BREAKING**: `HybridError` gains `ConfigMismatch`, `SafetensorsParse`, and
+  structured forward-contract variants. The enum is exhaustive (no
+  `#[non_exhaustive]`); downstream `match` arms must be updated (RM-1357, #27,
+  #39).
 - **BREAKING**: `Dtype` now includes the full Safetensors header vocabulary (`U16`/`U32`/`U64`, `F4`, `F6_*`, `F8_*`, `C64`). Exhaustive matches must be updated (#27).
 - **`HybridOutput` gains** optional `expert_weights`, `selected_experts`, `routing_entropy` (struct-literal / exhaustive matches must be updated). ANN→SNN `forward` sets them to `None` (#22).
 - **`routing::softmax` accumulates its denominator in `f64`** (was `f32`). Returned

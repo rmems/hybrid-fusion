@@ -3,7 +3,8 @@
 `hybrid-fusion` is backend-agnostic: it defines the `Transformer`, `SpikingNetwork`,
 `GgufLoader`, `SafetensorsLoader`, `ExpertRouter`, `SpikeActivity`, and
 `NeuroModulators` contracts but ships no concrete math. This guide explains every
-trait method, how data flows through `HybridNetwork::forward`, and provides a
+trait method, how data flows through `HybridNetwork::try_new` /
+`HybridNetwork::forward`, and provides a
 minimal compilable example you can adapt for your own backend.
 
 For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs).
@@ -17,7 +18,7 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 3. [NeuroModulators](#3-neuromodulators)
 4. [GgufLoader / GgufLayout](#4-ggufloader--gguflayout)
 5. [SafetensorsLoader / SafetensorsLayout](#5-safetensorsloader--safetensorslayout)
-6. [How the forward pipeline works](#6-how-the-forward-pipeline-works)
+6. [How construction and the forward pipeline work](#6-how-construction-and-the-forward-pipeline-work)
 7. [Tensor shape conventions](#7-tensor-shape-conventions)
 8. [Minimal working example](#8-minimal-working-example)
 9. [Common pitfalls](#9-common-pitfalls)
@@ -401,7 +402,21 @@ Downstream:
 
 ---
 
-## 6. How the forward pipeline works
+## 6. How construction and the forward pipeline work
+
+Prefer `HybridNetwork::try_new`. It compares `HybridConfig` against
+backend-reported sizes **without** calling `Transformer::hidden_states` or
+`SpikingNetwork::step`:
+
+| Config field | Backend method | Error on mismatch or zero |
+|--------------|----------------|---------------------------|
+| `transformer.dim` | `Transformer::dim()` | `HybridError::ConfigMismatch` (`field = "transformer.dim"`) |
+| `transformer.max_seq_len` | `Transformer::max_seq_len()` | `HybridError::ConfigMismatch` (`field = "transformer.max_seq_len"`) |
+| `snn_input_channels` | `SpikingNetwork::num_channels()` | `HybridError::ConfigMismatch` (`field = "snn_input_channels"`) |
+
+`HybridNetwork::new` still exists as an unvalidated pre-1.0 compatibility
+constructor. It does not panic, does not return `Result`, and does not prove
+the backends match the config. New code should use `try_new`.
 
 When you call `HybridNetwork::forward`, this is what happens internally
 (see [`src/hybrid.rs`](../src/hybrid.rs)):
@@ -624,7 +639,7 @@ fn main() -> Result<()> {
 
     let snn = MySnn::new(config.snn_input_channels, 0.5); // 64 channels
 
-    let mut net = HybridNetwork::new(transformer, snn, config);
+    let mut net = HybridNetwork::try_new(transformer, snn, config)?;
 
     // Forward pass with default modulators
     let output: HybridOutput = net.forward(&[1, 2, 3, 4], None)?;
@@ -660,12 +675,26 @@ fn main() -> Result<()> {
   dopamine lowers it (more excitable), cortisol raises it (more conservative).
 - After firing, the membrane potential resets to `0.0` (leaky
   integrate-and-fire style).
-- `HybridNetwork::new` accepts the transformer, SNN, and config. The
-  config's `snn_input_channels` must match `snn.num_channels()`.
+- `HybridNetwork::try_new` validates the transformer, SNN, and config. The
+  config's `snn_input_channels` must match `snn.num_channels()`, and
+  transformer `dim` / `max_seq_len` must match the trait reports. Zero
+  capacities are rejected. `HybridNetwork::new` skips this check (compatibility).
 
 ---
 
 ## 9. Common pitfalls
+
+### Config vs backend mismatch at construction
+
+`HybridNetwork::try_new` returns `HybridError::ConfigMismatch` when a
+configured size is zero or disagrees with the backend:
+
+```
+configuration mismatch for transformer.dim: configured 64, backend 128
+```
+
+**Fix:** Set `HybridConfig` from the same values your `Transformer` /
+`SpikingNetwork` report (`dim()`, `max_seq_len()`, `num_channels()`).
 
 ### Shape mismatch: `hidden_states` dim vs `dim()`
 
@@ -747,6 +776,7 @@ All errors come from [`src/error.rs`](../src/error.rs):
 | Variant | When |
 |---------|------|
 | `InputLengthMismatch { expected, got }` | Empty input or exceeds `max_seq_len` |
+| `ConfigMismatch { field, configured, backend }` | `try_new`: config vs backend dim / max sequence / SNN channels (including zeros) |
 | `HiddenStateRank { got }` | Hidden-state rank is not 1 or 2 |
 | `HiddenStateSeqLen { expected, got }` | Rank-2 `shape[0]` ≠ `token_ids.len()` |
 | `HiddenStateDim { expected, got }` | Hidden width ≠ `Transformer::dim()` |
