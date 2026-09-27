@@ -187,6 +187,16 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         self.global_step
     }
 
+    /// Validated [`crate::HybridExecutionPlan`] describing this network's
+    /// forward flow (`Transformer → Adaptation → SpikingBlock`), RM-1804.
+    ///
+    /// Compatibility path only: the returned plan is a deterministic
+    /// structural description of the same pipeline; `forward` keeps its
+    /// existing numerical semantics and is not routed through the plan.
+    pub fn execution_plan(&self) -> crate::plan::HybridExecutionPlan {
+        crate::plan::HybridExecutionPlan::from_hybrid_config(&self.config)
+    }
+
     pub fn reset(&mut self) {
         self.global_step = 0;
     }

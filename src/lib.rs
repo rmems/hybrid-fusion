@@ -4,6 +4,7 @@
 pub mod backends;
 pub mod error;
 pub mod hybrid;
+pub mod plan;
 pub mod projector;
 pub mod reverse;
 pub mod routing;
@@ -15,6 +16,10 @@ mod validate;
 
 pub use error::{ForwardValueStage, HybridError, Result};
 pub use hybrid::HybridNetwork;
+pub use plan::{
+    DimSpec, Edge, EdgeKind, ExecutionDomain, HybridExecutionPlan, PlanError, PortSpec, Stage,
+    StageGraph, StageId, StageKind,
+};
 pub use projector::{project_spike_activity, spike_activity_features};
 pub use reverse::{ReverseHybridPath, WEIGHT_SUM_TOLERANCE};
 pub use routing::{
