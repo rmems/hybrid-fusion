@@ -74,7 +74,7 @@ fn hybrid_network_execution_plan_matches_forward_flow() {
         channels: cfg.snn_input_channels,
     };
     let net = HybridNetwork::try_new(t, s, cfg.clone()).unwrap();
-    let plan = net.execution_plan();
+    let plan = net.execution_plan().unwrap();
 
     // Same three stages, in order, with config-derived contracts.
     assert_eq!(plan.execution_order().len(), 3);
@@ -93,7 +93,7 @@ fn hybrid_network_execution_plan_matches_forward_flow() {
 #[test]
 fn reverse_path_execution_plan_without_new_host() {
     let mut path = ReverseHybridPath::new(ProjectionMode::RateSum, 16, 32, MockRouter).unwrap();
-    let plan = path.execution_plan();
+    let plan = path.execution_plan().unwrap();
     assert_eq!(
         plan.stage_by_name("moe.router").unwrap().kind,
         StageKind::MoeRouter

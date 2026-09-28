@@ -119,12 +119,15 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
     ///
     /// Compatibility path only: the plan describes the same pipeline
     /// structurally; `forward_activity` keeps its numerical semantics.
-    pub fn execution_plan(&self) -> crate::plan::HybridExecutionPlan {
-        crate::plan::HybridExecutionPlan::from_reverse_path(
+    ///
+    /// Always `Ok` for a constructed path: [`Self::new`] rejects zero
+    /// `n_neurons` / `embed_dim` at construction time.
+    pub fn execution_plan(&self) -> Result<crate::plan::HybridExecutionPlan> {
+        Ok(crate::plan::HybridExecutionPlan::from_reverse_path(
             self.mode,
             self.n_neurons,
             self.embed_dim,
-        )
+        )?)
     }
 
     /// Project activity, route through MoE, return `HybridOutput` with MoE fields set.

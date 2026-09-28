@@ -193,8 +193,15 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     /// Compatibility path only: the returned plan is a deterministic
     /// structural description of the same pipeline; `forward` keeps its
     /// existing numerical semantics and is not routed through the plan.
-    pub fn execution_plan(&self) -> crate::plan::HybridExecutionPlan {
-        crate::plan::HybridExecutionPlan::from_hybrid_config(&self.config)
+    ///
+    /// # Errors
+    ///
+    /// [`HybridError::ExecutionPlan`] if `config` carries zero-valued
+    /// dimensions, which the unvalidated [`Self::new`] constructor permits.
+    pub fn execution_plan(&self) -> Result<crate::plan::HybridExecutionPlan> {
+        Ok(crate::plan::HybridExecutionPlan::from_hybrid_config(
+            &self.config,
+        )?)
     }
 
     pub fn reset(&mut self) {

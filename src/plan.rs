@@ -760,6 +760,13 @@ impl HybridExecutionPlan {
                 )));
             }
         }
+        if plan.order.len() != plan.stages.len() {
+            return Err(PlanError::Inconsistent(format!(
+                "execution order has {} entries for {} stages",
+                plan.order.len(),
+                plan.stages.len()
+            )));
+        }
         let mut order_set: BTreeSet<StageId> = plan.order.iter().copied().collect();
         for s in &plan.stages {
             if !order_set.remove(&s.id) {
@@ -772,6 +779,22 @@ impl HybridExecutionPlan {
         if !order_set.is_empty() {
             return Err(PlanError::Inconsistent(
                 "execution order references unknown stages".into(),
+            ));
+        }
+        // The stored order must be exactly the deterministic forward
+        // topological order — this also rejects duplicates and orders that
+        // violate forward-edge precedence.
+        let graph = StageGraph {
+            stages: plan.stages.clone(),
+            edges: plan.edges.clone(),
+            allow_feedback: plan.allow_feedback,
+        };
+        let expected = graph
+            .forward_topo_order()
+            .map_err(|e| PlanError::Inconsistent(e.to_string()))?;
+        if expected != plan.order {
+            return Err(PlanError::Inconsistent(
+                "execution order is not the deterministic forward order".into(),
             ));
         }
         Ok(plan)
@@ -806,7 +829,13 @@ impl HybridExecutionPlan {
     /// numerical execution still lives in `HybridNetwork::forward`. Stage
     /// contracts are derived from `config` (`transformer.dim`,
     /// `snn_input_channels`).
-    pub fn from_hybrid_config(config: &HybridConfig) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError`] if `config` carries zero-valued dimensions (a
+    /// `Fixed(0)` contract is invalid; note [`crate::HybridNetwork::new`]
+    /// permits such configs without validation).
+    pub fn from_hybrid_config(config: &HybridConfig) -> std::result::Result<Self, PlanError> {
         let mut g = StageGraph::new();
         let ann = g.add_stage(
             "ann.transformer",
@@ -852,7 +881,7 @@ impl HybridExecutionPlan {
 
         g.connect(ann, adapt);
         g.connect(adapt, snn);
-        g.compile().expect("compat plan is structurally valid")
+        g.compile()
     }
 
     /// Plan describing the existing [`crate::ReverseHybridPath`] flow:
@@ -861,7 +890,16 @@ impl HybridExecutionPlan {
     /// Represents the reverse direction as an ordinary stage pipeline instead
     /// of a second unrelated host abstraction; `mode` is recorded as stage
     /// metadata.
-    pub fn from_reverse_path(mode: ProjectionMode, n_neurons: usize, embed_dim: usize) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError`] if `n_neurons` or `embed_dim` is `0` (invalid `Fixed(0)`
+    /// contract).
+    pub fn from_reverse_path(
+        mode: ProjectionMode,
+        n_neurons: usize,
+        embed_dim: usize,
+    ) -> std::result::Result<Self, PlanError> {
         let mut g = StageGraph::new();
         let activity = g.add_stage(
             "snn.activity",
@@ -905,7 +943,7 @@ impl HybridExecutionPlan {
         g.connect(activity, project);
         g.connect(project, router);
         g.connect(router, readout);
-        g.compile().expect("compat plan is structurally valid")
+        g.compile()
     }
 }
 
@@ -975,7 +1013,7 @@ mod tests {
 
     #[test]
     fn compat_plan_represents_ann_to_snn() {
-        let plan = HybridExecutionPlan::from_hybrid_config(&HybridConfig::tiny());
+        let plan = HybridExecutionPlan::from_hybrid_config(&HybridConfig::tiny()).unwrap();
         assert_eq!(plan.stages().len(), 3);
         assert_eq!(
             plan.execution_order(),
@@ -988,7 +1026,7 @@ mod tests {
 
     #[test]
     fn compat_plan_represents_reverse_flow() {
-        let plan = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 32, 64);
+        let plan = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 32, 64).unwrap();
         assert_eq!(plan.stages().len(), 4);
         let project = plan.stage_by_name("adapt.project_activity").unwrap();
         assert_eq!(project.attrs.get("projection_mode").unwrap(), "RateSum");
@@ -1228,7 +1266,7 @@ mod tests {
 
     #[test]
     fn json_round_trip_is_deterministic() {
-        let plan = HybridExecutionPlan::from_hybrid_config(&HybridConfig::tiny());
+        let plan = HybridExecutionPlan::from_hybrid_config(&HybridConfig::tiny()).unwrap();
         let j1 = plan.to_json().unwrap();
         let back = HybridExecutionPlan::from_json(&j1).unwrap();
         assert_eq!(back, plan);
@@ -1238,7 +1276,7 @@ mod tests {
 
     #[test]
     fn from_json_rejects_inconsistent_order() {
-        let mut plan = HybridExecutionPlan::from_hybrid_config(&HybridConfig::tiny());
+        let mut plan = HybridExecutionPlan::from_hybrid_config(&HybridConfig::tiny()).unwrap();
         plan.order.pop();
         let json = serde_json::to_string(&plan).unwrap();
         assert!(matches!(
@@ -1248,10 +1286,44 @@ mod tests {
     }
 
     #[test]
+    fn from_hybrid_config_rejects_zero_dims() {
+        let mut cfg = HybridConfig::tiny();
+        cfg.snn_input_channels = 0;
+        assert!(matches!(
+            HybridExecutionPlan::from_hybrid_config(&cfg).unwrap_err(),
+            PlanError::InvalidContract { .. }
+        ));
+    }
+
+    #[test]
+    fn from_json_rejects_non_topological_order() {
+        let mut plan = HybridExecutionPlan::from_hybrid_config(&HybridConfig::tiny()).unwrap();
+        plan.order.reverse();
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(matches!(
+            HybridExecutionPlan::from_json(&json).unwrap_err(),
+            PlanError::Inconsistent(_)
+        ));
+    }
+
+    #[test]
+    fn from_json_rejects_duplicate_order_ids() {
+        let mut plan = HybridExecutionPlan::from_hybrid_config(&HybridConfig::tiny()).unwrap();
+        // Duplicate s0, drop s2 — same length, same set membership, but not a
+        // valid execution sequence.
+        plan.order[2] = StageId(0);
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(matches!(
+            HybridExecutionPlan::from_json(&json).unwrap_err(),
+            PlanError::Inconsistent(_)
+        ));
+    }
+
+    #[test]
     fn describe_is_deterministic() {
-        let plan = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 8, 16);
+        let plan = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 8, 16).unwrap();
         let a = plan.describe();
-        let plan2 = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 8, 16);
+        let plan2 = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 8, 16).unwrap();
         assert_eq!(a, plan2.describe());
         assert!(a.contains("edge Forward s0 -> s1"));
     }
