@@ -190,7 +190,7 @@ impl PortSpec {
     fn compatible_with(
         producer: &PortSpec,
         consumer: &PortSpec,
-        bindings: &mut BTreeMap<String, Option<usize>>,
+        bindings: &mut DimBindings,
     ) -> std::result::Result<(), String> {
         if let (Some(p), Some(c)) = (producer.dtype, consumer.dtype)
             && p != c
@@ -213,33 +213,89 @@ impl PortSpec {
     }
 }
 
+/// Union-find over symbolic dimension names, plus each equivalence class's
+/// concrete extent (`Some(v)` once bound, `None` while still free).
+///
+/// `Symbolic("x") ↔ Symbolic("y")` edges merge the two symbols so
+/// compatibility is independent of edge insertion order: later `Fixed`
+/// bindings land on the union root and conflicting extents are rejected.
+#[derive(Debug, Default)]
+struct DimBindings {
+    /// Symbol → union root (only present for non-root symbols).
+    parent: BTreeMap<String, String>,
+    /// Root symbol → bound extent.
+    value: BTreeMap<String, Option<usize>>,
+}
+
+impl DimBindings {
+    /// Find the union root of `name`, creating it (unbound) if absent.
+    fn root(&mut self, name: &str) -> String {
+        let mut r = name.to_string();
+        while let Some(p) = self.parent.get(&r) {
+            r = p.clone();
+        }
+        // Path compression (best-effort; correctness does not depend on it).
+        let mut c = name.to_string();
+        while let Some(p) = self.parent.get(&c).cloned() {
+            if p != r {
+                self.parent.insert(c.clone(), r.clone());
+            }
+            c = p;
+        }
+        self.value.entry(r.clone()).or_insert(None);
+        r
+    }
+
+    /// Merge two symbolic names; rejects conflicting concrete bindings.
+    fn union(&mut self, a: &str, b: &str) -> std::result::Result<(), String> {
+        let (ra, rb) = (self.root(a), self.root(b));
+        if ra == rb {
+            return Ok(());
+        }
+        // Deterministic root choice: lexicographically smaller name wins.
+        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+        let va = self.value.get(&lo).copied().flatten();
+        let vb = self.value.get(&hi).copied().flatten();
+        match (va, vb) {
+            (Some(x), Some(y)) if x != y => Err(format!(
+                "symbols '{a}' and '{b}' resolve to conflicting extents {x} vs {y}"
+            )),
+            _ => {
+                self.value.insert(lo.clone(), va.or(vb));
+                self.value.remove(&hi);
+                self.parent.insert(hi, lo);
+                Ok(())
+            }
+        }
+    }
+
+    /// Bind a symbolic name to a concrete extent.
+    fn bind(&mut self, name: &str, v: usize) -> std::result::Result<(), String> {
+        let r = self.root(name);
+        match self.value.get(&r).copied().flatten() {
+            Some(bound) if bound != v => Err(format!(
+                "symbol '{name}' already bound to {bound}, cannot rebind to {v}"
+            )),
+            _ => {
+                self.value.insert(r, Some(v));
+                Ok(())
+            }
+        }
+    }
+}
+
 fn unify_dim(
     producer: &DimSpec,
     consumer: &DimSpec,
-    bindings: &mut BTreeMap<String, Option<usize>>,
+    bindings: &mut DimBindings,
 ) -> std::result::Result<(), String> {
     use DimSpec::{Any, Fixed, Symbolic};
     match (producer, consumer) {
         (Any, _) | (_, Any) => Ok(()),
         (Fixed(a), Fixed(b)) if a == b => Ok(()),
         (Fixed(a), Fixed(b)) => Err(format!("extent mismatch: {a} vs {b}")),
-        (Symbolic(name), other) | (other, Symbolic(name)) => {
-            let concrete = match other {
-                Fixed(v) => Some(*v),
-                Symbolic(_) => None,
-                Any => unreachable!("handled above"),
-            };
-            match bindings.get(name) {
-                Some(&bound) if bound == concrete => Ok(()),
-                Some(&Some(bound)) => Err(format!(
-                    "symbol '{name}' already bound to {bound}, cannot rebind"
-                )),
-                _ => {
-                    bindings.insert(name.clone(), concrete);
-                    Ok(())
-                }
-            }
-        }
+        (Symbolic(a), Symbolic(b)) => bindings.union(a, b),
+        (Symbolic(name), Fixed(v)) | (Fixed(v), Symbolic(name)) => bindings.bind(name, *v),
     }
 }
 
@@ -354,6 +410,17 @@ pub enum PlanError {
     /// Serialization round-trip of a plan failed structural re-validation.
     #[error("serialized plan is structurally inconsistent: {0}")]
     Inconsistent(String),
+
+    /// A compatibility constructor was given invalid structural parameters
+    /// (e.g. zero-valued dimensions).
+    #[error("invalid plan parameters: {0}")]
+    InvalidParameters(String),
+
+    /// A stage's [`StageId`] does not equal its position in the stage list
+    /// (possible only on a hand-built or deserialized [`StageGraph`] —
+    /// [`StageGraph::add_stage`] always assigns sequential IDs).
+    #[error("stage at index {position} carries non-sequential id {id}")]
+    NonSequentialStageId { position: usize, id: StageId },
 }
 
 // ── Graph builder ───────────────────────────────────────────────────────────
@@ -471,15 +538,17 @@ impl StageGraph {
 
     /// Validate and freeze into a [`HybridExecutionPlan`].
     ///
-    /// Checks, in order: non-empty graph, unique names, known edge endpoints,
-    /// feedback opt-in, domain legality, per-stage contract sanity, forward-DAG
-    /// acyclicity (Kahn's algorithm with `StageId` ordering — deterministic),
-    /// full forward reachability (no disconnected stages), and per-edge port
-    /// contract unification (shared symbolic bindings).
+    /// Checks, in order: non-empty graph, sequential stage IDs, unique names,
+    /// known edge endpoints, feedback opt-in, domain legality, per-stage
+    /// contract sanity, forward-DAG acyclicity (Kahn's algorithm with
+    /// `StageId` ordering — deterministic), full forward reachability (no
+    /// disconnected stages), and per-edge port contract unification (shared
+    /// symbolic bindings).
     pub fn compile(&self) -> std::result::Result<HybridExecutionPlan, PlanError> {
         if self.stages.is_empty() {
             return Err(PlanError::Empty);
         }
+        check_sequential_ids(&self.stages)?;
         check_unique_names(&self.stages)?;
         self.check_endpoints()?;
         self.check_feedback_permitted()?;
@@ -605,7 +674,7 @@ impl StageGraph {
     }
 
     fn check_edge_contracts(&self) -> std::result::Result<(), PlanError> {
-        let mut bindings: BTreeMap<String, Option<usize>> = BTreeMap::new();
+        let mut bindings = DimBindings::default();
         for e in &self.edges {
             let producer = self.stage(e.from).expect("endpoint checked");
             let consumer = self.stage(e.to).expect("endpoint checked");
@@ -619,6 +688,15 @@ impl StageGraph {
         }
         Ok(())
     }
+}
+
+fn check_sequential_ids(stages: &[Stage]) -> std::result::Result<(), PlanError> {
+    for (position, s) in stages.iter().enumerate() {
+        if s.id.index() as usize != position {
+            return Err(PlanError::NonSequentialStageId { position, id: s.id });
+        }
+    }
+    Ok(())
 }
 
 fn check_unique_names(stages: &[Stage]) -> std::result::Result<(), PlanError> {
@@ -746,53 +824,23 @@ impl HybridExecutionPlan {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
-    /// Deserialize and re-validate structural consistency (ID ↔ index
-    /// correspondence and forward-DAG order coverage). Contract and domain
-    /// checks are not re-run — a serialized plan was already validated.
+    /// Deserialize and re-validate. The serialized stages/edges are rebuilt
+    /// into a [`StageGraph`] and recompiled with the full validation suite
+    /// (sequential IDs, unique names, endpoints, feedback opt-in, domain
+    /// legality, contract sanity, acyclicity, connectivity, edge contracts);
+    /// the stored `order` must then equal the recomputed deterministic
+    /// forward topological order, which also rejects duplicates, truncated
+    /// orders, and precedence violations.
     pub fn from_json(json: &str) -> std::result::Result<Self, PlanError> {
         let plan: Self =
             serde_json::from_str(json).map_err(|e| PlanError::Inconsistent(e.to_string()))?;
-        for (i, s) in plan.stages.iter().enumerate() {
-            if s.id.index() as usize != i {
-                return Err(PlanError::Inconsistent(format!(
-                    "stage index {i} carries non-sequential id {}",
-                    s.id
-                )));
-            }
-        }
-        if plan.order.len() != plan.stages.len() {
-            return Err(PlanError::Inconsistent(format!(
-                "execution order has {} entries for {} stages",
-                plan.order.len(),
-                plan.stages.len()
-            )));
-        }
-        let mut order_set: BTreeSet<StageId> = plan.order.iter().copied().collect();
-        for s in &plan.stages {
-            if !order_set.remove(&s.id) {
-                return Err(PlanError::Inconsistent(format!(
-                    "execution order omits stage {}",
-                    s.id
-                )));
-            }
-        }
-        if !order_set.is_empty() {
-            return Err(PlanError::Inconsistent(
-                "execution order references unknown stages".into(),
-            ));
-        }
-        // The stored order must be exactly the deterministic forward
-        // topological order — this also rejects duplicates and orders that
-        // violate forward-edge precedence.
         let graph = StageGraph {
             stages: plan.stages.clone(),
             edges: plan.edges.clone(),
             allow_feedback: plan.allow_feedback,
         };
-        let expected = graph
-            .forward_topo_order()
-            .map_err(|e| PlanError::Inconsistent(e.to_string()))?;
-        if expected != plan.order {
+        let revalidated = graph.compile()?;
+        if revalidated.order != plan.order {
             return Err(PlanError::Inconsistent(
                 "execution order is not the deterministic forward order".into(),
             ));
@@ -832,10 +880,16 @@ impl HybridExecutionPlan {
     ///
     /// # Errors
     ///
-    /// [`PlanError`] if `config` carries zero-valued dimensions (a
-    /// `Fixed(0)` contract is invalid; note [`crate::HybridNetwork::new`]
+    /// [`PlanError::InvalidParameters`] if `transformer.dim` or
+    /// `snn_input_channels` is `0` (note [`crate::HybridNetwork::new`]
     /// permits such configs without validation).
     pub fn from_hybrid_config(config: &HybridConfig) -> std::result::Result<Self, PlanError> {
+        if config.transformer.dim == 0 || config.snn_input_channels == 0 {
+            return Err(PlanError::InvalidParameters(format!(
+                "transformer.dim ({}) and snn_input_channels ({}) must be > 0",
+                config.transformer.dim, config.snn_input_channels
+            )));
+        }
         let mut g = StageGraph::new();
         let ann = g.add_stage(
             "ann.transformer",
@@ -845,22 +899,21 @@ impl HybridExecutionPlan {
                 dtype: Some(Dtype::U32),
                 dims: vec![DimSpec::Symbolic("seq".into())],
             },
-            // hidden states: [seq, dim] f32 (rank-1 [dim] is the pre-pooled
-            // layout; the contract models the canonical rank-2 form)
-            PortSpec::f32(vec![
-                DimSpec::Symbolic("seq".into()),
-                DimSpec::Fixed(config.transformer.dim),
-            ]),
+            // hidden states: the Transformer contract accepts two f32
+            // layouts — canonical rank-2 [seq, dim] and pre-pooled rank-1
+            // [dim] — so the port keeps rank unconstrained and records the
+            // accepted layouts in attrs instead of asserting [seq, dim].
+            PortSpec::f32(vec![]),
         );
         g.set_attr(ann, "role", "transformer.hidden_states");
+        g.set_attr(ann, "accepted_layouts", "[dim] | [seq, dim]");
+        g.set_attr(ann, "last_axis", config.transformer.dim.to_string());
 
         let adapt = g.add_stage(
             "adapt.project_stimuli",
             StageKind::Adaptation,
-            PortSpec::f32(vec![
-                DimSpec::Symbolic("seq".into()),
-                DimSpec::Fixed(config.transformer.dim),
-            ]),
+            // mirrors the transformer's accepted hidden-state layouts
+            PortSpec::f32(vec![]),
             // bounded stimuli in [-1, 1] via projector tanh
             PortSpec::f32_exact(&[config.snn_input_channels]),
         );
@@ -893,33 +946,41 @@ impl HybridExecutionPlan {
     ///
     /// # Errors
     ///
-    /// [`PlanError`] if `n_neurons` or `embed_dim` is `0` (invalid `Fixed(0)`
-    /// contract).
+    /// [`PlanError::InvalidParameters`] if `n_neurons` or `embed_dim` is `0`.
     pub fn from_reverse_path(
         mode: ProjectionMode,
         n_neurons: usize,
         embed_dim: usize,
     ) -> std::result::Result<Self, PlanError> {
+        if n_neurons == 0 || embed_dim == 0 {
+            return Err(PlanError::InvalidParameters(format!(
+                "n_neurons ({n_neurons}) and embed_dim ({embed_dim}) must be > 0"
+            )));
+        }
         let mut g = StageGraph::new();
         let activity = g.add_stage(
             "snn.activity",
             StageKind::SpikingBlock,
             PortSpec::any(),
-            // per-timestep spike train over n_neurons
-            PortSpec::f32(vec![
-                DimSpec::Symbolic("timesteps".into()),
-                DimSpec::Fixed(n_neurons),
-            ]),
+            // SpikeActivity is a composite (sparse spike_train of fired
+            // indices + potentials + iz_potentials), not a dense tensor —
+            // keep the port unconstrained and record the real contract in
+            // attrs rather than asserting a fictitious f32[t, n] shape.
+            PortSpec::any(),
         );
         g.set_attr(activity, "role", "SpikeActivity");
+        g.set_attr(
+            activity,
+            "contract",
+            "SpikeActivity{spike_train, potentials, iz_potentials}",
+        );
+        g.set_attr(activity, "n_neurons", n_neurons.to_string());
 
         let project = g.add_stage(
             "adapt.project_activity",
             StageKind::Adaptation,
-            PortSpec::f32(vec![
-                DimSpec::Symbolic("timesteps".into()),
-                DimSpec::Fixed(n_neurons),
-            ]),
+            // consumes the composite SpikeActivity (see snn.activity)
+            PortSpec::any(),
             PortSpec::f32_exact(&[embed_dim]),
         );
         g.set_attr(project, "projection_mode", format!("{mode:?}"));
@@ -1291,8 +1352,129 @@ mod tests {
         cfg.snn_input_channels = 0;
         assert!(matches!(
             HybridExecutionPlan::from_hybrid_config(&cfg).unwrap_err(),
-            PlanError::InvalidContract { .. }
+            PlanError::InvalidParameters(_)
         ));
+        let mut cfg = HybridConfig::tiny();
+        cfg.transformer.dim = 0;
+        assert!(matches!(
+            HybridExecutionPlan::from_hybrid_config(&cfg).unwrap_err(),
+            PlanError::InvalidParameters(_)
+        ));
+        assert!(matches!(
+            HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 0, 16).unwrap_err(),
+            PlanError::InvalidParameters(_)
+        ));
+    }
+
+    #[test]
+    fn symbolic_symbolic_unification_is_order_independent() {
+        // Edge a→b merges symbols "x" and "y"; the later "y"→fixed edge must
+        // bind the merged class so the result matches the reverse graph where
+        // the fixed edge is visited first.
+        let mk = |first: char| {
+            let mut g = StageGraph::new();
+            let a = g.add_stage(
+                "a",
+                StageKind::Embedding,
+                PortSpec::any(),
+                PortSpec::f32(vec![DimSpec::Symbolic(
+                    if first == 'x' { "x" } else { "w" }.into(),
+                )]),
+            );
+            let b = g.add_stage(
+                "b",
+                StageKind::DenseMlp,
+                PortSpec::f32(vec![DimSpec::Symbolic(
+                    if first == 'x' { "y" } else { "z" }.into(),
+                )]),
+                PortSpec::f32(vec![DimSpec::Symbolic(
+                    if first == 'x' { "y" } else { "z" }.into(),
+                )]),
+            );
+            let c = g.add_stage(
+                "c",
+                StageKind::Readout,
+                PortSpec::f32(vec![DimSpec::Fixed(7)]),
+                PortSpec::any(),
+            );
+            g.connect(a, b);
+            g.connect(b, c);
+            g
+        };
+        assert!(mk('x').compile().is_ok());
+        assert!(mk('w').compile().is_ok());
+
+        // Conflicting fixed extents through a merged symbolic class fail
+        // regardless of merge order.
+        for lo in [4usize, 9] {
+            let hi = if lo == 4 { 9 } else { 4 };
+            let mut g = StageGraph::new();
+            let a = g.add_stage(
+                "a",
+                StageKind::Embedding,
+                PortSpec::any(),
+                PortSpec::f32(vec![DimSpec::Symbolic("x".into())]),
+            );
+            let b = g.add_stage(
+                "b",
+                StageKind::DenseMlp,
+                PortSpec::f32(vec![DimSpec::Symbolic("y".into())]),
+                PortSpec::f32(vec![DimSpec::Fixed(hi)]),
+            );
+            let c = g.add_stage(
+                "c",
+                StageKind::Readout,
+                PortSpec::f32(vec![DimSpec::Fixed(lo)]),
+                PortSpec::any(),
+            );
+            g.connect(a, b); // x ~ y
+            g.connect(b, c); // class {x,y} = hi, c wants lo
+            assert!(matches!(
+                g.compile().unwrap_err(),
+                PlanError::IncompatibleContract { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn compile_rejects_non_sequential_stage_ids() {
+        let plan = HybridExecutionPlan::from_hybrid_config(&HybridConfig::tiny()).unwrap();
+        let mut graph = StageGraph {
+            stages: plan.stages.clone(),
+            edges: plan.edges.clone(),
+            allow_feedback: plan.allow_feedback,
+        };
+        graph.stages[1].id = StageId(7);
+        assert!(matches!(
+            graph.compile().unwrap_err(),
+            PlanError::NonSequentialStageId { position: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn compat_plan_accepts_rank_one_hidden_state_contract() {
+        let plan = HybridExecutionPlan::from_hybrid_config(&HybridConfig::tiny()).unwrap();
+        // The transformer output port must not over-assert [seq, dim]: rank
+        // stays unconstrained and the accepted layouts are metadata.
+        let ann = plan.stage(StageId(0)).unwrap();
+        assert_eq!(ann.output.dims.len(), 0);
+        assert_eq!(
+            ann.attrs.get("accepted_layouts").map(String::as_str),
+            Some("[dim] | [seq, dim]")
+        );
+    }
+
+    #[test]
+    fn reverse_plan_models_spike_activity_composite() {
+        let plan = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 8, 16).unwrap();
+        let activity = plan.stage(StageId(0)).unwrap();
+        // SpikeActivity is a composite struct, not a dense tensor: the port
+        // must not assert a fictitious f32[t, n] shape.
+        assert_eq!(activity.output, PortSpec::any());
+        assert_eq!(
+            activity.attrs.get("contract").map(String::as_str),
+            Some("SpikeActivity{spike_train, potentials, iz_potentials}")
+        );
     }
 
     #[test]
