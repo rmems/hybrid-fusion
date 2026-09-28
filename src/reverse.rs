@@ -114,6 +114,22 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
         self.global_step = 0;
     }
 
+    /// Validated [`crate::HybridExecutionPlan`] describing this reverse flow
+    /// (`SpikeActivity → Adaptation → MoeRouter → Readout`), RM-1804.
+    ///
+    /// Compatibility path only: the plan describes the same pipeline
+    /// structurally; `forward_activity` keeps its numerical semantics.
+    ///
+    /// Always `Ok` for a constructed path: [`Self::new`] rejects zero
+    /// `n_neurons` / `embed_dim` at construction time.
+    pub fn execution_plan(&self) -> Result<crate::plan::HybridExecutionPlan> {
+        Ok(crate::plan::HybridExecutionPlan::from_reverse_path(
+            self.mode,
+            self.n_neurons,
+            self.embed_dim,
+        )?)
+    }
+
     /// Project activity, route through MoE, return `HybridOutput` with MoE fields set.
     ///
     /// Semantics match corinth-canal `Model::forward_activity` (projector + router half):

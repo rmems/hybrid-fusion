@@ -26,6 +26,23 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - Pure MoE math in `routing`: synthetic gates, softmax, top-k, routing entropy; `SyntheticExpertRouter` under `backends` (#26).
 - `ReverseHybridPath<R: ExpertRouter>` reverse-path orchestrator + integration tests
   (`tests/reverse_path.rs`); dual host alongside `HybridNetwork` (#23).
+- `plan` module: typed `StageGraph` compiled into a validated
+  `HybridExecutionPlan` — deterministic `StageId`s and topological order,
+  explicit `Forward`/`Feedback` edges, `PortSpec`/`DimSpec` shape+dtype
+  contracts with symbolic-dim unification, `ExecutionDomain` assignment hooks,
+  structured `PlanError` variants (empty, duplicate names, unknown endpoints,
+  disconnected, cyclic, unpermitted feedback, incompatible contract, invalid
+  domain/contract, non-sequential stage IDs, invalid parameters),
+  deterministic serde JSON (deserialization recompiles the full validation
+  suite) and `describe()` inspection
+  (Linear [RM-1804](https://linear.app/rpd-34/issue/RM-1804),
+  [#40](https://github.com/rmems/hybrid-fusion/issues/40)).
+- Compatibility paths: `HybridExecutionPlan::from_hybrid_config` /
+  `from_reverse_path` describe the existing ANN→SNN and SNN→MoE flows as stage
+  graphs; `HybridNetwork::execution_plan` / `ReverseHybridPath::execution_plan`
+  expose them without changing numerical execution (RM-1804, #40).
+- **BREAKING**: `HybridError` gains `ExecutionPlan(#[from] PlanError)`
+  (exhaustive enum; downstream `match` arms must be updated) (RM-1804, #40).
 
 ### Changed
 

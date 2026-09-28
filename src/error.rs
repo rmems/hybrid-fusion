@@ -97,6 +97,11 @@ pub enum HybridError {
     #[error("SNN step failed: {0}")]
     SnnStep(String),
 
+    /// Structured stage-graph / execution-plan validation failure
+    /// (RM-1804 / issue #40).
+    #[error("execution plan error: {0}")]
+    ExecutionPlan(#[from] crate::plan::PlanError),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

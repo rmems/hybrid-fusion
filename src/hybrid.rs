@@ -187,6 +187,30 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         self.global_step
     }
 
+    /// Validated [`crate::HybridExecutionPlan`] describing this network's
+    /// forward flow (`Transformer → Adaptation → SpikingBlock`), RM-1804.
+    ///
+    /// Compatibility path only: the returned plan is a deterministic
+    /// structural description of the same pipeline; `forward` keeps its
+    /// existing numerical semantics and is not routed through the plan.
+    ///
+    /// # Errors
+    ///
+    /// [`HybridError::ExecutionPlan`] if the backend-reported dimensions are
+    /// zero (the unvalidated [`Self::new`] constructor permits such configs).
+    ///
+    /// Contracts derive from the backends (`Transformer::dim`,
+    /// `Transformer::max_seq_len`, `SpikingNetwork::num_channels`) — the same
+    /// values `forward` validates against — so the plan matches the runnable
+    /// pipeline even when `config` disagrees.
+    pub fn execution_plan(&self) -> Result<crate::plan::HybridExecutionPlan> {
+        let mut cfg = self.config.clone();
+        cfg.transformer.dim = self.transformer.dim();
+        cfg.transformer.max_seq_len = self.transformer.max_seq_len();
+        cfg.snn_input_channels = self.snn.num_channels();
+        Ok(crate::plan::HybridExecutionPlan::from_hybrid_config(&cfg)?)
+    }
+
     pub fn reset(&mut self) {
         self.global_step = 0;
     }
