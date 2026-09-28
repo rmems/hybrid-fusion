@@ -636,14 +636,16 @@ impl StageGraph {
         Ok(order)
     }
 
-    /// The graph must be a single weakly-connected component over all edges:
-    /// every stage reachable from `s0` treating edges as undirected. Orphan
-    /// stages and second disconnected chains both fail.
+    /// The graph must be a single weakly-connected component over
+    /// *forward* edges: every stage reachable from `s0` treating forward
+    /// edges as undirected. Orphan stages, second disconnected chains, and
+    /// stages that only appear in feedback edges all fail — a feedback-only
+    /// stage has no forward path and cannot belong to the forward flow.
     fn check_reachability(&self) -> std::result::Result<(), PlanError> {
         let mut seen: BTreeSet<StageId> = BTreeSet::from([self.stages[0].id]);
         let mut work: Vec<StageId> = vec![self.stages[0].id];
         while let Some(id) = work.pop() {
-            for e in &self.edges {
+            for e in self.edges.iter().filter(|e| e.kind == EdgeKind::Forward) {
                 let next = if e.from == id {
                     Some(e.to)
                 } else if e.to == id {
@@ -744,6 +746,17 @@ fn check_contract_sanity(stages: &[Stage]) -> std::result::Result<(), PlanError>
 
 // ── Compiled plan ───────────────────────────────────────────────────────────
 
+/// Deserialization wire shape for [`HybridExecutionPlan`]. Private: the only
+/// way to obtain a plan from serialized data is [`HybridExecutionPlan::from_json`],
+/// which revalidates through the full `compile` suite.
+#[derive(Debug, Deserialize)]
+struct WirePlan {
+    stages: Vec<Stage>,
+    edges: Vec<Edge>,
+    order: Vec<StageId>,
+    allow_feedback: bool,
+}
+
 /// A validated, frozen stage graph.
 ///
 /// `order` is the deterministic topological order over forward edges
@@ -753,7 +766,11 @@ fn check_contract_sanity(stages: &[Stage]) -> std::result::Result<(), PlanError>
 /// Serialize with [`to_json`](Self::to_json) / [`from_json`](Self::from_json);
 /// field order and stage ordering are deterministic, so identical plans hash
 /// and diff identically.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// `Deserialize` is deliberately **not** derived: `from_json` is the only
+/// deserialization entry point, so every deserialized plan is revalidated
+/// through the full `compile` suite.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct HybridExecutionPlan {
     stages: Vec<Stage>,
     edges: Vec<Edge>,
@@ -832,7 +849,7 @@ impl HybridExecutionPlan {
     /// forward topological order, which also rejects duplicates, truncated
     /// orders, and precedence violations.
     pub fn from_json(json: &str) -> std::result::Result<Self, PlanError> {
-        let plan: Self =
+        let plan: WirePlan =
             serde_json::from_str(json).map_err(|e| PlanError::Inconsistent(e.to_string()))?;
         let graph = StageGraph {
             stages: plan.stages.clone(),
@@ -845,7 +862,7 @@ impl HybridExecutionPlan {
                 "execution order is not the deterministic forward order".into(),
             ));
         }
-        Ok(plan)
+        Ok(revalidated)
     }
 
     /// Deterministic multi-line debug rendering (stage order, edges, domains).
@@ -880,14 +897,18 @@ impl HybridExecutionPlan {
     ///
     /// # Errors
     ///
-    /// [`PlanError::InvalidParameters`] if `transformer.dim` or
-    /// `snn_input_channels` is `0` (note [`crate::HybridNetwork::new`]
-    /// permits such configs without validation).
+    /// [`PlanError::InvalidParameters`] if `transformer.dim`,
+    /// `transformer.max_seq_len`, or `snn_input_channels` is `0` (note
+    /// [`crate::HybridNetwork::new`] permits such configs without validation).
     pub fn from_hybrid_config(config: &HybridConfig) -> std::result::Result<Self, PlanError> {
-        if config.transformer.dim == 0 || config.snn_input_channels == 0 {
+        if config.transformer.dim == 0
+            || config.transformer.max_seq_len == 0
+            || config.snn_input_channels == 0
+        {
             return Err(PlanError::InvalidParameters(format!(
-                "transformer.dim ({}) and snn_input_channels ({}) must be > 0",
-                config.transformer.dim, config.snn_input_channels
+                "transformer.dim ({}), transformer.max_seq_len ({}), and \
+                 snn_input_channels ({}) must be > 0",
+                config.transformer.dim, config.transformer.max_seq_len, config.snn_input_channels
             )));
         }
         let mut g = StageGraph::new();
@@ -924,13 +945,15 @@ impl HybridExecutionPlan {
             "snn.step",
             StageKind::SpikingBlock,
             PortSpec::f32_exact(&[config.snn_input_channels]),
-            // fired neuron indices (variable length)
-            PortSpec {
-                dtype: Some(Dtype::U64),
-                dims: vec![DimSpec::Any],
-            },
+            // fired neuron indices: Vec<usize> — pointer-width dependent, so
+            // no concrete dtype is claimed.
+            PortSpec::any(),
         );
         g.set_attr(snn, "role", "spiking_network.step");
+        g.set_attr(snn, "output_contract", "fired_neurons: Vec<usize>");
+        // step also consumes caller-supplied NeuroModulators alongside the
+        // stimulus tensor (see HybridNetwork::forward signature).
+        g.set_attr(snn, "aux_inputs", "NeuroModulators");
 
         g.connect(ann, adapt);
         g.connect(adapt, snn);
@@ -938,7 +961,12 @@ impl HybridExecutionPlan {
     }
 
     /// Plan describing the existing [`crate::ReverseHybridPath`] flow:
-    /// `SpikeActivity → Adaptation(project) → MoeRouter → Readout`.
+    /// `SpikeActivity → Adaptation(project) → MoeRouter`.
+    ///
+    /// The pipeline ends at the router: `forward_activity` returns the
+    /// `ExpertRouteOutput` directly without running experts or a readout, so
+    /// the router's output port is the composite contract, not a plain
+    /// float vector.
     ///
     /// Represents the reverse direction as an ordinary stage pipeline instead
     /// of a second unrelated host abstraction; `mode` is recorded as stage
@@ -990,20 +1018,20 @@ impl HybridExecutionPlan {
             "moe.router",
             StageKind::MoeRouter,
             PortSpec::f32_exact(&[embed_dim]),
-            PortSpec::f32(vec![DimSpec::Symbolic("num_experts".into())]),
+            // ExpertRouteOutput is a composite (weights + selected indices +
+            // optional entropy), not a dense tensor — same composite-port
+            // convention as snn.activity.
+            PortSpec::any(),
         );
         g.set_attr(router, "role", "expert_router.route");
-
-        let readout = g.add_stage(
-            "readout.experts",
-            StageKind::Readout,
-            PortSpec::f32(vec![DimSpec::Symbolic("num_experts".into())]),
-            PortSpec::any(),
+        g.set_attr(
+            router,
+            "contract",
+            "ExpertRouteOutput{weights, selected_experts, routing_entropy}",
         );
 
         g.connect(activity, project);
         g.connect(project, router);
-        g.connect(router, readout);
         g.compile()
     }
 }
@@ -1088,7 +1116,9 @@ mod tests {
     #[test]
     fn compat_plan_represents_reverse_flow() {
         let plan = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 32, 64).unwrap();
-        assert_eq!(plan.stages().len(), 4);
+        // Ends at the router — forward_activity returns ExpertRouteOutput
+        // directly, with no readout stage.
+        assert_eq!(plan.stages().len(), 3);
         let project = plan.stage_by_name("adapt.project_activity").unwrap();
         assert_eq!(project.attrs.get("projection_mode").unwrap(), "RateSum");
         assert_eq!(plan.resolved_domain(StageId(2)), Some(ExecutionDomain::Moe));
@@ -1195,6 +1225,31 @@ mod tests {
         assert_eq!(plan.execution_order(), &[a, b]);
         assert_eq!(plan.feedback_inputs(a).len(), 1);
         assert!(plan.allows_feedback());
+    }
+
+    #[test]
+    fn feedback_only_stage_is_not_forward_connected() {
+        // A stage reachable only through feedback edges has no forward path;
+        // it must not validate as part of the forward flow.
+        let mut g = StageGraph::new();
+        let a = g.add_stage(
+            "ann",
+            StageKind::Transformer,
+            PortSpec::any(),
+            PortSpec::any(),
+        );
+        let b = g.add_stage(
+            "snn",
+            StageKind::SpikingBlock,
+            PortSpec::any(),
+            PortSpec::any(),
+        );
+        g.allow_feedback(true);
+        g.connect_feedback(b, a);
+        assert!(matches!(
+            g.compile().unwrap_err(),
+            PlanError::Disconnected { stage, .. } if stage == b
+        ));
     }
 
     #[test]
@@ -1356,6 +1411,12 @@ mod tests {
         ));
         let mut cfg = HybridConfig::tiny();
         cfg.transformer.dim = 0;
+        assert!(matches!(
+            HybridExecutionPlan::from_hybrid_config(&cfg).unwrap_err(),
+            PlanError::InvalidParameters(_)
+        ));
+        let mut cfg = HybridConfig::tiny();
+        cfg.transformer.max_seq_len = 0;
         assert!(matches!(
             HybridExecutionPlan::from_hybrid_config(&cfg).unwrap_err(),
             PlanError::InvalidParameters(_)

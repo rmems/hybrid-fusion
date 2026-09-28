@@ -196,12 +196,19 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     ///
     /// # Errors
     ///
-    /// [`HybridError::ExecutionPlan`] if `config` carries zero-valued
-    /// dimensions, which the unvalidated [`Self::new`] constructor permits.
+    /// [`HybridError::ExecutionPlan`] if the backend-reported dimensions are
+    /// zero (the unvalidated [`Self::new`] constructor permits such configs).
+    ///
+    /// Contracts derive from the backends (`Transformer::dim`,
+    /// `Transformer::max_seq_len`, `SpikingNetwork::num_channels`) — the same
+    /// values `forward` validates against — so the plan matches the runnable
+    /// pipeline even when `config` disagrees.
     pub fn execution_plan(&self) -> Result<crate::plan::HybridExecutionPlan> {
-        Ok(crate::plan::HybridExecutionPlan::from_hybrid_config(
-            &self.config,
-        )?)
+        let mut cfg = self.config.clone();
+        cfg.transformer.dim = self.transformer.dim();
+        cfg.transformer.max_seq_len = self.transformer.max_seq_len();
+        cfg.snn_input_channels = self.snn.num_channels();
+        Ok(crate::plan::HybridExecutionPlan::from_hybrid_config(&cfg)?)
     }
 
     pub fn reset(&mut self) {
