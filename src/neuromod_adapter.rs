@@ -10,6 +10,17 @@
 //!
 //! This module is compiled only when the optional `neuromod` feature is enabled.
 //!
+//! # Dependency-boundary exception
+//!
+//! `REVIEW.md` forbids concrete backend dependencies in this crate, and
+//! `AGENTS.md` permits one only as a tracked, documented exception. The optional
+//! `neuromod` dependency behind this module is exactly that exception, authorized
+//! by [issue #44](https://github.com/rmems/hybrid-fusion/issues/44). It is
+//! feature-gated and off by default, so the crate's default build stays
+//! trait-only and backend-agnostic. The boundary is preserved: no `neuromod` type
+//! appears in any public signature or re-export (see below), and downstream
+//! crates remain the long-term home for concrete backends.
+//!
 //! # Public boundary
 //!
 //! No `neuromod` type ever appears in a public signature or re-export of
@@ -76,6 +87,20 @@ const DEFAULT_NUM_LIF: usize = 8;
 /// [`DEFAULT_NUM_LIF`] for the rationale behind fixed small defaults.
 const DEFAULT_NUM_IZH: usize = 1;
 
+/// Initial positive synaptic weight seeded onto every LIF input channel at
+/// construction.
+///
+/// `neuromod::SpikingNetwork::with_dimensions` initializes every LIF synaptic
+/// weight to `0.0`, and its `step` integrates *weighted* stimuli. Connectivity
+/// only grows via R-STDP, which requires a first post-synaptic spike — so with
+/// all-zero weights that first spike never occurs and the backend can never
+/// fire. We seed a small, uniform positive weight so a plain
+/// [`NeuromodSnn::new`] / [`NeuromodSnn::with_seed`] produces a network that
+/// actually spikes under stimulus. The value is a fixed constant (not an RNG
+/// draw) to keep construction trivially reproducible; the owned seeded RNG still
+/// drives the stochastic step dynamics, so determinism-by-construction holds.
+const INITIAL_LIF_WEIGHT: f32 = 0.5;
+
 /// Real SNN backend adapter over `neuromod::SpikingNetwork`.
 ///
 /// Wraps a neuromod spiking network plus an owned seeded RNG so stepping is
@@ -92,7 +117,9 @@ impl NeuromodSnn {
     /// neuron banks (`num_lif = 8`, `num_izh = 1`), seeded from a fixed default
     /// seed.
     ///
-    /// For deterministic replay you control, prefer [`Self::with_seed`].
+    /// For deterministic replay you control, prefer [`Self::with_seed`]. As with
+    /// [`Self::with_seed`], passing `num_channels == 0` yields a backend that
+    /// [`HybridNetwork::try_new`](crate::HybridNetwork::try_new) will reject.
     pub fn new(num_channels: usize) -> Self {
         Self::with_seed(num_channels, DEFAULT_SEED)
     }
@@ -103,13 +130,41 @@ impl NeuromodSnn {
     /// This is the deterministic-replay entry point: two instances built with the
     /// same `seed` and stepped over the same stimulus sequence emit identical
     /// fired-index sequences.
+    ///
+    /// Each LIF input synapse is seeded with a small positive weight
+    /// ([`INITIAL_LIF_WEIGHT`]) so the network can actually fire under stimulus:
+    /// neuromod initializes all synaptic weights to `0.0` and only grows
+    /// connectivity via R-STDP after a first post-synaptic spike, which never
+    /// occurs from an all-zero weight matrix.
+    ///
+    /// # Zero channels
+    ///
+    /// Passing `num_channels == 0` builds a backend whose
+    /// [`num_channels()`](SpikingNetwork::num_channels) is `0`. The constructor is
+    /// infallible and does not panic in release, but the `SpikingNetwork` contract
+    /// requires at least one channel, so
+    /// [`HybridNetwork::try_new`](crate::HybridNetwork::try_new) (and `forward`)
+    /// will reject such a backend downstream. A `debug_assert!` flags the misuse
+    /// early in debug builds.
     pub fn with_seed(num_channels: usize, seed: u64) -> Self {
+        debug_assert!(
+            num_channels > 0,
+            "NeuromodSnn requires num_channels > 0; a zero-channel backend is \
+             rejected by HybridNetwork::try_new/forward"
+        );
+        let mut inner = neuromod::SpikingNetwork::with_dimensions(
+            DEFAULT_NUM_LIF,
+            DEFAULT_NUM_IZH,
+            num_channels,
+        );
+        // Seed positive input weights so the LIF bank can spike. Only weight
+        // *values* change; the per-neuron `weights` length (and the matching
+        // `eligibility` length) are left as neuromod built them.
+        for neuron in &mut inner.neurons {
+            neuron.weights.fill(INITIAL_LIF_WEIGHT);
+        }
         Self {
-            inner: neuromod::SpikingNetwork::with_dimensions(
-                DEFAULT_NUM_LIF,
-                DEFAULT_NUM_IZH,
-                num_channels,
-            ),
+            inner,
             rng: StdRng::seed_from_u64(seed),
         }
     }
@@ -331,11 +386,62 @@ mod tests {
         let mods = NeuroModulators::default();
         for _ in 0..16 {
             let fired = snn.step(&[0.9; N], &mods).unwrap();
+            // Fired LIF indices are bounded by the LIF bank size (8), not the
+            // channel count; assert the tighter, always-true channel bound plus
+            // the neuron-bank bound so the check stays meaningful once firing
+            // actually happens.
             assert!(
-                fired.iter().all(|&i| i < N),
-                "fired indices must be < num_channels"
+                fired.iter().all(|&i| i < DEFAULT_NUM_LIF),
+                "fired indices must be < num_lif ({DEFAULT_NUM_LIF})"
             );
         }
+    }
+
+    #[test]
+    fn backend_actually_fires_under_stimulus() {
+        // Regression for the all-zero-weight bug: neuromod initializes every LIF
+        // synaptic weight to 0.0, so before the constructor seeds positive
+        // weights the backend never spikes. Assert that a fresh network emits at
+        // least one non-empty fired-index vector over a short run.
+        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let mods = NeuroModulators::default();
+        let fired_any = (0..32).any(|_| {
+            let fired = snn.step(&[0.9; N], &mods).unwrap();
+            assert!(
+                fired.iter().all(|&i| i < DEFAULT_NUM_LIF),
+                "fired indices must be < num_lif ({DEFAULT_NUM_LIF})"
+            );
+            !fired.is_empty()
+        });
+        assert!(
+            fired_any,
+            "seeded NeuromodSnn must fire at least once under stimulus"
+        );
+    }
+
+    // ── Zero-channel construction (documented degenerate case) ─────────────
+
+    // A zero-channel network is a documented degenerate case. Constructors are
+    // infallible: in release builds they build a backend that reports
+    // `num_channels() == 0` (which HybridNetwork::try_new/forward then reject),
+    // while in debug builds a `debug_assert!` flags the misuse eagerly. Pin both
+    // halves of that contract so neither regresses.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn zero_channels_constructs_without_panic_in_release() {
+        let snn = NeuromodSnn::new(0);
+        assert_eq!(
+            snn.num_channels(),
+            0,
+            "release build constructs a zero-channel backend without panicking"
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "num_channels > 0")]
+    fn zero_channels_debug_asserts() {
+        let _ = NeuromodSnn::new(0);
     }
 
     // ── Width validation ───────────────────────────────────────────────────

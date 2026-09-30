@@ -34,12 +34,29 @@ fn both_backends_return_indices_within_range() {
     assert_eq!(adapter.num_channels(), N);
     assert_eq!(mock.num_channels(), N);
 
+    // The adapter's fired indices are LIF-bank indices, not channel indices. The
+    // bank is `num_lif = 8` (a fixed default in the adapter), so a fired index
+    // can exceed `N` once the network actually spikes. Bound against the bank
+    // size, and separately confirm at least one spike occurs.
+    const NUM_LIF: usize = 8;
+    let mut adapter_fired = false;
     for s in stimulus_sequence() {
         let a = adapter.step(&s, &mods).unwrap();
         let m = mock.step(&s, &mods).unwrap();
-        assert!(a.iter().all(|&i| i < N), "adapter indices in range");
+        assert!(
+            a.iter().all(|&i| i < NUM_LIF),
+            "adapter indices in bank range"
+        );
         assert!(m.iter().all(|&i| i < N), "mock indices in range");
+        adapter_fired |= !a.is_empty();
     }
+    // Regression: the neuromod adapter must actually spike under stimulus (it
+    // silently never fired while its LIF weights were left at the all-zero
+    // neuromod default).
+    assert!(
+        adapter_fired,
+        "neuromod adapter must fire at least once over the stimulus sequence"
+    );
 }
 
 #[test]
