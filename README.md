@@ -161,9 +161,11 @@ is a deterministic reference/mock only, kept for tests and examples; enable
 cargo build --features neuromod
 ```
 
-Enabling `neuromod` raises the effective MSRV to `rust-version = 1.98.1`
-(matching neuromod 0.7). The dependency (and its transitive `rand`) is
-off by default, so a plain build pulls neither.
+The crate's MSRV is `rust-version = 1.98.1` for **all** builds, default and
+feature-enabled alike. Cargo applies `rust-version` package-wide and has no
+per-feature MSRV, so the bump (required by neuromod 0.7) applies even to the
+default, dependency-light build. The `neuromod` dependency (and its transitive
+`rand`) stays out of the default build; only the toolchain floor is shared.
 
 ### Neuromodulator mapping
 

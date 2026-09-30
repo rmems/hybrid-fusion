@@ -31,6 +31,14 @@ sentry = { version = "0.34", optional = true, default-features = false, features
 # ── Optional: real SNN backend (neuromod) ─────────────────────────────────────
 # Enabling `neuromod` pulls the neuromod 0.7 spiking engine (and its `rand`
 # dependency). Off by default; the library's default build stays dependency-light.
+#
+# Dependency-boundary exception: REVIEW.md forbids concrete backend deps and
+# AGENTS.md allows one only as a tracked, documented exception. This optional,
+# off-by-default dependency IS that exception, authorized by issue #44
+# (https://github.com/rmems/hybrid-fusion/issues/44). It is feature-gated so the
+# default build stays trait-only/backend-agnostic, and no neuromod type appears
+# in the public API; downstream crates remain the long-term home for concrete
+# backends.
 neuromod = { version = "0.7", optional = true }
 
 [features]

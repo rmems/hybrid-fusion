@@ -59,8 +59,11 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Changed
 
-- Declared MSRV `rust-version = "1.98.1"` (required by neuromod 0.7). Enabling
-  the `neuromod` feature builds against this toolchain ([#44](https://github.com/rmems/hybrid-fusion/issues/44)).
+- Declared MSRV `rust-version = "1.98.1"` (required by neuromod 0.7). Cargo has
+  no per-feature MSRV, so this applies to **all** builds, including the default
+  dependency-light build, not only when the `neuromod` feature is enabled. The
+  `neuromod` dependency and its transitive `rand` still stay out of the default
+  build ([#44](https://github.com/rmems/hybrid-fusion/issues/44)).
 - Demoted `SimpleSnn` (under the `backends` feature) to a reference/mock-only
   backend. Its behavior, code, and tests are unchanged; the documentation now
   states it is a deterministic mock for tests and examples, not a neuron-dynamics
