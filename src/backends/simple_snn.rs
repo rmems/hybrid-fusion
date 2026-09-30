@@ -1,8 +1,21 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Minimal spiking neural network with Leaky Integrate-and-Fire dynamics.
+//! Deterministic **mock / reference** spiking network (Leaky Integrate-and-Fire).
 //!
-//! `SimpleSnn` maintains a membrane potential per channel. Each step:
+//! `SimpleSnn` is a lightweight, fully deterministic reference implementation of
+//! the [`SpikingNetwork`] trait intended for tests, examples, and documentation.
+//! It is **not** a real neuron-dynamics engine: it models a single leaky
+//! integrator per channel with a fixed threshold and no stochastic input
+//! encoding, subthreshold dynamics, or plasticity.
+//!
+//! The **real** SNN backend is
+//! [`NeuromodSnn`](crate::neuromod_adapter::NeuromodSnn), available behind the
+//! optional `neuromod` feature; it wraps the `neuromod` 0.7 spiking engine
+//! (LIF/Izhikevich dynamics). Prefer `NeuromodSnn` for production stacks and use
+//! `SimpleSnn` only where a small, dependency-free, deterministic stand-in is
+//! wanted.
+//!
+//! Each step:
 //! 1. Leak the membrane toward zero by `leak_factor`.
 //! 2. Add stimulus, scaled by dopamine (excitatory gain) and dampened by
 //!    cortisol (inhibitory gain).
@@ -12,7 +25,11 @@
 use crate::error::{HybridError, Result};
 use crate::traits::{NeuroModulators, SpikingNetwork};
 
-/// Leaky Integrate-and-Fire spiking network.
+/// Deterministic mock / reference Leaky Integrate-and-Fire spiking network.
+///
+/// This is a reference implementation for tests and examples, not a real
+/// dynamics engine. For production use enable the `neuromod` feature and use
+/// [`NeuromodSnn`](crate::neuromod_adapter::NeuromodSnn), the real SNN backend.
 pub struct SimpleSnn {
     membrane_potentials: Vec<f32>,
     threshold: f32,

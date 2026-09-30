@@ -4,6 +4,8 @@
 pub mod backends;
 pub mod error;
 pub mod hybrid;
+#[cfg(feature = "neuromod")]
+pub mod neuromod_adapter;
 pub mod plan;
 pub mod projector;
 pub mod reverse;
@@ -56,3 +58,8 @@ pub use backends::simple_transformer::SimpleTransformer;
 pub use backends::stub_router::StubExpertRouter;
 #[cfg(feature = "backends")]
 pub use backends::synthetic_router::SyntheticExpertRouter;
+
+/// Real SNN backend adapter over `neuromod` 0.7, enabled by the optional
+/// `neuromod` feature. No `neuromod` type crosses this boundary.
+#[cfg(feature = "neuromod")]
+pub use neuromod_adapter::NeuromodSnn;
