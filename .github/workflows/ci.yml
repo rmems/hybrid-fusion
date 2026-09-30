@@ -78,3 +78,19 @@ jobs:
 
       - name: Test (neuromod)
         run: cargo test --features neuromod
+
+      # Cover the pure-flag `backends` combos on the MSRV toolchain. These pull
+      # no extra crates, so they exercise the feature combination without
+      # coupling the MSRV gate to the sentry transitive tree (reqwest/hyper/
+      # tokio/ring), which `--all-features` would.
+      - name: Build (backends)
+        run: cargo build --features backends
+
+      - name: Test (backends)
+        run: cargo test --features backends
+
+      - name: Build (neuromod + backends)
+        run: cargo build --features "neuromod backends"
+
+      - name: Test (neuromod + backends)
+        run: cargo test --features "neuromod backends"

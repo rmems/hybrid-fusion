@@ -5,9 +5,8 @@
 //! [`NeuromodSnn`] implements hybrid-fusion's [`crate::SpikingNetwork`] trait on
 //! top of `neuromod::SpikingNetwork`, a genuine spiking engine with LIF and
 //! Izhikevich neuron dynamics. It is the *real* SNN backend for this crate; the
-//! [`SimpleSnn`](crate::backends::simple_snn::SimpleSnn) reference implementation
-//! (behind the `backends` feature) is only a deterministic mock for tests and
-//! examples.
+//! `SimpleSnn` reference implementation (behind the `backends` feature) is only a
+//! deterministic mock for tests and examples.
 //!
 //! This module is compiled only when the optional `neuromod` feature is enabled.
 //!
@@ -22,10 +21,9 @@
 //!
 //! # Neuromodulator mapping
 //!
-//! hybrid-fusion's [`NeuroModulators`](crate::NeuroModulators) has a different
-//! vocabulary from neuromod's. The adapter converts explicitly, setting every
-//! neuromod field (no implicit field reuse), per
-//! [`to_neuromod_modulators`]:
+//! hybrid-fusion's [`crate::NeuroModulators`] has a different vocabulary from
+//! neuromod's. The adapter converts explicitly, setting every neuromod field
+//! (no implicit field reuse), in `to_neuromod_modulators`:
 //!
 //! | hybrid-fusion field | neuromod field   | rule                                            |
 //! |---------------------|------------------|-------------------------------------------------|
@@ -41,6 +39,10 @@
 //! intentionally dropped from the conversion rather than forced onto an unrelated
 //! channel. `serotonin` has no hybrid-fusion source and is left at its neuromod
 //! default of `0.0`.
+//!
+//! Only the folded `dopamine` channel is range-clamped to `[0, 1]`; the
+//! `norepinephrine` and `acetylcholine` channels are forwarded as-is and rely on
+//! neuromod's finiteness check rather than a range check.
 //!
 //! # Seeded-replay contract
 //!
@@ -155,6 +157,11 @@ impl NeuromodSnn {
     /// - `serotonin` <- `0.0` — no hybrid-fusion source; neuromod default.
     /// - `m.tempo` is intentionally **not** mapped: it is a step/timebase policy
     ///   and neuromod's `step` has no timebase input.
+    ///
+    /// Only the folded `dopamine` channel is range-clamped to `[0, 1]`; the
+    /// `norepinephrine` (from `cortisol`) and `acetylcholine` channels are
+    /// forwarded as-is and rely on neuromod's finiteness check rather than a
+    /// range check.
     fn to_neuromod_modulators(m: &NeuroModulators) -> neuromod::NeuroModulators {
         neuromod::NeuroModulators {
             dopamine: (m.dopamine + m.aux_dopamine).clamp(0.0, 1.0),
@@ -192,9 +199,9 @@ impl SpikingNetwork for NeuromodSnn {
     /// Advance one spiking step.
     ///
     /// Routes through the owned seeded RNG (`neuromod`'s `step_with_rng`) so the
-    /// adapter is deterministic by construction. Converts modulators via
-    /// [`to_neuromod_modulators`](NeuromodSnn::to_neuromod_modulators) and maps
-    /// any `neuromod::StepError` through [`map_step_error`].
+    /// adapter is deterministic by construction. Converts modulators via the
+    /// internal `to_neuromod_modulators` helper and maps any `neuromod::StepError`
+    /// through the internal `map_step_error` helper.
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>> {
         let m = Self::to_neuromod_modulators(modulators);
         self.inner

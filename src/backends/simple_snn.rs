@@ -8,9 +8,8 @@
 //! integrator per channel with a fixed threshold and no stochastic input
 //! encoding, subthreshold dynamics, or plasticity.
 //!
-//! The **real** SNN backend is
-//! [`NeuromodSnn`](crate::neuromod_adapter::NeuromodSnn), available behind the
-//! optional `neuromod` feature; it wraps the `neuromod` 0.7 spiking engine
+//! The **real** SNN backend is `NeuromodSnn`, available behind the optional
+//! `neuromod` feature; it wraps the `neuromod` 0.7 spiking engine
 //! (LIF/Izhikevich dynamics). Prefer `NeuromodSnn` for production stacks and use
 //! `SimpleSnn` only where a small, dependency-free, deterministic stand-in is
 //! wanted.
@@ -29,7 +28,7 @@ use crate::traits::{NeuroModulators, SpikingNetwork};
 ///
 /// This is a reference implementation for tests and examples, not a real
 /// dynamics engine. For production use enable the `neuromod` feature and use
-/// [`NeuromodSnn`](crate::neuromod_adapter::NeuromodSnn), the real SNN backend.
+/// `NeuromodSnn`, the real SNN backend.
 pub struct SimpleSnn {
     membrane_potentials: Vec<f32>,
     threshold: f32,
