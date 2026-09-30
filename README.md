@@ -136,6 +136,7 @@ assert_eq!(out.embedding.len(), 128);
 | `routing` helpers | Always-on pure MoE math (gates, softmax, top-k, entropy). |
 | `GgufLoader` / `SafetensorsLoader` | Dual checkpoint **layout** contracts (parse/mmap → `engram-parser`). |
 | `SyntheticExpertRouter` / `StubExpertRouter` | File-free `ExpertRouter` impls (**requires `backends` feature**). |
+| `NeuromodSnn` | Real SNN backend adapter over `neuromod` 0.7 (LIF/Izhikevich) implementing `SpikingNetwork` (**requires `neuromod` feature**). `SimpleSnn` under `backends` is a reference/mock only. |
 | `NeuroModulators` | Neuromodulator struct passed to SNN steps. |
 | `HybridConfig` / `TransformerConfig` | Predefined configs (`tiny`, `olmo_1b`). |
 | `projector::embed_to_stimuli_with_width` | Pool -> resize -> tanh adapter. |
@@ -146,6 +147,56 @@ assert_eq!(out.embedding.len(), 128);
 
 - **[Implementing a Backend](docs/implementing-backends.md)** — trait contracts, data flow, tensor shape conventions, and a minimal working example for `Transformer` + `SpikingNetwork`.
 - **[Extraction map](docs/extraction-map.md)** — what is extractable from corinth-canal / grok-ozempic into hybrid-fusion vs sibling crates (MoE, dual GGUF+Safetensors, non-extract list).
+
+## Spiking backend (optional `neuromod` feature)
+
+`hybrid-fusion` stays backend-agnostic, but it ships one production-oriented
+`SpikingNetwork` implementation behind the optional `neuromod` feature:
+`NeuromodSnn`, an adapter over [`neuromod`](https://crates.io/crates/neuromod)
+0.7's LIF/Izhikevich spiking engine. `SimpleSnn` (under the `backends` feature)
+is a deterministic reference/mock only, kept for tests and examples; enable
+`neuromod` and use `NeuromodSnn` when you need real neuron dynamics.
+
+```sh
+cargo build --features neuromod
+```
+
+Enabling `neuromod` raises the effective MSRV to `rust-version = 1.98.1`
+(matching neuromod 0.7). The dependency (and its transitive `rand`) is
+off by default, so a plain build pulls neither.
+
+### Neuromodulator mapping
+
+`neuromod`'s modulator vocabulary (`{ dopamine, serotonin, acetylcholine,
+norepinephrine }`, all defaulting to `0.0`) differs from hybrid-fusion's.
+`NeuromodSnn` converts explicitly, setting every neuromod field:
+
+| hybrid-fusion field | neuromod field   | note |
+|---------------------|------------------|------|
+| `dopamine`          | `dopamine`       | `(dopamine + aux_dopamine).clamp(0.0, 1.0)` |
+| `aux_dopamine`      | `dopamine`       | folded into `dopamine` (secondary reward channel) |
+| `cortisol`          | `norepinephrine` | direct; norepinephrine models stress/arousal |
+| `acetylcholine`     | `acetylcholine`  | direct |
+| `tempo`             | *(none)*         | intentionally not mapped (step/timebase policy; neuromod's step has no timebase input) |
+| *(none)*            | `serotonin`      | left at `0.0`; no hybrid-fusion source |
+
+Note that hybrid-fusion defaults `dopamine` and `acetylcholine` to `0.5` and
+`tempo` to `1.0`, while all neuromod modulators default to `0.0`.
+
+Stepping is deterministic by construction: build with
+`NeuromodSnn::with_seed(num_channels, seed)`, and the trait `step` routes
+through an owned seeded generator (backed by neuromod's `step_with_rng`), so the
+same seed and stimulus sequence reproduce the same fired-index sequence.
+`reset()` resets neuron dynamics without reseeding; `reseed(seed)` restarts the
+random stream.
+
+### Public vocabulary decision
+
+hybrid-fusion keeps its public `NeuroModulators { dopamine, cortisol,
+acetylcholine, tempo, aux_dopamine }` unchanged, and the adapter performs the
+explicit conversion above. This keeps churn low, preserves backward
+compatibility for existing callers, and keeps neuromod types out of the public
+contract: no neuromod type appears in any public signature or re-export.
 
 ## Error monitoring (optional)
 
