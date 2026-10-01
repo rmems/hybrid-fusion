@@ -53,7 +53,12 @@
 //!
 //! Only the folded `dopamine` channel is range-clamped to `[0, 1]`; the
 //! `norepinephrine` and `acetylcholine` channels are forwarded as-is and rely on
-//! neuromod's finiteness check rather than a range check.
+//! neuromod's finiteness check rather than a range check. Because clamping would
+//! *mask* a non-finite reward (`f32::INFINITY.clamp(0.0, 1.0) == 1.0`), the
+//! adapter checks `dopamine`/`aux_dopamine` (and their folded sum) for
+//! finiteness before clamping and returns [`crate::HybridError::SnnStep`] on a
+//! non-finite value, so the dopamine channel is validated as strictly as the
+//! others.
 //!
 //! # Seeded-replay contract
 //!
@@ -87,8 +92,8 @@ const MIN_LIF_WEIGHT: f32 = 0.3;
 /// range).
 const MAX_LIF_WEIGHT: f32 = 1.0;
 
-/// Derive a distinct, reproducible, **strictly positive** synaptic weight in
-/// `[MIN_LIF_WEIGHT, MAX_LIF_WEIGHT)` (i.e. `[0.3, 1.0)`) for a given
+/// Derive a reproducible, **strictly positive**, seed-derived synaptic weight
+/// in `[MIN_LIF_WEIGHT, MAX_LIF_WEIGHT)` (i.e. `[0.3, 1.0)`) for a given
 /// `(seed, neuron, channel)` triple.
 ///
 /// `neuromod::SpikingNetwork::with_dimensions` initializes every LIF synaptic
@@ -97,8 +102,11 @@ const MAX_LIF_WEIGHT: f32 = 1.0;
 /// all-zero weights that first spike never occurs and the backend can never
 /// fire. Seeding a single *uniform* positive constant fixes firing but makes
 /// every LIF neuron behave identically, collapsing the bank into all-or-nothing
-/// lockstep. Instead we derive a **distinct per-synapse** weight so neurons fire
-/// in heterogeneous subsets.
+/// lockstep. Instead we derive a seed-dependent weight per `(neuron, channel)`
+/// so neurons are generally distinct and fire in heterogeneous subsets. The
+/// weights are not guaranteed distinct per synapse: different hash outputs can
+/// round to the same `f32` after the affine map, so collisions are possible,
+/// just unlikely.
 ///
 /// The mapping is a small inline SplitMix64-style hash of the triple into the
 /// unit interval, then an affine map onto `[MIN_LIF_WEIGHT, MAX_LIF_WEIGHT)`.
@@ -124,8 +132,9 @@ fn seeded_weight(seed: u64, neuron: usize, channel: usize) -> f32 {
     let u = (z >> 40) as f32 / (1u64 << 24) as f32;
     // Affine-map the unit value into [MIN_LIF_WEIGHT, MAX_LIF_WEIGHT). Because
     // `u` is in [0, 1) and `MIN_LIF_WEIGHT > 0`, every produced weight is
-    // strictly positive — never a dead synapse — while staying distinct per
-    // (neuron, channel) and fully reproducible from the seed.
+    // strictly positive (never a dead synapse) while remaining seed-derived and
+    // fully reproducible from the seed; it is generally distinct per
+    // (neuron, channel), though f32 rounding can coincide.
     MIN_LIF_WEIGHT + u * (MAX_LIF_WEIGHT - MIN_LIF_WEIGHT)
 }
 
@@ -133,17 +142,18 @@ fn seeded_weight(seed: u64, neuron: usize, channel: usize) -> f32 {
 /// one. [`NeuromodSnn::with_seed`] overrides this for explicit replay.
 const DEFAULT_SEED: u64 = 0x4859_4252_4944_5F53; // "HYBRID_S"
 
-/// Default number of leaky-integrate-and-fire neurons allocated per network.
+/// Default number of Izhikevich neurons allocated per network.
 ///
 /// The neuromod engine sizes its LIF/Izhikevich banks independently of the
-/// input channel count. We pick small, non-zero defaults so a plain
+/// input channel count. We pick a small, non-zero default so a plain
 /// [`NeuromodSnn::new`] produces a functional network; callers needing a
 /// specific topology can build the network elsewhere and wrap it with
 /// [`NeuromodSnn::from_network`].
-const DEFAULT_NUM_LIF: usize = 8;
-
-/// Default number of Izhikevich neurons allocated per network. See
-/// [`DEFAULT_NUM_LIF`] for the rationale behind fixed small defaults.
+///
+/// The LIF bank, by contrast, is sized to equal `num_channels` (see
+/// [`NeuromodSnn::with_seed`]) so that fired LIF indices are always
+/// `< num_channels()` and the
+/// [`num_channels()`](SpikingNetwork::num_channels) contract stays honest.
 const DEFAULT_NUM_IZH: usize = 1;
 
 /// Real SNN backend adapter over `neuromod::SpikingNetwork`.
@@ -165,9 +175,9 @@ pub struct NeuromodSnn {
 }
 
 impl NeuromodSnn {
-    /// Build an adapter with `num_channels` input channels and small default
-    /// neuron banks (`num_lif = 8`, `num_izh = 1`), seeded from a fixed default
-    /// seed.
+    /// Build an adapter with `num_channels` input channels, a LIF bank sized to
+    /// `num_channels`, and a small default Izhikevich bank (`num_izh = 1`),
+    /// seeded from a fixed default seed.
     ///
     /// For deterministic replay you control, prefer [`Self::with_seed`]. As with
     /// [`Self::with_seed`], passing `num_channels == 0` yields a backend that
@@ -176,23 +186,35 @@ impl NeuromodSnn {
         Self::with_seed(num_channels, DEFAULT_SEED)
     }
 
-    /// Build an adapter with `num_channels` input channels, small default neuron
-    /// banks (`num_lif = 8`, `num_izh = 1`), and an RNG seeded from `seed`.
+    /// Build an adapter with `num_channels` input channels, a LIF bank sized to
+    /// `num_channels`, a small default Izhikevich bank (`num_izh = 1`), and an
+    /// RNG seeded from `seed`.
+    ///
+    /// Sizing the LIF bank to `num_channels` keeps the
+    /// [`num_channels()`](SpikingNetwork::num_channels) contract honest: `step`
+    /// returns the indices of LIF neurons that fired, so with `num_lif ==
+    /// num_channels` every fired index is `< num_channels()`. (A fixed, larger
+    /// bank would let fired indices exceed the reported channel count, so
+    /// bridging the output through
+    /// `SpikeActivity::from_fired(&fired, num_channels())` could reject valid
+    /// output.)
     ///
     /// This is the deterministic-replay entry point: two instances built with the
     /// same `seed` and stepped over the same stimulus sequence emit identical
     /// fired-index sequences.
     ///
-    /// Each LIF input synapse is seeded with a **distinct**, strictly positive
-    /// weight in `[0.3, 1.0)` derived from the `seed` and the neuron/channel
-    /// indices (see [`seeded_weight`]) so the network can actually fire under
-    /// stimulus:
+    /// Each LIF input synapse is seeded with a strictly positive,
+    /// **seed-derived** weight in `[0.3, 1.0)` computed from the `seed` and the
+    /// neuron/channel indices (see [`seeded_weight`]) so the network can actually
+    /// fire under stimulus:
     /// neuromod initializes all synaptic weights to `0.0` and only grows
     /// connectivity via R-STDP after a first post-synaptic spike, which never
-    /// occurs from an all-zero weight matrix. Using distinct per-neuron weights
-    /// (rather than one uniform constant) makes the LIF bank fire in
-    /// heterogeneous subsets instead of all-or-nothing lockstep. The seeded
-    /// weight matrix is snapshotted so [`reset`](Self::reset) can restore it.
+    /// occurs from an all-zero weight matrix. The weights are generally distinct
+    /// per neuron (rather than one uniform constant), so the LIF bank fires in
+    /// heterogeneous subsets instead of all-or-nothing lockstep; exact
+    /// per-synapse distinctness is not guaranteed, since different hash outputs
+    /// can round to the same `f32`. The seeded weight matrix is snapshotted so
+    /// [`reset`](Self::reset) can restore it.
     ///
     /// # Zero channels
     ///
@@ -209,12 +231,11 @@ impl NeuromodSnn {
             "NeuromodSnn requires num_channels > 0; a zero-channel backend is \
              rejected by HybridNetwork::try_new/forward"
         );
-        let mut inner = neuromod::SpikingNetwork::with_dimensions(
-            DEFAULT_NUM_LIF,
-            DEFAULT_NUM_IZH,
-            num_channels,
-        );
-        // Seed distinct positive input weights so the LIF bank can spike in
+        // Size the LIF bank to `num_channels` so fired LIF indices are always
+        // `< num_channels()` and the `num_channels()` contract stays honest.
+        let mut inner =
+            neuromod::SpikingNetwork::with_dimensions(num_channels, DEFAULT_NUM_IZH, num_channels);
+        // Seed positive, seed-derived input weights so the LIF bank can spike in
         // heterogeneous subsets. Only weight *values* change; the per-neuron
         // `weights` length (and the matching `eligibility` length) are left as
         // neuromod built them.
@@ -299,17 +320,47 @@ impl NeuromodSnn {
     /// - `m.tempo` is intentionally **not** mapped: it is a step/timebase policy
     ///   and neuromod's `step` has no timebase input.
     ///
-    /// Only the folded `dopamine` channel is range-clamped to `[0, 1]`; the
-    /// `norepinephrine` (from `cortisol`) and `acetylcholine` channels are
-    /// forwarded as-is and rely on neuromod's finiteness check rather than a
-    /// range check.
-    fn to_neuromod_modulators(m: &NeuroModulators) -> neuromod::NeuroModulators {
-        neuromod::NeuroModulators {
-            dopamine: (m.dopamine + m.aux_dopamine).clamp(0.0, 1.0),
+    /// # Non-finite reward validation
+    ///
+    /// The folded `dopamine` channel is range-clamped to `[0, 1]`, but a clamp
+    /// *masks* non-finite inputs: `f32::INFINITY.clamp(0.0, 1.0) == 1.0`, so an
+    /// infinite `dopamine`/`aux_dopamine` would otherwise be silently coerced to
+    /// a finite value and never reach neuromod's own `NonFiniteModulator` check.
+    /// To keep this channel consistent with how neuromod validates the others,
+    /// the source reward fields (`m.dopamine`, `m.aux_dopamine`) and their folded
+    /// sum are checked for finiteness **before** clamping; a non-finite value
+    /// returns [`HybridError::SnnStep`] naming the offending field rather than
+    /// clamping it away.
+    ///
+    /// The `norepinephrine` (from `cortisol`) and `acetylcholine` channels are
+    /// forwarded as-is and rely on neuromod's own finiteness check.
+    fn to_neuromod_modulators(m: &NeuroModulators) -> Result<neuromod::NeuroModulators> {
+        if !m.dopamine.is_finite() {
+            return Err(HybridError::SnnStep(format!(
+                "non-finite dopamine ({}) in neuromodulators",
+                m.dopamine
+            )));
+        }
+        if !m.aux_dopamine.is_finite() {
+            return Err(HybridError::SnnStep(format!(
+                "non-finite aux_dopamine ({}) in neuromodulators",
+                m.aux_dopamine
+            )));
+        }
+        let folded = m.dopamine + m.aux_dopamine;
+        if !folded.is_finite() {
+            return Err(HybridError::SnnStep(format!(
+                "non-finite folded dopamine (dopamine {} + aux_dopamine {}) in \
+                 neuromodulators",
+                m.dopamine, m.aux_dopamine
+            )));
+        }
+        Ok(neuromod::NeuroModulators {
+            dopamine: folded.clamp(0.0, 1.0),
             serotonin: 0.0,
             acetylcholine: m.acetylcholine,
             norepinephrine: m.cortisol,
-        }
+        })
     }
 }
 
@@ -344,7 +395,7 @@ impl SpikingNetwork for NeuromodSnn {
     /// internal `to_neuromod_modulators` helper and maps any `neuromod::StepError`
     /// through the internal `map_step_error` helper.
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>> {
-        let m = Self::to_neuromod_modulators(modulators);
+        let m = Self::to_neuromod_modulators(modulators)?;
         self.inner
             .step_with_rng(stimuli, &m, &mut self.rng)
             .map_err(map_step_error)
@@ -374,7 +425,7 @@ mod tests {
             acetylcholine: 0.0,
             tempo: 1.0,
         };
-        let out = NeuromodSnn::to_neuromod_modulators(&m);
+        let out = NeuromodSnn::to_neuromod_modulators(&m).unwrap();
         assert!((out.dopamine - 0.5).abs() < 1e-6, "dopamine = da + aux");
     }
 
@@ -387,7 +438,7 @@ mod tests {
             acetylcholine: 0.0,
             tempo: 1.0,
         };
-        let out = NeuromodSnn::to_neuromod_modulators(&m);
+        let out = NeuromodSnn::to_neuromod_modulators(&m).unwrap();
         assert!((out.dopamine - 1.0).abs() < 1e-6, "0.8 + 0.5 clamps to 1.0");
 
         let m_low = NeuroModulators {
@@ -395,7 +446,7 @@ mod tests {
             aux_dopamine: 0.2,
             ..Default::default()
         };
-        let out_low = NeuromodSnn::to_neuromod_modulators(&m_low);
+        let out_low = NeuromodSnn::to_neuromod_modulators(&m_low).unwrap();
         assert!(out_low.dopamine >= 0.0, "clamps to lower bound 0.0");
     }
 
@@ -405,7 +456,7 @@ mod tests {
             cortisol: 0.42,
             ..Default::default()
         };
-        let out = NeuromodSnn::to_neuromod_modulators(&m);
+        let out = NeuromodSnn::to_neuromod_modulators(&m).unwrap();
         assert!((out.norepinephrine - 0.42).abs() < 1e-6);
     }
 
@@ -415,7 +466,7 @@ mod tests {
             acetylcholine: 0.37,
             ..Default::default()
         };
-        let out = NeuromodSnn::to_neuromod_modulators(&m);
+        let out = NeuromodSnn::to_neuromod_modulators(&m).unwrap();
         assert!((out.acetylcholine - 0.37).abs() < 1e-6);
     }
 
@@ -430,7 +481,7 @@ mod tests {
             acetylcholine: 1.0,
             tempo: 5.0,
         };
-        let out = NeuromodSnn::to_neuromod_modulators(&m);
+        let out = NeuromodSnn::to_neuromod_modulators(&m).unwrap();
         assert_eq!(out.serotonin, 0.0);
     }
 
@@ -450,12 +501,115 @@ mod tests {
             tempo: 99.0,
             ..base.clone()
         };
-        let a = NeuromodSnn::to_neuromod_modulators(&base);
-        let b = NeuromodSnn::to_neuromod_modulators(&bumped);
+        let a = NeuromodSnn::to_neuromod_modulators(&base).unwrap();
+        let b = NeuromodSnn::to_neuromod_modulators(&bumped).unwrap();
         assert_eq!(a.dopamine, b.dopamine);
         assert_eq!(a.serotonin, b.serotonin);
         assert_eq!(a.acetylcholine, b.acetylcholine);
         assert_eq!(a.norepinephrine, b.norepinephrine);
+    }
+
+    // ── Non-finite reward validation ───────────────────────────────────────
+
+    // Regression for the clamp-masking bug: `f32::INFINITY.clamp(0.0, 1.0)`
+    // is a finite `1.0`, so an infinite reward would be silently coerced and
+    // neuromod's own `NonFiniteModulator` check would never run. The adapter
+    // must reject non-finite `dopamine`/`aux_dopamine` *before* clamping, both
+    // in the conversion helper and through the public `step` path.
+
+    #[test]
+    fn infinite_dopamine_is_rejected_not_clamped() {
+        let m = NeuroModulators {
+            dopamine: f32::INFINITY,
+            ..Default::default()
+        };
+        let err = NeuromodSnn::to_neuromod_modulators(&m).unwrap_err();
+        assert!(
+            matches!(err, HybridError::SnnStep(_)),
+            "infinite dopamine must map to SnnStep, got {err:?}"
+        );
+
+        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let step_err = snn.step(&[0.5; N], &m).unwrap_err();
+        assert!(
+            matches!(step_err, HybridError::SnnStep(_)),
+            "step with infinite dopamine must error, got {step_err:?}"
+        );
+    }
+
+    #[test]
+    fn nan_dopamine_is_rejected() {
+        let m = NeuroModulators {
+            dopamine: f32::NAN,
+            ..Default::default()
+        };
+        let err = NeuromodSnn::to_neuromod_modulators(&m).unwrap_err();
+        assert!(
+            matches!(err, HybridError::SnnStep(_)),
+            "NaN dopamine must map to SnnStep, got {err:?}"
+        );
+
+        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let step_err = snn.step(&[0.5; N], &m).unwrap_err();
+        assert!(
+            matches!(step_err, HybridError::SnnStep(_)),
+            "step with NaN dopamine must error, got {step_err:?}"
+        );
+    }
+
+    #[test]
+    fn infinite_aux_dopamine_is_rejected_not_clamped() {
+        let m = NeuroModulators {
+            aux_dopamine: f32::INFINITY,
+            ..Default::default()
+        };
+        let err = NeuromodSnn::to_neuromod_modulators(&m).unwrap_err();
+        assert!(
+            matches!(err, HybridError::SnnStep(_)),
+            "infinite aux_dopamine must map to SnnStep, got {err:?}"
+        );
+
+        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let step_err = snn.step(&[0.5; N], &m).unwrap_err();
+        assert!(
+            matches!(step_err, HybridError::SnnStep(_)),
+            "step with infinite aux_dopamine must error, got {step_err:?}"
+        );
+    }
+
+    #[test]
+    fn nan_aux_dopamine_is_rejected() {
+        let m = NeuroModulators {
+            aux_dopamine: f32::NAN,
+            ..Default::default()
+        };
+        let err = NeuromodSnn::to_neuromod_modulators(&m).unwrap_err();
+        assert!(
+            matches!(err, HybridError::SnnStep(_)),
+            "NaN aux_dopamine must map to SnnStep, got {err:?}"
+        );
+
+        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let step_err = snn.step(&[0.5; N], &m).unwrap_err();
+        assert!(
+            matches!(step_err, HybridError::SnnStep(_)),
+            "step with NaN aux_dopamine must error, got {step_err:?}"
+        );
+    }
+
+    #[test]
+    fn finite_reward_still_folds_and_clamps() {
+        // The finite-value mapping is unchanged by the new validation guard.
+        let m = NeuroModulators {
+            dopamine: 0.8,
+            aux_dopamine: 0.5,
+            ..Default::default()
+        };
+        let out = NeuromodSnn::to_neuromod_modulators(&m).unwrap();
+        assert!(
+            (out.dopamine - 1.0).abs() < 1e-6,
+            "finite 0.8 + 0.5 still folds and clamps to 1.0"
+        );
     }
 
     // ── Shape / channels ───────────────────────────────────────────────────
@@ -472,13 +626,13 @@ mod tests {
         let mods = NeuroModulators::default();
         for _ in 0..16 {
             let fired = snn.step(&[0.9; N], &mods).unwrap();
-            // Fired LIF indices are bounded by the LIF bank size (8), not the
-            // channel count; assert the tighter, always-true channel bound plus
-            // the neuron-bank bound so the check stays meaningful once firing
-            // actually happens.
+            // The LIF bank is now sized to `num_channels`, so every fired LIF
+            // index is `< num_channels()`. This is the honest bound the
+            // `num_channels()` contract advertises.
             assert!(
-                fired.iter().all(|&i| i < DEFAULT_NUM_LIF),
-                "fired indices must be < num_lif ({DEFAULT_NUM_LIF})"
+                fired.iter().all(|&i| i < snn.num_channels()),
+                "fired indices must be < num_channels() ({})",
+                snn.num_channels()
             );
         }
     }
@@ -491,11 +645,12 @@ mod tests {
         // least one non-empty fired-index vector over a short run.
         let mut snn = NeuromodSnn::with_seed(N, SEED);
         let mods = NeuroModulators::default();
+        let channels = snn.num_channels();
         let fired_any = (0..32).any(|_| {
             let fired = snn.step(&[0.9; N], &mods).unwrap();
             assert!(
-                fired.iter().all(|&i| i < DEFAULT_NUM_LIF),
-                "fired indices must be < num_lif ({DEFAULT_NUM_LIF})"
+                fired.iter().all(|&i| i < channels),
+                "fired indices must be < num_channels() ({channels})"
             );
             !fired.is_empty()
         });
@@ -646,8 +801,11 @@ mod tests {
             // (neuron 0, channel 0) under the old [0, 1) mapping.
             0x216f_3ed4_63ae_99ac,
         ];
+        // `seeded_weight` is agnostic to how many neurons the bank actually has
+        // (it is a pure function of the (seed, neuron, channel) triple), so probe
+        // a generous fixed span of neuron/channel indices for positivity.
         for &seed in &seeds {
-            for neuron in 0..DEFAULT_NUM_LIF {
+            for neuron in 0..8 {
                 for channel in 0..N {
                     let w = seeded_weight(seed, neuron, channel);
                     assert!(
@@ -672,13 +830,15 @@ mod tests {
 
     #[test]
     fn fires_in_proper_non_empty_subset() {
-        // Devin finding: identical weights make all eight LIF neurons fire in
-        // lockstep (all-or-nothing), collapsing eight neurons of signal into one
-        // bit. With distinct per-neuron weights, a weak/varied stimulus must
-        // produce at least one step whose fired set is a proper, non-empty subset
-        // of the LIF bank (0 < fired.len() < num_lif) — i.e. neuron-level
-        // patterns rather than all-or-nothing.
+        // Devin finding: identical weights make all LIF neurons fire in lockstep
+        // (all-or-nothing), collapsing the bank of signal into one bit. With
+        // seed-derived per-neuron weights, a weak/varied stimulus must produce at
+        // least one step whose fired set is a proper, non-empty subset of the LIF
+        // bank (0 < fired.len() < num_channels) — i.e. neuron-level patterns
+        // rather than all-or-nothing. The LIF bank is now sized to
+        // `num_channels`, so the proper-subset bound is expressed against it.
         let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let bank = snn.num_channels();
         let mods = NeuroModulators::default();
         // Weak, varied single-channel pokes to tease apart low- vs high-weight
         // neurons rather than driving the whole bank over threshold at once.
@@ -694,7 +854,11 @@ mod tests {
         for _ in 0..8 {
             for s in &sequence {
                 let fired = snn.step(s, &mods).unwrap();
-                if !fired.is_empty() && fired.len() < DEFAULT_NUM_LIF {
+                assert!(
+                    fired.iter().all(|&i| i < bank),
+                    "fired indices must be < num_channels() ({bank})"
+                );
+                if !fired.is_empty() && fired.len() < bank {
                     saw_proper_subset = true;
                 }
             }
@@ -702,7 +866,7 @@ mod tests {
         assert!(
             saw_proper_subset,
             "expected at least one step with a proper non-empty subset of the \
-             {DEFAULT_NUM_LIF}-neuron LIF bank firing (not all-or-nothing lockstep)"
+             {bank}-neuron LIF bank firing (not all-or-nothing lockstep)"
         );
     }
 

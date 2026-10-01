@@ -34,18 +34,18 @@ fn both_backends_return_indices_within_range() {
     assert_eq!(adapter.num_channels(), N);
     assert_eq!(mock.num_channels(), N);
 
-    // The adapter's fired indices are LIF-bank indices, not channel indices. The
-    // bank is `num_lif = 8` (a fixed default in the adapter), so a fired index
-    // can exceed `N` once the network actually spikes. Bound against the bank
-    // size, and separately confirm at least one spike occurs.
-    const NUM_LIF: usize = 8;
+    // The adapter's fired indices are LIF-bank indices. The adapter now sizes
+    // its LIF bank to `num_channels`, so every fired index is `< num_channels()`
+    // (== N here); the reported size and the fired-index range are consistent.
+    // Bound against `num_channels()`, and separately confirm at least one spike
+    // occurs.
     let mut adapter_fired = false;
     for s in stimulus_sequence() {
         let a = adapter.step(&s, &mods).unwrap();
         let m = mock.step(&s, &mods).unwrap();
         assert!(
-            a.iter().all(|&i| i < NUM_LIF),
-            "adapter indices in bank range"
+            a.iter().all(|&i| i < adapter.num_channels()),
+            "adapter indices < num_channels()"
         );
         assert!(m.iter().all(|&i| i < N), "mock indices in range");
         adapter_fired |= !a.is_empty();
