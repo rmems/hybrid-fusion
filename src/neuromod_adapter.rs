@@ -77,7 +77,18 @@ use crate::error::{HybridError, Result};
 use crate::traits::{NeuroModulators, SpikingNetwork};
 use neuromod::{SeedableRng, StdRng};
 
-/// Derive a distinct, reproducible synaptic weight in `[0, 1)` for a given
+/// Minimum seeded LIF synaptic weight (inclusive lower bound of the mapped
+/// range). Chosen strictly greater than `0.0` so no synapse is ever a dead
+/// (zero-weight) connection, which would keep a neuron from ever spiking and
+/// defeat the whole point of seeding.
+const MIN_LIF_WEIGHT: f32 = 0.3;
+
+/// Maximum seeded LIF synaptic weight (exclusive upper bound of the mapped
+/// range).
+const MAX_LIF_WEIGHT: f32 = 1.0;
+
+/// Derive a distinct, reproducible, **strictly positive** synaptic weight in
+/// `[MIN_LIF_WEIGHT, MAX_LIF_WEIGHT)` (i.e. `[0.3, 1.0)`) for a given
 /// `(seed, neuron, channel)` triple.
 ///
 /// `neuromod::SpikingNetwork::with_dimensions` initializes every LIF synaptic
@@ -90,12 +101,17 @@ use neuromod::{SeedableRng, StdRng};
 /// in heterogeneous subsets.
 ///
 /// The mapping is a small inline SplitMix64-style hash of the triple into the
-/// unit interval. It is fully deterministic in the `seed` (no RNG draw), so
-/// construction stays trivially reproducible and `with_seed` replay is exact,
-/// while the owned seeded RNG still drives the stochastic step dynamics. We do
-/// **not** use `rand`'s distribution methods here: neuromod re-exports `rand`
-/// 0.10 but not the `Rng` extension trait those methods live on, and adding a
-/// direct `rand` dependency would violate the dependency-light default build.
+/// unit interval, then an affine map onto `[MIN_LIF_WEIGHT, MAX_LIF_WEIGHT)`.
+/// The affine lower bound is **strictly positive**, so no `(seed, neuron,
+/// channel)` triple can ever produce `0.0`: the raw hash's `[0, 1)` range
+/// includes exactly `0.0` for unlucky seeds (e.g. seed `0x216f3ed463ae99ac`
+/// yields `0.0` at neuron 0, channel 0), which would leave a dead synapse. The
+/// mapping is fully deterministic in the `seed` (no RNG draw), so construction
+/// stays trivially reproducible and `with_seed` replay is exact, while the owned
+/// seeded RNG still drives the stochastic step dynamics. We do **not** use
+/// `rand`'s distribution methods here: neuromod re-exports `rand` 0.10 but not
+/// the `Rng` extension trait those methods live on, and adding a direct `rand`
+/// dependency would violate the dependency-light default build.
 fn seeded_weight(seed: u64, neuron: usize, channel: usize) -> f32 {
     let mut z = seed
         ^ 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(neuron as u64 + 1)
@@ -105,7 +121,12 @@ fn seeded_weight(seed: u64, neuron: usize, channel: usize) -> f32 {
     z ^= z >> 31;
     // Take the top 24 bits and scale into [0, 1); 24 bits map exactly into f32's
     // mantissa so every produced value is representable without rounding bias.
-    (z >> 40) as f32 / (1u64 << 24) as f32
+    let u = (z >> 40) as f32 / (1u64 << 24) as f32;
+    // Affine-map the unit value into [MIN_LIF_WEIGHT, MAX_LIF_WEIGHT). Because
+    // `u` is in [0, 1) and `MIN_LIF_WEIGHT > 0`, every produced weight is
+    // strictly positive — never a dead synapse — while staying distinct per
+    // (neuron, channel) and fully reproducible from the seed.
+    MIN_LIF_WEIGHT + u * (MAX_LIF_WEIGHT - MIN_LIF_WEIGHT)
 }
 
 /// Default RNG seed used by [`NeuromodSnn::new`] when the caller does not supply
@@ -162,9 +183,10 @@ impl NeuromodSnn {
     /// same `seed` and stepped over the same stimulus sequence emit identical
     /// fired-index sequences.
     ///
-    /// Each LIF input synapse is seeded with a **distinct** positive weight in
-    /// `[0, 1)` derived from the `seed` and the neuron/channel indices (see
-    /// [`seeded_weight`]) so the network can actually fire under stimulus:
+    /// Each LIF input synapse is seeded with a **distinct**, strictly positive
+    /// weight in `[0.3, 1.0)` derived from the `seed` and the neuron/channel
+    /// indices (see [`seeded_weight`]) so the network can actually fire under
+    /// stimulus:
     /// neuromod initializes all synaptic weights to `0.0` and only grows
     /// connectivity via R-STDP after a first post-synaptic spike, which never
     /// occurs from an all-zero weight matrix. Using distinct per-neuron weights
@@ -595,12 +617,57 @@ mod tests {
             distinct,
             "seed-derived LIF weights must differ across neurons, not be uniform"
         );
-        // Every weight is in the documented [0, 1) range.
+        // Every weight is in the documented [MIN_LIF_WEIGHT, MAX_LIF_WEIGHT)
+        // range and strictly positive (no dead synapse).
         for neuron in &snn.inner.neurons {
             for &w in &neuron.weights {
-                assert!((0.0..1.0).contains(&w), "seeded weight {w} out of [0,1)");
+                assert!(
+                    (MIN_LIF_WEIGHT..MAX_LIF_WEIGHT).contains(&w),
+                    "seeded weight {w} out of [{MIN_LIF_WEIGHT}, {MAX_LIF_WEIGHT})"
+                );
+                assert!(w > 0.0, "seeded weight {w} must be strictly positive");
             }
         }
+    }
+
+    #[test]
+    fn seeded_weight_is_strictly_positive_across_seeds() {
+        // Regression for the dead-synapse bug: the raw SplitMix64 hash mapped
+        // into [0, 1), which includes exactly 0.0 for unlucky seeds. The affine
+        // map onto [MIN_LIF_WEIGHT, MAX_LIF_WEIGHT) must keep every synapse
+        // strictly positive for every (seed, neuron, channel) triple.
+        let seeds = [
+            0x0000_0000_0000_0000u64,
+            0xFFFF_FFFF_FFFF_FFFFu64,
+            DEFAULT_SEED,
+            SEED,
+            PLASTICITY_SEED,
+            // The specific seed from the review finding that produced 0.0 at
+            // (neuron 0, channel 0) under the old [0, 1) mapping.
+            0x216f_3ed4_63ae_99ac,
+        ];
+        for &seed in &seeds {
+            for neuron in 0..DEFAULT_NUM_LIF {
+                for channel in 0..N {
+                    let w = seeded_weight(seed, neuron, channel);
+                    assert!(
+                        w > 0.0,
+                        "seeded_weight(seed={seed:#x}, {neuron}, {channel}) = {w} \
+                         must be strictly positive"
+                    );
+                    assert!(
+                        (MIN_LIF_WEIGHT..MAX_LIF_WEIGHT).contains(&w),
+                        "seeded_weight(seed={seed:#x}, {neuron}, {channel}) = {w} \
+                         out of [{MIN_LIF_WEIGHT}, {MAX_LIF_WEIGHT})"
+                    );
+                }
+            }
+        }
+        // Explicitly pin the regression seed at (0, 0): previously exactly 0.0.
+        assert!(
+            seeded_weight(0x216f_3ed4_63ae_99ac, 0, 0) > 0.0,
+            "regression seed must no longer yield a zero weight at (0, 0)"
+        );
     }
 
     #[test]
