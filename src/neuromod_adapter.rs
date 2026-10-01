@@ -62,13 +62,51 @@
 //! generator, so the adapter is deterministic *by construction*: two
 //! [`NeuromodSnn::with_seed`] instances built with the same seed and fed the same
 //! stimulus sequence produce identical fired-index sequences. [`NeuromodSnn::reset`]
-//! resets the neuron dynamics but does **not** reseed the RNG; use
-//! [`NeuromodSnn::reseed`] to restart the random stream explicitly. A caller who
-//! wants nondeterminism can [`reseed`](NeuromodSnn::reseed) from an entropy source.
+//! resets the neuron dynamics **and restores the constructor's initial
+//! seed-derived LIF weights**, but does **not** reseed the RNG; use
+//! [`NeuromodSnn::reseed`] to restart the random stream explicitly. Because
+//! `neuromod::SpikingNetwork::reset` leaves `neuron.weights` untouched, R-STDP
+//! mutations learned mid-run would otherwise survive a reset and make a
+//! "replay" start from learned connectivity; the adapter copies the saved
+//! initial weights back on every [`reset`](NeuromodSnn::reset) so the documented
+//! `reset(); reseed(seed)` sequence replays from the *original* connectivity and
+//! reproduces the original fired-index sequence. A caller who wants
+//! nondeterminism can [`reseed`](NeuromodSnn::reseed) from an entropy source.
 
 use crate::error::{HybridError, Result};
 use crate::traits::{NeuroModulators, SpikingNetwork};
 use neuromod::{SeedableRng, StdRng};
+
+/// Derive a distinct, reproducible synaptic weight in `[0, 1)` for a given
+/// `(seed, neuron, channel)` triple.
+///
+/// `neuromod::SpikingNetwork::with_dimensions` initializes every LIF synaptic
+/// weight to `0.0`, and its `step` integrates *weighted* stimuli. Connectivity
+/// only grows via R-STDP, which requires a first post-synaptic spike — so with
+/// all-zero weights that first spike never occurs and the backend can never
+/// fire. Seeding a single *uniform* positive constant fixes firing but makes
+/// every LIF neuron behave identically, collapsing the bank into all-or-nothing
+/// lockstep. Instead we derive a **distinct per-synapse** weight so neurons fire
+/// in heterogeneous subsets.
+///
+/// The mapping is a small inline SplitMix64-style hash of the triple into the
+/// unit interval. It is fully deterministic in the `seed` (no RNG draw), so
+/// construction stays trivially reproducible and `with_seed` replay is exact,
+/// while the owned seeded RNG still drives the stochastic step dynamics. We do
+/// **not** use `rand`'s distribution methods here: neuromod re-exports `rand`
+/// 0.10 but not the `Rng` extension trait those methods live on, and adding a
+/// direct `rand` dependency would violate the dependency-light default build.
+fn seeded_weight(seed: u64, neuron: usize, channel: usize) -> f32 {
+    let mut z = seed
+        ^ 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(neuron as u64 + 1)
+        ^ 0xBF58_476D_1CE4_E5B9u64.wrapping_mul(channel as u64 + 1);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // Take the top 24 bits and scale into [0, 1); 24 bits map exactly into f32's
+    // mantissa so every produced value is representable without rounding bias.
+    (z >> 40) as f32 / (1u64 << 24) as f32
+}
 
 /// Default RNG seed used by [`NeuromodSnn::new`] when the caller does not supply
 /// one. [`NeuromodSnn::with_seed`] overrides this for explicit replay.
@@ -87,29 +125,22 @@ const DEFAULT_NUM_LIF: usize = 8;
 /// [`DEFAULT_NUM_LIF`] for the rationale behind fixed small defaults.
 const DEFAULT_NUM_IZH: usize = 1;
 
-/// Initial positive synaptic weight seeded onto every LIF input channel at
-/// construction.
-///
-/// `neuromod::SpikingNetwork::with_dimensions` initializes every LIF synaptic
-/// weight to `0.0`, and its `step` integrates *weighted* stimuli. Connectivity
-/// only grows via R-STDP, which requires a first post-synaptic spike — so with
-/// all-zero weights that first spike never occurs and the backend can never
-/// fire. We seed a small, uniform positive weight so a plain
-/// [`NeuromodSnn::new`] / [`NeuromodSnn::with_seed`] produces a network that
-/// actually spikes under stimulus. The value is a fixed constant (not an RNG
-/// draw) to keep construction trivially reproducible; the owned seeded RNG still
-/// drives the stochastic step dynamics, so determinism-by-construction holds.
-const INITIAL_LIF_WEIGHT: f32 = 0.5;
-
 /// Real SNN backend adapter over `neuromod::SpikingNetwork`.
 ///
 /// Wraps a neuromod spiking network plus an owned seeded RNG so stepping is
 /// deterministic by construction. Implements [`crate::SpikingNetwork`]. See the
 /// [module documentation](self) for the neuromodulator mapping and seeded-replay
 /// contract.
+///
+/// `initial_weights` snapshots each LIF neuron's seed-derived weight vector at
+/// construction (see [`seeded_weight`]) so [`reset`](Self::reset) can restore the
+/// original connectivity for a from-scratch replay even after R-STDP has mutated
+/// the live weights. It is a plain `Vec<Vec<f32>>`, not a `neuromod` type, so no
+/// backend type crosses the public boundary.
 pub struct NeuromodSnn {
     inner: neuromod::SpikingNetwork,
     rng: StdRng,
+    initial_weights: Vec<Vec<f32>>,
 }
 
 impl NeuromodSnn {
@@ -131,11 +162,15 @@ impl NeuromodSnn {
     /// same `seed` and stepped over the same stimulus sequence emit identical
     /// fired-index sequences.
     ///
-    /// Each LIF input synapse is seeded with a small positive weight
-    /// ([`INITIAL_LIF_WEIGHT`]) so the network can actually fire under stimulus:
+    /// Each LIF input synapse is seeded with a **distinct** positive weight in
+    /// `[0, 1)` derived from the `seed` and the neuron/channel indices (see
+    /// [`seeded_weight`]) so the network can actually fire under stimulus:
     /// neuromod initializes all synaptic weights to `0.0` and only grows
     /// connectivity via R-STDP after a first post-synaptic spike, which never
-    /// occurs from an all-zero weight matrix.
+    /// occurs from an all-zero weight matrix. Using distinct per-neuron weights
+    /// (rather than one uniform constant) makes the LIF bank fire in
+    /// heterogeneous subsets instead of all-or-nothing lockstep. The seeded
+    /// weight matrix is snapshotted so [`reset`](Self::reset) can restore it.
     ///
     /// # Zero channels
     ///
@@ -157,15 +192,24 @@ impl NeuromodSnn {
             DEFAULT_NUM_IZH,
             num_channels,
         );
-        // Seed positive input weights so the LIF bank can spike. Only weight
-        // *values* change; the per-neuron `weights` length (and the matching
-        // `eligibility` length) are left as neuromod built them.
-        for neuron in &mut inner.neurons {
-            neuron.weights.fill(INITIAL_LIF_WEIGHT);
+        // Seed distinct positive input weights so the LIF bank can spike in
+        // heterogeneous subsets. Only weight *values* change; the per-neuron
+        // `weights` length (and the matching `eligibility` length) are left as
+        // neuromod built them.
+        for (ni, neuron) in inner.neurons.iter_mut().enumerate() {
+            for (c, w) in neuron.weights.iter_mut().enumerate() {
+                *w = seeded_weight(seed, ni, c);
+            }
         }
+        // Snapshot the seeded weights so `reset` can restore the original
+        // connectivity for a from-scratch replay (neuromod's own `reset` leaves
+        // `neuron.weights` untouched, so R-STDP mutations would otherwise
+        // persist).
+        let initial_weights = inner.neurons.iter().map(|n| n.weights.clone()).collect();
         Self {
             inner,
             rng: StdRng::seed_from_u64(seed),
+            initial_weights,
         }
     }
 
@@ -175,25 +219,45 @@ impl NeuromodSnn {
     /// used by tests that need a bespoke topology.
     #[allow(dead_code)]
     pub(crate) fn from_network(inner: neuromod::SpikingNetwork, seed: u64) -> Self {
+        // Snapshot the caller-provided network's current weights as the replay
+        // baseline so `reset` restores exactly this starting connectivity.
+        let initial_weights = inner.neurons.iter().map(|n| n.weights.clone()).collect();
         Self {
             inner,
             rng: StdRng::seed_from_u64(seed),
+            initial_weights,
         }
     }
 
     /// Reset the underlying neuron dynamics (membranes, spikes, counters) to
-    /// their initial state.
+    /// their initial state **and restore the constructor's initial LIF weights**.
+    ///
+    /// `neuromod::SpikingNetwork::reset` resets membrane potentials, spike
+    /// bookkeeping, eligibility traces, and modulators, but it does **not** touch
+    /// `neuron.weights`. R-STDP mutates those weights mid-run, so without a
+    /// restore a `reset(); reseed(seed)` "replay" would start from *learned*
+    /// connectivity and could diverge from the original fired-index sequence.
+    /// This method copies the snapshot taken at construction back into each LIF
+    /// neuron so replay is from the original connectivity.
     ///
     /// This does **not** reseed the RNG: replay is explicit. To restart the
     /// random stream, call [`Self::reseed`]. Resetting dynamics without reseeding
     /// lets a caller continue a single random stream across logical episodes.
     pub fn reset(&mut self) {
         self.inner.reset();
+        // Restore the seeded baseline weights (neuromod's reset leaves them as
+        // R-STDP last mutated them). Lengths match by construction.
+        for (neuron, initial) in self.inner.neurons.iter_mut().zip(&self.initial_weights) {
+            neuron.weights.copy_from_slice(initial);
+        }
     }
 
     /// Reseed the owned RNG from `seed`, restarting the deterministic stream.
     ///
-    /// Combine with [`Self::reset`] to replay a run from a known starting point.
+    /// Combine with [`Self::reset`] (which also restores the initial LIF weights)
+    /// to replay a run from a known starting point: `reset(); reseed(seed)`
+    /// reproduces the original fired-index sequence even after R-STDP has mutated
+    /// the live weights.
     pub fn reseed(&mut self, seed: u64) {
         self.rng = StdRng::seed_from_u64(seed);
     }
@@ -517,6 +581,134 @@ mod tests {
             .collect();
 
         assert_eq!(first, second, "reset + reseed replays identically");
+    }
+
+    #[test]
+    fn seeded_weights_are_distinct_per_neuron() {
+        // Regression for the lockstep bug: a single uniform weight makes every
+        // LIF neuron behave identically. Assert the seed-derived weights differ
+        // across neurons so the bank can fire in heterogeneous subsets.
+        let snn = NeuromodSnn::with_seed(N, SEED);
+        let first = &snn.inner.neurons[0].weights;
+        let distinct = snn.inner.neurons.iter().any(|n| n.weights != *first);
+        assert!(
+            distinct,
+            "seed-derived LIF weights must differ across neurons, not be uniform"
+        );
+        // Every weight is in the documented [0, 1) range.
+        for neuron in &snn.inner.neurons {
+            for &w in &neuron.weights {
+                assert!((0.0..1.0).contains(&w), "seeded weight {w} out of [0,1)");
+            }
+        }
+    }
+
+    #[test]
+    fn fires_in_proper_non_empty_subset() {
+        // Devin finding: identical weights make all eight LIF neurons fire in
+        // lockstep (all-or-nothing), collapsing eight neurons of signal into one
+        // bit. With distinct per-neuron weights, a weak/varied stimulus must
+        // produce at least one step whose fired set is a proper, non-empty subset
+        // of the LIF bank (0 < fired.len() < num_lif) — i.e. neuron-level
+        // patterns rather than all-or-nothing.
+        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let mods = NeuroModulators::default();
+        // Weak, varied single-channel pokes to tease apart low- vs high-weight
+        // neurons rather than driving the whole bank over threshold at once.
+        let sequence = [
+            [0.3, 0.0, 0.0, 0.0],
+            [0.0, 0.35, 0.0, 0.0],
+            [0.0, 0.0, 0.4, 0.0],
+            [0.2, 0.0, 0.25, 0.0],
+            [0.0, 0.3, 0.0, 0.3],
+            [0.35, 0.0, 0.0, 0.2],
+        ];
+        let mut saw_proper_subset = false;
+        for _ in 0..8 {
+            for s in &sequence {
+                let fired = snn.step(s, &mods).unwrap();
+                if !fired.is_empty() && fired.len() < DEFAULT_NUM_LIF {
+                    saw_proper_subset = true;
+                }
+            }
+        }
+        assert!(
+            saw_proper_subset,
+            "expected at least one step with a proper non-empty subset of the \
+             {DEFAULT_NUM_LIF}-neuron LIF bank firing (not all-or-nothing lockstep)"
+        );
+    }
+
+    // Seed proven (via out-of-tree neuromod probes) to make learned weights
+    // flip at least one borderline weak-probe firing decision, so the replay
+    // test below genuinely fails without the weight restore in `reset`.
+    const PLASTICITY_SEED: u64 = 0xAAAA_1111;
+
+    // Reward modulators drive R-STDP; a non-zero dopamine makes the weight
+    // mutation under the strong phase pronounced.
+    fn reward_mods() -> NeuroModulators {
+        NeuroModulators {
+            dopamine: 1.0,
+            ..Default::default()
+        }
+    }
+
+    // A strong, saturating stimulus block that reliably triggers spikes (and
+    // therefore R-STDP weight updates).
+    fn strong_block() -> Vec<[f32; N]> {
+        vec![[0.95; N]; 40]
+    }
+
+    // A weak, varied probe whose firing is borderline, so it is sensitive to
+    // whether the LIF weights are the original seeded values or R-STDP-mutated
+    // ones.
+    fn weak_probe() -> Vec<[f32; N]> {
+        (0..40)
+            .map(|i| {
+                let v = 0.25 + 0.02 * (i % 7) as f32;
+                [v, v * 0.8, v * 1.2, v * 0.5]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn replay_after_plasticity_restores_initial_weights() {
+        // Codex P1: after R-STDP mutates weights mid-run, a documented
+        // `reset(); reseed(seed)` replay must reproduce the ORIGINAL connectivity,
+        // not the learned weights. We verify by comparing a plastic adapter —
+        // driven over a strong block (mutating weights), then `reset()` (which
+        // restores the seeded weights) and `reseed(seed)` — against a *fresh*
+        // adapter of the same seed running only the weak probe. They must match,
+        // which holds only because `reset` restores the constructor's initial
+        // weights. (Confirmed during development that removing the restore in
+        // `reset` makes this assertion fail for PLASTICITY_SEED.)
+        let mods = reward_mods();
+
+        // Reference: fresh adapter, weak probe only, no learning.
+        let mut fresh = NeuromodSnn::with_seed(N, PLASTICITY_SEED);
+        let reference: Vec<_> = weak_probe()
+            .iter()
+            .map(|s| fresh.step(s, &mods).unwrap())
+            .collect();
+
+        // Plastic adapter: strong block mutates weights, then reset + reseed and
+        // run the same weak probe.
+        let mut snn = NeuromodSnn::with_seed(N, PLASTICITY_SEED);
+        for s in &strong_block() {
+            let _ = snn.step(s, &mods).unwrap();
+        }
+        snn.reset();
+        snn.reseed(PLASTICITY_SEED);
+        let replayed: Vec<_> = weak_probe()
+            .iter()
+            .map(|s| snn.step(s, &mods).unwrap())
+            .collect();
+
+        assert_eq!(
+            replayed, reference,
+            "reset (with weight restore) + reseed must replay from the original \
+             seeded connectivity, matching a fresh adapter"
+        );
     }
 
     #[test]
