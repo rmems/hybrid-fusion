@@ -192,6 +192,14 @@ same seed and stimulus sequence reproduce the same fired-index sequence.
 `reset()` resets neuron dynamics without reseeding; `reseed(seed)` restarts the
 random stream.
 
+`with_seed` allocates `min(num_channels, 8)` LIF neurons, not one per input
+channel. Fired indices are LIF ids, so they stay below `num_channels()`, which
+still reports the input width. Each neuron stores a weight and an eligibility
+trace per channel, and the adapter snapshots the weights for replay. At 16_384
+channels those three matrices are 2 MiB (`NeuromodSnn::pre_inference_matrix_bytes`
+returns `2_097_152`), not the multi-gigabyte quadratic layout of a channel-sized
+bank.
+
 ### Public vocabulary decision
 
 hybrid-fusion keeps its public `NeuroModulators { dopamine, cortisol,
