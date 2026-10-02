@@ -183,6 +183,13 @@ uses a fixed default seed. `reset()` resets the neuron dynamics but does not
 reseed the generator; call `reseed(seed)` to restart the random stream
 explicitly. Reset plus reseed replays a run from a known starting point.
 
+**Width and memory.** `new` / `with_seed` allocate
+`min(num_channels, NeuromodSnn::MAX_LIF_NEURONS)` LIF neurons (`MAX_LIF_NEURONS`
+is 8). `step` returns those LIF ids, so every index is `< num_channels()` while
+`num_channels()` stays the stimulus width. Weights, eligibility traces, and the
+replay snapshot are therefore linear in width: at 16_384 channels they occupy
+2_097_152 bytes (2 MiB), which `NeuromodSnn::pre_inference_matrix_bytes` reports.
+
 ---
 
 ## 3. NeuroModulators

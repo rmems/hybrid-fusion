@@ -78,6 +78,8 @@
 //! reproduces the original fired-index sequence. A caller who wants
 //! nondeterminism can [`reseed`](NeuromodSnn::reseed) from an entropy source.
 
+use core::mem::size_of;
+
 use crate::error::{HybridError, Result};
 use crate::traits::{NeuroModulators, SpikingNetwork};
 use neuromod::{SeedableRng, StdRng};
@@ -150,11 +152,23 @@ const DEFAULT_SEED: u64 = 0x4859_4252_4944_5F53; // "HYBRID_S"
 /// specific topology can build the network elsewhere and wrap it with
 /// [`NeuromodSnn::from_network`].
 ///
-/// The LIF bank, by contrast, is sized to equal `num_channels` (see
-/// [`NeuromodSnn::with_seed`]) so that fired LIF indices are always
-/// `< num_channels()` and the
-/// [`num_channels()`](SpikingNetwork::num_channels) contract stays honest.
+/// The LIF bank is `min(num_channels, MAX_LIF_NEURONS)` (see
+/// [`NeuromodSnn::with_seed`]). Fired indices are LIF neuron ids, so that cap
+/// keeps every index `< num_channels()` without a quadratic weight matrix.
 const DEFAULT_NUM_IZH: usize = 1;
+
+/// LIF population used by [`NeuromodSnn::new`] / [`NeuromodSnn::with_seed`].
+///
+/// Never larger than `num_channels`, so fired LIF indices stay inside the
+/// reported channel width.
+const fn lif_population(num_channels: usize) -> usize {
+    // `usize::min` is not callable from `const fn` on this crate's MSRV.
+    if num_channels < NeuromodSnn::MAX_LIF_NEURONS {
+        num_channels
+    } else {
+        NeuromodSnn::MAX_LIF_NEURONS
+    }
+}
 
 /// Real SNN backend adapter over `neuromod::SpikingNetwork`.
 ///
@@ -175,9 +189,45 @@ pub struct NeuromodSnn {
 }
 
 impl NeuromodSnn {
-    /// Build an adapter with `num_channels` input channels, a LIF bank sized to
-    /// `num_channels`, and a small default Izhikevich bank (`num_izh = 1`),
-    /// seeded from a fixed default seed.
+    /// Largest LIF population allocated by [`Self::new`] and [`Self::with_seed`].
+    ///
+    /// The population is `min(num_channels, MAX_LIF_NEURONS)`. Eight is the
+    /// bank this adapter used before it was widened to one neuron per channel.
+    pub const MAX_LIF_NEURONS: usize = 8;
+
+    /// Bytes in the three pre-inference matrices [`Self::with_seed`] allocates
+    /// for `num_channels`: LIF `weights`, eligibility traces, and the replay
+    /// snapshot of those weights.
+    ///
+    /// Each synapse contributes one `f32` weight, one `neuromod` eligibility
+    /// trace (two `f32`s, 8 bytes), and one snapshotted `f32`. The LIF count is
+    /// `min(num_channels, MAX_LIF_NEURONS)`, so the total is linear in
+    /// `num_channels`.
+    ///
+    /// At 16_384 channels this is 2_097_152 bytes (2 MiB). The previous
+    /// `num_lif == num_channels` layout stored 268_435_456 synapses in each
+    /// matrix: about 3 GiB counting every entry as an `f32`, and about 4 GiB
+    /// with the 8-byte trace. Neuromod also keeps `input_spike_times` (`i64`)
+    /// and `predictive_state` (`f32`), about 192 KiB at this width; those
+    /// vectors are not included here.
+    ///
+    /// ```
+    /// use hybrid_fusion::NeuromodSnn;
+    ///
+    /// assert_eq!(NeuromodSnn::pre_inference_matrix_bytes(16_384), 2_097_152);
+    /// ```
+    pub const fn pre_inference_matrix_bytes(num_channels: usize) -> usize {
+        let synapses = lif_population(num_channels).saturating_mul(num_channels);
+        let weight_bytes = synapses.saturating_mul(size_of::<f32>());
+        let eligibility_bytes = synapses.saturating_mul(size_of::<neuromod::EligibilityTrace>());
+        weight_bytes
+            .saturating_add(eligibility_bytes)
+            .saturating_add(weight_bytes)
+    }
+
+    /// Build an adapter with `num_channels` input channels, a LIF bank of
+    /// `min(num_channels, MAX_LIF_NEURONS)` neurons, and a small default
+    /// Izhikevich bank (`num_izh = 1`), seeded from a fixed default seed.
     ///
     /// For deterministic replay you control, prefer [`Self::with_seed`]. As with
     /// [`Self::with_seed`], passing `num_channels == 0` yields a backend that
@@ -186,18 +236,28 @@ impl NeuromodSnn {
         Self::with_seed(num_channels, DEFAULT_SEED)
     }
 
-    /// Build an adapter with `num_channels` input channels, a LIF bank sized to
-    /// `num_channels`, a small default Izhikevich bank (`num_izh = 1`), and an
-    /// RNG seeded from `seed`.
+    /// Build an adapter with `num_channels` input channels, a LIF bank of
+    /// `min(num_channels, MAX_LIF_NEURONS)` neurons, a small default Izhikevich
+    /// bank (`num_izh = 1`), and an RNG seeded from `seed`.
     ///
-    /// Sizing the LIF bank to `num_channels` keeps the
-    /// [`num_channels()`](SpikingNetwork::num_channels) contract honest: `step`
-    /// returns the indices of LIF neurons that fired, so with `num_lif ==
-    /// num_channels` every fired index is `< num_channels()`. (A fixed, larger
-    /// bank would let fired indices exceed the reported channel count, so
-    /// bridging the output through
-    /// `SpikeActivity::from_fired(&fired, num_channels())` could reject valid
-    /// output.)
+    /// `step` returns the indices of LIF neurons that fired. The bank is capped
+    /// by both [`Self::MAX_LIF_NEURONS`] and `num_channels`, so every fired
+    /// index is `< num_channels()` and
+    /// `SpikeActivity::from_fired(&fired, num_channels())` accepts the output.
+    /// A bank larger than the reported width would not.
+    /// [`num_channels()`](SpikingNetwork::num_channels) still reports the input
+    /// width, not the LIF population.
+    ///
+    /// # Pre-inference allocation
+    ///
+    /// Weights, eligibility, and the replay snapshot are one entry per synapse.
+    /// A LIF bank sized to `num_channels` makes that storage quadratic. At
+    /// 16_384 channels the three matrices held 268_435_456 entries each —
+    /// roughly 3 GiB of `f32` slots, roughly 4 GiB once eligibility is counted
+    /// as an 8-byte trace — and allocation could abort before the first step.
+    /// The capped bank keeps the same three matrices at
+    /// [`Self::pre_inference_matrix_bytes`]: 2_097_152 bytes (2 MiB) at
+    /// 16_384 channels (512 KiB of weights, 1 MiB of traces, 512 KiB snapshot).
     ///
     /// This is the deterministic-replay entry point: two instances built with the
     /// same `seed` and stepped over the same stimulus sequence emit identical
@@ -231,10 +291,12 @@ impl NeuromodSnn {
             "NeuromodSnn requires num_channels > 0; a zero-channel backend is \
              rejected by HybridNetwork::try_new/forward"
         );
-        // Size the LIF bank to `num_channels` so fired LIF indices are always
-        // `< num_channels()` and the `num_channels()` contract stays honest.
+        // Cap the LIF bank so fired indices stay `< num_channels()` without a
+        // quadratic weight / eligibility / snapshot allocation. See
+        // `pre_inference_matrix_bytes`.
+        let num_lif = lif_population(num_channels);
         let mut inner =
-            neuromod::SpikingNetwork::with_dimensions(num_channels, DEFAULT_NUM_IZH, num_channels);
+            neuromod::SpikingNetwork::with_dimensions(num_lif, DEFAULT_NUM_IZH, num_channels);
         // Seed positive, seed-derived input weights so the LIF bank can spike in
         // heterogeneous subsets. Only weight *values* change; the per-neuron
         // `weights` length (and the matching `eligibility` length) are left as
@@ -259,7 +321,8 @@ impl NeuromodSnn {
     /// Wrap a caller-constructed neuromod network with an RNG seeded from `seed`.
     ///
     /// Kept `pub(crate)` so no `neuromod` type leaks across the public boundary;
-    /// used by tests that need a bespoke topology.
+    /// used by tests that need a bespoke topology. Unlike [`Self::with_seed`],
+    /// this does not cap the LIF population: the caller owns that allocation.
     #[allow(dead_code)]
     pub(crate) fn from_network(inner: neuromod::SpikingNetwork, seed: u64) -> Self {
         // Snapshot the caller-provided network's current weights as the replay
@@ -409,6 +472,8 @@ impl SpikingNetwork for NeuromodSnn {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::size_of;
+
     use super::*;
 
     const N: usize = 4;
@@ -626,15 +691,127 @@ mod tests {
         let mods = NeuroModulators::default();
         for _ in 0..16 {
             let fired = snn.step(&[0.9; N], &mods).unwrap();
-            // The LIF bank is now sized to `num_channels`, so every fired LIF
-            // index is `< num_channels()`. This is the honest bound the
-            // `num_channels()` contract advertises.
+            // Fired indices are LIF ids. The bank is at most `num_channels`,
+            // so every index is `< num_channels()`.
             assert!(
                 fired.iter().all(|&i| i < snn.num_channels()),
                 "fired indices must be < num_channels() ({})",
                 snn.num_channels()
             );
         }
+    }
+
+    /// Bytes in the live weight, eligibility, and snapshot matrices.
+    fn live_matrix_bytes(snn: &NeuromodSnn) -> usize {
+        let weights: usize = snn.inner.neurons.iter().map(|n| n.weights.len()).sum();
+        let eligibility: usize = snn.inner.neurons.iter().map(|n| n.eligibility.len()).sum();
+        let snapshot: usize = snn.initial_weights.iter().map(|w| w.len()).sum();
+        weights * size_of::<f32>()
+            + eligibility * size_of::<neuromod::EligibilityTrace>()
+            + snapshot * size_of::<f32>()
+    }
+
+    #[test]
+    fn lif_bank_never_exceeds_reported_channel_width() {
+        // Widths below, at, and above the cap. Fired ids stay inside both the
+        // LIF population and `num_channels()`, and the reported width stays the
+        // constructor argument.
+        for width in [1usize, N, NeuromodSnn::MAX_LIF_NEURONS, 9, 64] {
+            let mut snn = NeuromodSnn::with_seed(width, SEED);
+            let lif = snn.inner.neurons.len();
+            assert_eq!(snn.num_channels(), width);
+            assert_eq!(lif, width.min(NeuromodSnn::MAX_LIF_NEURONS));
+            assert!(lif <= snn.num_channels());
+            assert_eq!(
+                live_matrix_bytes(&snn),
+                NeuromodSnn::pre_inference_matrix_bytes(width)
+            );
+            let fired = snn
+                .step(&vec![0.9; width], &NeuroModulators::default())
+                .unwrap();
+            assert!(
+                fired.iter().all(|&i| i < snn.num_channels()),
+                "fired indices must be < num_channels() ({width})"
+            );
+            assert!(
+                fired.iter().all(|&i| i < lif),
+                "fired indices must be < LIF population ({lif})"
+            );
+        }
+    }
+
+    #[test]
+    fn large_width_construction_stays_near_two_mib_and_replays() {
+        // Regression for the quadratic pre-inference allocation: a LIF bank
+        // sized to 16_384 channels stored 268_435_456 synapses in each of
+        // weights, eligibility, and the snapshot (~3 GiB of f32 slots, ~4 GiB
+        // with 8-byte traces) before the first step.
+        const WIDE: usize = 16_384;
+        const DOCUMENTED_BYTES: usize = 2_097_152;
+        // Counted in u64 so the ~3 GiB comparison does not overflow `usize`
+        // on a 32-bit target. 3 * 16_384^2 * 4 = 3 GiB exactly.
+        let quadratic_f32_bytes = 3u64 * 16_384u64 * 16_384 * 4;
+        assert_eq!(quadratic_f32_bytes, 3_221_225_472);
+        assert!(u64::try_from(DOCUMENTED_BYTES).unwrap() * 1_000 < quadratic_f32_bytes);
+
+        assert_eq!(size_of::<neuromod::EligibilityTrace>(), 8);
+        assert_eq!(
+            NeuromodSnn::MAX_LIF_NEURONS * WIDE * (size_of::<f32>() + 8 + size_of::<f32>()),
+            DOCUMENTED_BYTES
+        );
+        assert_eq!(
+            NeuromodSnn::pre_inference_matrix_bytes(WIDE),
+            DOCUMENTED_BYTES
+        );
+
+        let mut snn = NeuromodSnn::with_seed(WIDE, SEED);
+        assert_eq!(snn.num_channels(), WIDE);
+        assert_eq!(snn.inner.neurons.len(), NeuromodSnn::MAX_LIF_NEURONS);
+        assert_eq!(snn.initial_weights.len(), NeuromodSnn::MAX_LIF_NEURONS);
+        for neuron in &snn.inner.neurons {
+            assert_eq!(neuron.weights.len(), WIDE);
+            assert_eq!(neuron.eligibility.len(), WIDE);
+        }
+        assert_eq!(live_matrix_bytes(&snn), DOCUMENTED_BYTES);
+
+        let mods = NeuroModulators::default();
+        let mut stim = vec![0.0f32; WIDE];
+        stim[0] = 0.85;
+        stim[WIDE / 2] = 0.4;
+        stim[WIDE - 1] = 0.2;
+
+        let run = |snn: &mut NeuromodSnn| {
+            (0..3)
+                .map(|_| {
+                    let fired = snn.step(&stim, &mods).unwrap();
+                    assert!(
+                        fired.iter().all(|&i| i < WIDE),
+                        "fired index out of the reported channel width"
+                    );
+                    assert!(
+                        fired.iter().all(|&i| i < NeuromodSnn::MAX_LIF_NEURONS),
+                        "fired index out of the capped LIF bank"
+                    );
+                    fired
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let first = run(&mut snn);
+        snn.reset();
+        snn.reseed(SEED);
+        let replayed = run(&mut snn);
+        assert_eq!(
+            first, replayed,
+            "reset + reseed must replay the large-width fired sequence"
+        );
+
+        let mut twin = NeuromodSnn::with_seed(WIDE, SEED);
+        let twin_run = run(&mut twin);
+        assert_eq!(
+            first, twin_run,
+            "same seed must reproduce the large-width fired sequence"
+        );
     }
 
     #[test]
@@ -834,11 +1011,13 @@ mod tests {
         // (all-or-nothing), collapsing the bank of signal into one bit. With
         // seed-derived per-neuron weights, a weak/varied stimulus must produce at
         // least one step whose fired set is a proper, non-empty subset of the LIF
-        // bank (0 < fired.len() < num_channels) — i.e. neuron-level patterns
-        // rather than all-or-nothing. The LIF bank is now sized to
-        // `num_channels`, so the proper-subset bound is expressed against it.
+        // bank (0 < fired.len() < lif population) — i.e. neuron-level patterns
+        // rather than all-or-nothing. The proper-subset bound is the LIF
+        // population (`min(num_channels, MAX_LIF_NEURONS)`), which equals
+        // `num_channels` for this width.
         let mut snn = NeuromodSnn::with_seed(N, SEED);
-        let bank = snn.num_channels();
+        let bank = snn.inner.neurons.len();
+        assert_eq!(bank, N.min(NeuromodSnn::MAX_LIF_NEURONS));
         let mods = NeuroModulators::default();
         // Weak, varied single-channel pokes to tease apart low- vs high-weight
         // neurons rather than driving the whole bank over threshold at once.
@@ -856,7 +1035,7 @@ mod tests {
                 let fired = snn.step(s, &mods).unwrap();
                 assert!(
                     fired.iter().all(|&i| i < bank),
-                    "fired indices must be < num_channels() ({bank})"
+                    "fired indices must be < LIF bank ({bank})"
                 );
                 if !fired.is_empty() && fired.len() < bank {
                     saw_proper_subset = true;

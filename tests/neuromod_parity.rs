@@ -34,9 +34,9 @@ fn both_backends_return_indices_within_range() {
     assert_eq!(adapter.num_channels(), N);
     assert_eq!(mock.num_channels(), N);
 
-    // The adapter's fired indices are LIF-bank indices. The adapter now sizes
-    // its LIF bank to `num_channels`, so every fired index is `< num_channels()`
-    // (== N here); the reported size and the fired-index range are consistent.
+    // The adapter's fired indices are LIF-bank indices. The bank is
+    // `min(num_channels, MAX_LIF_NEURONS)`, so every fired index is
+    // `< num_channels()` and the reported width stays the input width.
     // Bound against `num_channels()`, and separately confirm at least one spike
     // occurs.
     let mut adapter_fired = false;

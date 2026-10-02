@@ -97,6 +97,18 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - Post-transfer hygiene: package `repository`, README CI badge, and docs now point at `rmems/hybrid-fusion` (#28).
 - README sibling-crate links and ownership split clarified (pure MoE math in hybrid-fusion; tensor math in cortex-tensor; parse/mmap in engram-parser; dynamics in neuromod; runtime in brainstem-daemon).
 
+### Fixed
+
+- `NeuromodSnn::with_seed` no longer sizes the LIF bank to `num_channels`.
+  The bank is `min(num_channels, NeuromodSnn::MAX_LIF_NEURONS)` (8), so fired
+  indices stay below `num_channels()` and the reported channel width is
+  unchanged. Weights, eligibility traces, and the replay snapshot are linear
+  in width: at 16_384 channels those three matrices are 2_097_152 bytes (2 MiB)
+  instead of the previous quadratic layout (about 3 GiB of `f32` slots, about
+  4 GiB with 8-byte eligibility traces).
+  `NeuromodSnn::pre_inference_matrix_bytes` reports that footprint
+  (Linear [RM-1939](https://linear.app/rpd-34/issue/RM-1939)).
+
 ### Removed
 
 - Qodana Cloud scan (`qodana-rust` + `QODANA_TOKEN`) after JetBrains membership expired (#35).
