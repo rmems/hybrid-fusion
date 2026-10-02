@@ -186,19 +186,26 @@ Note that hybrid-fusion defaults `dopamine` and `acetylcholine` to `0.5` and
 `tempo` to `1.0`, while all neuromod modulators default to `0.0`.
 
 Stepping is deterministic by construction: build with
-`NeuromodSnn::with_seed(num_channels, seed)`, and the trait `step` routes
+`NeuromodSnn::with_seed(num_channels, num_neurons, seed)?`, and the trait `step` routes
 through an owned seeded generator (backed by neuromod's `step_with_rng`), so the
-same seed and stimulus sequence reproduce the same fired-index sequence.
+same dimensions, seed and stimulus sequence reproduce the same fired-index sequence.
 `reset()` resets neuron dynamics without reseeding; `reseed(seed)` restarts the
 random stream.
 
-`with_seed` allocates `min(num_channels, 8)` LIF neurons, not one per input
-channel. Fired indices are LIF ids, so they stay below `num_channels()`, which
-still reports the input width. Each neuron stores a weight and an eligibility
-trace per channel, and the adapter snapshots the weights for replay. At 16_384
-channels those three matrices are 2 MiB (`NeuromodSnn::pre_inference_matrix_bytes`
-returns `2_097_152`), not the multi-gigabyte quadratic layout of a channel-sized
-bank.
+Input and output widths are explicit: `num_channels()` is the stimulus width;
+`num_neurons()` is the output LIF population and fired-ID domain. For example,
+`NeuromodSnn::with_seed(16_384, 8, seed)?` chooses eight fully connected outputs,
+not 16,384 outputs with only the first eight reachable. Use `num_neurons()` (or
+`HybridOutput.num_neurons`) for `SpikeActivity::from_fired` and the reverse host.
+No spike IDs are replicated or padded to the input width.
+
+Those dimensions allocate **2 MiB of matrix payload**, not total process memory:
+512 KiB weights, 1 MiB eligibility, 512 KiB replay weights.
+`pre_inference_matrix_bytes(inputs, outputs)` reports that payload; constructors
+reject zero dimensions or payloads above `MAX_MATRIX_BYTES` (64 MiB) before
+allocation. Memory is linear in input width only for a fixed output population.
+See the [migration and upstream limitations](docs/implementing-backends.md#rm-1940-migration)
+before choosing a topology; reduced and full populations are not equivalent.
 
 ### Public vocabulary decision
 

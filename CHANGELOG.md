@@ -59,6 +59,21 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Changed
 
+- **BREAKING (RM-1940):** `NeuromodSnn::new(inputs, outputs)` and
+  `with_seed(inputs, outputs, seed)` require an explicit output population and
+  return `Result`. The silent eight-neuron cap / `MAX_LIF_NEURONS` is removed.
+  Zero dimensions and matrix payloads above `MAX_MATRIX_BYTES` (64 MiB) return
+  `InvalidConfig` before allocation; `pre_inference_matrix_bytes` takes both
+  dimensions. See [migration](docs/implementing-backends.md#rm-1940-migration).
+- **BREAKING (RM-1940):** `HybridOutput` requires `num_neurons`, including in
+  serialized records. `SpikingNetwork::num_neurons()` defaults to input width
+  for existing one-output-per-input backends; unequal-width backends must
+  override it. Hosts validate the output population/ID bounds and report it in
+  outputs and execution plans. Reverse features use output population, never
+  input width. Config-only plans now reject zero `snn_lif_neurons`.
+- `NeuromodSnn::reset` also restores initial LIF thresholds (RM-1940).
+  Upstream reset preserves reward-retuned thresholds; restoring only weights
+  could change borderline fired IDs after reset/reseed versus a fresh run.
 - Declared MSRV `rust-version = "1.98.1"` (required by neuromod 0.7). Cargo has
   no per-feature MSRV, so this applies to **all** builds, including the default
   dependency-light build, not only when the `neuromod` feature is enabled. The
@@ -99,15 +114,19 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Fixed
 
-- `NeuromodSnn::with_seed` no longer sizes the LIF bank to `num_channels`.
-  The bank is `min(num_channels, NeuromodSnn::MAX_LIF_NEURONS)` (8), so fired
-  indices stay below `num_channels()` and the reported channel width is
-  unchanged. Weights, eligibility traces, and the replay snapshot are linear
-  in width: at 16_384 channels those three matrices are 2_097_152 bytes (2 MiB)
-  instead of the previous quadratic layout (about 3 GiB of `f32` slots, about
-  4 GiB with 8-byte eligibility traces).
-  `NeuromodSnn::pre_inference_matrix_bytes` reports that footprint
-  (Linear [RM-1939](https://linear.app/rpd-34/issue/RM-1939)).
+- Large-width `NeuromodSnn` construction no longer implicitly allocates one
+  fully connected LIF neuron per input channel (Linear
+  [RM-1939](https://linear.app/rpd-34/issue/RM-1939)).
+  [RM-1940](https://linear.app/rpd-34/issue/RM-1940) supersedes the interim
+  eight-neuron cap with an explicit, configurable output population. Input
+  width remains `num_channels()`; real fired IDs are in `0..num_neurons()`.
+  Weights, eligibility traces, and replay weights use 16 × inputs × outputs
+  bytes: linear in input width only for a fixed output population. At 16_384
+  inputs and 8 outputs this is 2_097_152 bytes (2 MiB), not total process memory.
+  Constructors reject matrix payloads above 64 MiB, including the former
+  16_384 × 16_384 topology (4 GiB with 8-byte eligibility traces).
+  `NeuromodSnn::pre_inference_matrix_bytes(inputs, outputs)` reports matrix
+  payload only; neuron state, per-input state and allocator overhead are extra.
 
 ### Removed
 

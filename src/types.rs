@@ -249,6 +249,8 @@ impl TransformerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridConfig {
     pub transformer: TransformerConfig,
+    /// LIF population hint for backend construction / config-only plans.
+    /// Injected backends are authoritative; the host reads `num_neurons()`.
     pub snn_lif_neurons: usize,
     pub snn_izh_neurons: usize,
     pub snn_input_channels: usize,
@@ -284,7 +286,13 @@ impl Default for HybridConfig {
 pub struct HybridOutput {
     pub embedding: Vec<f32>,
     pub stimuli: Vec<f32>,
+    /// Sparse output neuron IDs, each `< num_neurons`; not input-channel IDs.
     pub fired_neurons: Vec<usize>,
+    /// Output population, also the neuron axis for `SpikeActivity::from_fired`
+    /// and `ReverseHybridPath`. Required in serialized records: older records
+    /// must supply their actual topology rather than infer it from input width
+    /// or the largest fired ID (silent neurons need representation too).
+    pub num_neurons: usize,
     pub global_step: u64,
     /// MoE gate weights when reverse-path routing ran; `None` on ANN→SNN only.
     ///

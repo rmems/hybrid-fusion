@@ -65,10 +65,10 @@
 //! [`NeuromodSnn`] owns a `neuromod::StdRng`. The [`SpikingNetwork::step`] path
 //! routes through `neuromod::SpikingNetwork::step_with_rng` using that owned
 //! generator, so the adapter is deterministic *by construction*: two
-//! [`NeuromodSnn::with_seed`] instances built with the same seed and fed the same
-//! stimulus sequence produce identical fired-index sequences. [`NeuromodSnn::reset`]
+//! [`NeuromodSnn::with_seed`] instances built with the same dimensions and seed,
+//! fed the same stimulus sequence, produce identical fired-index sequences. [`NeuromodSnn::reset`]
 //! resets the neuron dynamics **and restores the constructor's initial
-//! seed-derived LIF weights**, but does **not** reseed the RNG; use
+//! seed-derived LIF weights and thresholds**, but does **not** reseed the RNG; use
 //! [`NeuromodSnn::reseed`] to restart the random stream explicitly. Because
 //! `neuromod::SpikingNetwork::reset` leaves `neuron.weights` untouched, R-STDP
 //! mutations learned mid-run would otherwise survive a reset and make a
@@ -152,23 +152,9 @@ const DEFAULT_SEED: u64 = 0x4859_4252_4944_5F53; // "HYBRID_S"
 /// specific topology can build the network elsewhere and wrap it with
 /// [`NeuromodSnn::from_network`].
 ///
-/// The LIF bank is `min(num_channels, MAX_LIF_NEURONS)` (see
-/// [`NeuromodSnn::with_seed`]). Fired indices are LIF neuron ids, so that cap
-/// keeps every index `< num_channels()` without a quadratic weight matrix.
+/// Only the explicitly sized LIF bank contributes fired IDs. The Izhikevich
+/// bank is internal state, not part of the reported output population.
 const DEFAULT_NUM_IZH: usize = 1;
-
-/// LIF population used by [`NeuromodSnn::new`] / [`NeuromodSnn::with_seed`].
-///
-/// Never larger than `num_channels`, so fired LIF indices stay inside the
-/// reported channel width.
-const fn lif_population(num_channels: usize) -> usize {
-    // `usize::min` is not callable from `const fn` on this crate's MSRV.
-    if num_channels < NeuromodSnn::MAX_LIF_NEURONS {
-        num_channels
-    } else {
-        NeuromodSnn::MAX_LIF_NEURONS
-    }
-}
 
 /// Real SNN backend adapter over `neuromod::SpikingNetwork`.
 ///
@@ -186,25 +172,27 @@ pub struct NeuromodSnn {
     inner: neuromod::SpikingNetwork,
     rng: StdRng,
     initial_weights: Vec<Vec<f32>>,
+    initial_thresholds: Vec<f32>,
 }
 
 impl NeuromodSnn {
-    /// Largest LIF population allocated by [`Self::new`] and [`Self::with_seed`].
+    /// Maximum payload of weights, eligibility traces, and replay snapshot:
+    /// 64 MiB. Constructors reject larger dense topologies before allocating.
     ///
-    /// The population is `min(num_channels, MAX_LIF_NEURONS)`. Eight is the
-    /// bank this adapter used before it was widened to one neuron per channel.
-    pub const MAX_LIF_NEURONS: usize = 8;
+    /// This is NOT a process-memory limit: neuron structs, per-channel state,
+    /// allocator overhead, and stepping temporaries are additional allocations.
+    pub const MAX_MATRIX_BYTES: usize = 64 * 1024 * 1024;
 
     /// Bytes in the three pre-inference matrices [`Self::with_seed`] allocates
-    /// for `num_channels`: LIF `weights`, eligibility traces, and the replay
-    /// snapshot of those weights.
+    /// for explicit input width and output population: LIF `weights`, eligibility
+    /// traces, and the replay snapshot. Saturates at `usize::MAX` on overflow.
     ///
     /// Each synapse contributes one `f32` weight, one `neuromod` eligibility
-    /// trace (two `f32`s, 8 bytes), and one snapshotted `f32`. The LIF count is
-    /// `min(num_channels, MAX_LIF_NEURONS)`, so the total is linear in
-    /// `num_channels`.
+    /// trace (two `f32`s, 8 bytes), and one snapshotted `f32`: 16 bytes per
+    /// input-channel/output-neuron pair. Linear in width ONLY for a fixed
+    /// output population; selecting one neuron per channel is still quadratic.
     ///
-    /// At 16_384 channels this is 2_097_152 bytes (2 MiB). The previous
+    /// At 16_384 inputs and 8 outputs this is 2_097_152 bytes (2 MiB). The previous
     /// `num_lif == num_channels` layout stored 268_435_456 synapses in each
     /// matrix: about 3 GiB counting every entry as an `f32`, and about 4 GiB
     /// with the 8-byte trace. Neuromod also keeps `input_spike_times` (`i64`)
@@ -214,10 +202,10 @@ impl NeuromodSnn {
     /// ```
     /// use hybrid_fusion::NeuromodSnn;
     ///
-    /// assert_eq!(NeuromodSnn::pre_inference_matrix_bytes(16_384), 2_097_152);
+    /// assert_eq!(NeuromodSnn::pre_inference_matrix_bytes(16_384, 8), 2_097_152);
     /// ```
-    pub const fn pre_inference_matrix_bytes(num_channels: usize) -> usize {
-        let synapses = lif_population(num_channels).saturating_mul(num_channels);
+    pub const fn pre_inference_matrix_bytes(num_channels: usize, num_neurons: usize) -> usize {
+        let synapses = num_neurons.saturating_mul(num_channels);
         let weight_bytes = synapses.saturating_mul(size_of::<f32>());
         let eligibility_bytes = synapses.saturating_mul(size_of::<neuromod::EligibilityTrace>());
         weight_bytes
@@ -225,28 +213,21 @@ impl NeuromodSnn {
             .saturating_add(weight_bytes)
     }
 
-    /// Build an adapter with `num_channels` input channels, a LIF bank of
-    /// `min(num_channels, MAX_LIF_NEURONS)` neurons, and a small default
-    /// Izhikevich bank (`num_izh = 1`), seeded from a fixed default seed.
+    /// Build an explicitly sized adapter using a fixed default seed.
     ///
-    /// For deterministic replay you control, prefer [`Self::with_seed`]. As with
-    /// [`Self::with_seed`], passing `num_channels == 0` yields a backend that
-    /// [`HybridNetwork::try_new`](crate::HybridNetwork::try_new) will reject.
-    pub fn new(num_channels: usize) -> Self {
-        Self::with_seed(num_channels, DEFAULT_SEED)
+    /// See [`Self::with_seed`] for dimensions, allocation limits, and errors.
+    pub fn new(num_channels: usize, num_neurons: usize) -> Result<Self> {
+        Self::with_seed(num_channels, num_neurons, DEFAULT_SEED)
     }
 
-    /// Build an adapter with `num_channels` input channels, a LIF bank of
-    /// `min(num_channels, MAX_LIF_NEURONS)` neurons, a small default Izhikevich
-    /// bank (`num_izh = 1`), and an RNG seeded from `seed`.
+    /// Build `num_neurons` LIF output neurons, each connected to all
+    /// `num_channels` inputs, plus one internal Izhikevich neuron, seeded by `seed`.
     ///
-    /// `step` returns the indices of LIF neurons that fired. The bank is capped
-    /// by both [`Self::MAX_LIF_NEURONS`] and `num_channels`, so every fired
-    /// index is `< num_channels()` and
-    /// `SpikeActivity::from_fired(&fired, num_channels())` accepts the output.
-    /// A bank larger than the reported width would not.
-    /// [`num_channels()`](SpikingNetwork::num_channels) still reports the input
-    /// width, not the LIF population.
+    /// No implicit population reduction: callers must choose the output width.
+    /// `step` returns real LIF IDs in `0..num_neurons()`, not input-channel IDs.
+    /// Build reverse activity with `SpikeActivity::from_fired(&fired,
+    /// snn.num_neurons())` and configure the reverse path with that same count.
+    /// Selecting fewer outputs changes the population, NOT the input width.
     ///
     /// # Pre-inference allocation
     ///
@@ -255,13 +236,13 @@ impl NeuromodSnn {
     /// 16_384 channels the three matrices held 268_435_456 entries each —
     /// roughly 3 GiB of `f32` slots, roughly 4 GiB once eligibility is counted
     /// as an 8-byte trace — and allocation could abort before the first step.
-    /// The capped bank keeps the same three matrices at
-    /// [`Self::pre_inference_matrix_bytes`]: 2_097_152 bytes (2 MiB) at
-    /// 16_384 channels (512 KiB of weights, 1 MiB of traces, 512 KiB snapshot).
+    /// That topology is now rejected by [`Self::MAX_MATRIX_BYTES`]. Explicitly
+    /// choosing 8 outputs at 16_384 inputs uses 2 MiB of matrix payload (512 KiB
+    /// weights, 1 MiB traces, 512 KiB snapshot), not 2 MiB of total process memory.
     ///
     /// This is the deterministic-replay entry point: two instances built with the
-    /// same `seed` and stepped over the same stimulus sequence emit identical
-    /// fired-index sequences.
+    /// same dimensions and `seed` and stepped over the same stimulus sequence
+    /// emit identical fired-index sequences.
     ///
     /// Each LIF input synapse is seeded with a strictly positive,
     /// **seed-derived** weight in `[0.3, 1.0)` computed from the `seed` and the
@@ -276,27 +257,26 @@ impl NeuromodSnn {
     /// can round to the same `f32`. The seeded weight matrix is snapshotted so
     /// [`reset`](Self::reset) can restore it.
     ///
-    /// # Zero channels
+    /// # Errors
     ///
-    /// Passing `num_channels == 0` builds a backend whose
-    /// [`num_channels()`](SpikingNetwork::num_channels) is `0`. The constructor is
-    /// infallible and does not panic in release, but the `SpikingNetwork` contract
-    /// requires at least one channel, so
-    /// [`HybridNetwork::try_new`](crate::HybridNetwork::try_new) (and `forward`)
-    /// will reject such a backend downstream. A `debug_assert!` flags the misuse
-    /// early in debug builds.
-    pub fn with_seed(num_channels: usize, seed: u64) -> Self {
-        debug_assert!(
-            num_channels > 0,
-            "NeuromodSnn requires num_channels > 0; a zero-channel backend is \
-             rejected by HybridNetwork::try_new/forward"
-        );
-        // Cap the LIF bank so fired indices stay `< num_channels()` without a
-        // quadratic weight / eligibility / snapshot allocation. See
-        // `pre_inference_matrix_bytes`.
-        let num_lif = lif_population(num_channels);
+    /// [`HybridError::InvalidConfig`] for either zero dimension or a matrix
+    /// payload above [`Self::MAX_MATRIX_BYTES`] (including arithmetic overflow).
+    pub fn with_seed(num_channels: usize, num_neurons: usize, seed: u64) -> Result<Self> {
+        if num_channels == 0 || num_neurons == 0 {
+            return Err(HybridError::InvalidConfig(
+                "NeuromodSnn requires num_channels > 0 and num_neurons > 0".into(),
+            ));
+        }
+        let matrix_bytes = Self::pre_inference_matrix_bytes(num_channels, num_neurons);
+        if matrix_bytes > Self::MAX_MATRIX_BYTES {
+            return Err(HybridError::InvalidConfig(format!(
+                "NeuromodSnn matrix payload {matrix_bytes} exceeds limit {} bytes; \
+                 choose a smaller explicit output population or a different backend",
+                Self::MAX_MATRIX_BYTES
+            )));
+        }
         let mut inner =
-            neuromod::SpikingNetwork::with_dimensions(num_lif, DEFAULT_NUM_IZH, num_channels);
+            neuromod::SpikingNetwork::with_dimensions(num_neurons, DEFAULT_NUM_IZH, num_channels);
         // Seed positive, seed-derived input weights so the LIF bank can spike in
         // heterogeneous subsets. Only weight *values* change; the per-neuron
         // `weights` length (and the matching `eligibility` length) are left as
@@ -306,37 +286,29 @@ impl NeuromodSnn {
                 *w = seeded_weight(seed, ni, c);
             }
         }
-        // Snapshot the seeded weights so `reset` can restore the original
-        // connectivity for a from-scratch replay (neuromod's own `reset` leaves
-        // `neuron.weights` untouched, so R-STDP mutations would otherwise
-        // persist).
-        let initial_weights = inner.neurons.iter().map(|n| n.weights.clone()).collect();
-        Self {
-            inner,
-            rng: StdRng::seed_from_u64(seed),
-            initial_weights,
-        }
+        Ok(Self::from_network(inner, seed))
     }
 
     /// Wrap a caller-constructed neuromod network with an RNG seeded from `seed`.
     ///
     /// Kept `pub(crate)` so no `neuromod` type leaks across the public boundary;
     /// used by tests that need a bespoke topology. Unlike [`Self::with_seed`],
-    /// this does not cap the LIF population: the caller owns that allocation.
-    #[allow(dead_code)]
+    /// this does not enforce the matrix budget: the caller owns that allocation.
     pub(crate) fn from_network(inner: neuromod::SpikingNetwork, seed: u64) -> Self {
         // Snapshot the caller-provided network's current weights as the replay
         // baseline so `reset` restores exactly this starting connectivity.
         let initial_weights = inner.neurons.iter().map(|n| n.weights.clone()).collect();
+        let initial_thresholds = inner.neurons.iter().map(|n| n.threshold).collect();
         Self {
             inner,
             rng: StdRng::seed_from_u64(seed),
             initial_weights,
+            initial_thresholds,
         }
     }
 
     /// Reset the underlying neuron dynamics (membranes, spikes, counters) to
-    /// their initial state **and restore the constructor's initial LIF weights**.
+    /// their initial state **and restore initial LIF weights and thresholds**.
     ///
     /// `neuromod::SpikingNetwork::reset` resets membrane potentials, spike
     /// bookkeeping, eligibility traces, and modulators, but it does **not** touch
@@ -345,6 +317,9 @@ impl NeuromodSnn {
     /// connectivity and could diverge from the original fired-index sequence.
     /// This method copies the snapshot taken at construction back into each LIF
     /// neuron so replay is from the original connectivity.
+    /// Threshold retuning also survives upstream reset and must be restored.
+    /// Decay is overwritten by neuromod from the next step's modulators before
+    /// integration; it cannot carry learned state into replay.
     ///
     /// This does **not** reseed the RNG: replay is explicit. To restart the
     /// random stream, call [`Self::reseed`]. Resetting dynamics without reseeding
@@ -353,8 +328,15 @@ impl NeuromodSnn {
         self.inner.reset();
         // Restore the seeded baseline weights (neuromod's reset leaves them as
         // R-STDP last mutated them). Lengths match by construction.
-        for (neuron, initial) in self.inner.neurons.iter_mut().zip(&self.initial_weights) {
+        for ((neuron, initial), &threshold) in self
+            .inner
+            .neurons
+            .iter_mut()
+            .zip(&self.initial_weights)
+            .zip(&self.initial_thresholds)
+        {
             neuron.weights.copy_from_slice(initial);
+            neuron.threshold = threshold;
         }
     }
 
@@ -468,6 +450,10 @@ impl SpikingNetwork for NeuromodSnn {
         // `num_channels` is a public field on neuromod::SpikingNetwork, not a method.
         self.inner.num_channels
     }
+
+    fn num_neurons(&self) -> usize {
+        self.inner.neurons.len()
+    }
 }
 
 #[cfg(test)]
@@ -475,6 +461,10 @@ mod tests {
     use core::mem::size_of;
 
     use super::*;
+    use crate::{
+        ExpertRouteOutput, ExpertRouter, HybridConfig, HybridNetwork, ProjectionMode,
+        ReverseHybridPath, SpikeActivity, Tensor, Transformer, spike_activity_features,
+    };
 
     const N: usize = 4;
     const SEED: u64 = 0xC0FF_EE01;
@@ -594,7 +584,7 @@ mod tests {
             "infinite dopamine must map to SnnStep, got {err:?}"
         );
 
-        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let mut snn = NeuromodSnn::with_seed(N, N, SEED).unwrap();
         let step_err = snn.step(&[0.5; N], &m).unwrap_err();
         assert!(
             matches!(step_err, HybridError::SnnStep(_)),
@@ -614,7 +604,7 @@ mod tests {
             "NaN dopamine must map to SnnStep, got {err:?}"
         );
 
-        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let mut snn = NeuromodSnn::with_seed(N, N, SEED).unwrap();
         let step_err = snn.step(&[0.5; N], &m).unwrap_err();
         assert!(
             matches!(step_err, HybridError::SnnStep(_)),
@@ -634,7 +624,7 @@ mod tests {
             "infinite aux_dopamine must map to SnnStep, got {err:?}"
         );
 
-        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let mut snn = NeuromodSnn::with_seed(N, N, SEED).unwrap();
         let step_err = snn.step(&[0.5; N], &m).unwrap_err();
         assert!(
             matches!(step_err, HybridError::SnnStep(_)),
@@ -654,7 +644,7 @@ mod tests {
             "NaN aux_dopamine must map to SnnStep, got {err:?}"
         );
 
-        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let mut snn = NeuromodSnn::with_seed(N, N, SEED).unwrap();
         let step_err = snn.step(&[0.5; N], &m).unwrap_err();
         assert!(
             matches!(step_err, HybridError::SnnStep(_)),
@@ -681,58 +671,55 @@ mod tests {
 
     #[test]
     fn num_channels_matches_constructor_arg() {
-        let snn = NeuromodSnn::new(N);
+        let snn = NeuromodSnn::new(N, 12).unwrap();
         assert_eq!(snn.num_channels(), N);
+        assert_eq!(snn.num_neurons(), 12);
     }
 
     #[test]
-    fn step_returns_indices_within_channel_range() {
-        let mut snn = NeuromodSnn::with_seed(N, SEED);
+    fn step_returns_indices_within_output_population() {
+        let mut snn = NeuromodSnn::with_seed(N, 12, SEED).unwrap();
         let mods = NeuroModulators::default();
         for _ in 0..16 {
             let fired = snn.step(&[0.9; N], &mods).unwrap();
-            // Fired indices are LIF ids. The bank is at most `num_channels`,
-            // so every index is `< num_channels()`.
             assert!(
-                fired.iter().all(|&i| i < snn.num_channels()),
-                "fired indices must be < num_channels() ({})",
-                snn.num_channels()
+                fired.iter().all(|&i| i < snn.num_neurons()),
+                "fired indices must be < num_neurons() ({})",
+                snn.num_neurons()
             );
         }
     }
 
-    /// Bytes in the live weight, eligibility, and snapshot matrices.
+    /// Allocated capacities of the live weight, eligibility, and snapshot matrices.
     fn live_matrix_bytes(snn: &NeuromodSnn) -> usize {
-        let weights: usize = snn.inner.neurons.iter().map(|n| n.weights.len()).sum();
-        let eligibility: usize = snn.inner.neurons.iter().map(|n| n.eligibility.len()).sum();
-        let snapshot: usize = snn.initial_weights.iter().map(|w| w.len()).sum();
+        let weights: usize = snn.inner.neurons.iter().map(|n| n.weights.capacity()).sum();
+        let eligibility: usize = snn
+            .inner
+            .neurons
+            .iter()
+            .map(|n| n.eligibility.capacity())
+            .sum();
+        let snapshot: usize = snn.initial_weights.iter().map(|w| w.capacity()).sum();
         weights * size_of::<f32>()
             + eligibility * size_of::<neuromod::EligibilityTrace>()
             + snapshot * size_of::<f32>()
     }
 
     #[test]
-    fn lif_bank_never_exceeds_reported_channel_width() {
-        // Widths below, at, and above the cap. Fired ids stay inside both the
-        // LIF population and `num_channels()`, and the reported width stays the
-        // constructor argument.
-        for width in [1usize, N, NeuromodSnn::MAX_LIF_NEURONS, 9, 64] {
-            let mut snn = NeuromodSnn::with_seed(width, SEED);
+    fn explicit_population_is_not_capped_at_eight_or_input_width() {
+        for (width, population) in [(1, 1), (4, 12), (8, 8), (9, 9), (64, 3)] {
+            let mut snn = NeuromodSnn::with_seed(width, population, SEED).unwrap();
             let lif = snn.inner.neurons.len();
             assert_eq!(snn.num_channels(), width);
-            assert_eq!(lif, width.min(NeuromodSnn::MAX_LIF_NEURONS));
-            assert!(lif <= snn.num_channels());
+            assert_eq!(snn.num_neurons(), population);
+            assert_eq!(lif, population);
             assert_eq!(
                 live_matrix_bytes(&snn),
-                NeuromodSnn::pre_inference_matrix_bytes(width)
+                NeuromodSnn::pre_inference_matrix_bytes(width, population)
             );
             let fired = snn
                 .step(&vec![0.9; width], &NeuroModulators::default())
                 .unwrap();
-            assert!(
-                fired.iter().all(|&i| i < snn.num_channels()),
-                "fired indices must be < num_channels() ({width})"
-            );
             assert!(
                 fired.iter().all(|&i| i < lif),
                 "fired indices must be < LIF population ({lif})"
@@ -740,13 +727,165 @@ mod tests {
         }
     }
 
+    struct LastChannelTransformer(usize);
+
+    impl Transformer for LastChannelTransformer {
+        fn hidden_states(&self, _: &[u32]) -> Tensor {
+            let mut hidden = vec![0.0; self.0];
+            hidden[self.0 - 1] = 1.0; // tanh(1) ≈ 0.762, within stimulus bounds
+            Tensor::from_vec(hidden, &[self.0])
+        }
+        fn dim(&self) -> usize {
+            self.0
+        }
+        fn max_seq_len(&self) -> usize {
+            1
+        }
+        fn param_count(&self) -> usize {
+            0
+        }
+    }
+
+    struct CheckingRouter(Vec<f32>);
+
+    impl ExpertRouter for CheckingRouter {
+        fn num_experts(&self) -> usize {
+            2
+        }
+        fn top_k(&self) -> usize {
+            1
+        }
+        fn route(&mut self, embedding: &[f32]) -> Result<ExpertRouteOutput> {
+            assert_eq!(
+                embedding, self.0,
+                "router must receive the exact projected features"
+            );
+            Ok(ExpertRouteOutput {
+                expert_weights: vec![0.25, 0.75],
+                selected_experts: vec![1],
+                routing_entropy: None,
+            })
+        }
+    }
+
     #[test]
-    fn large_width_construction_stays_near_two_mib_and_replays() {
+    fn controlled_late_channel_reaches_exact_output_and_reverse_feature() {
+        // Below/equal/above eight; output can be smaller OR larger than input.
+        // The 16K cases prove late inputs survive in both a reduced population
+        // and a population with real, independently addressable IDs above 7.
+        for (inputs, outputs, target) in [
+            (4, 4, 2),
+            (8, 8, 6),
+            (9, 9, 8),
+            (4, 12, 10),
+            (16_384, 8, 6),
+            (16_384, 12, 10),
+        ] {
+            let mut snn = NeuromodSnn::with_seed(inputs, outputs, SEED).unwrap();
+            assert_eq!(live_matrix_bytes(&snn), inputs * outputs * 16);
+            // Controlled connectivity, not replacement dynamics. Only one
+            // neuron receives current, from the LAST input. With weight 2,
+            // neutral modulators and reset state, neuromod integrates
+            // 2 * tanh(1) * 1.5 * 0.45 * 0.85 ≈ 0.874 > threshold (<= 0.5).
+            // Every other neuron has exactly zero current and cannot fire.
+            for neuron in &mut snn.inner.neurons {
+                neuron.weights.fill(0.0);
+            }
+            snn.inner.neurons[target].weights[inputs - 1] = 2.0;
+            snn.initial_weights = snn
+                .inner
+                .neurons
+                .iter()
+                .map(|n| n.weights.clone())
+                .collect();
+            let mut cfg = HybridConfig::tiny();
+            cfg.transformer.dim = inputs;
+            cfg.transformer.max_seq_len = 1;
+            cfg.snn_input_channels = inputs;
+            let mut net = HybridNetwork::try_new(LastChannelTransformer(inputs), snn, cfg).unwrap();
+            let mods = NeuroModulators {
+                dopamine: 0.0,
+                acetylcholine: 0.0,
+                ..Default::default()
+            };
+            let out = net.forward(&[1], Some(mods.clone())).unwrap();
+            assert_eq!(out.stimuli.len(), inputs);
+            assert_eq!(out.fired_neurons, vec![target]);
+            assert_eq!(out.num_neurons, outputs);
+            let plan = net.execution_plan().unwrap();
+            assert_eq!(
+                plan.stage_by_name("snn.step").unwrap().attrs["num_neurons"],
+                outputs.to_string()
+            );
+
+            let activity = SpikeActivity::from_fired(&out.fired_neurons, out.num_neurons).unwrap();
+            assert_eq!(activity.potentials.len(), outputs);
+            for mode in [
+                ProjectionMode::RateSum,
+                ProjectionMode::SpikingTernary,
+                ProjectionMode::TemporalHistogram,
+                ProjectionMode::MembraneSnapshot,
+            ] {
+                // One timestep: one count at target; histogram uses neuron-major
+                // bins, and that one timestep belongs exclusively to bin 0.
+                let bins = if mode == ProjectionMode::TemporalHistogram {
+                    4
+                } else {
+                    1
+                };
+                let mut expected = vec![0.0_f32; outputs * bins];
+                if mode != ProjectionMode::MembraneSnapshot {
+                    expected[target * bins] = 1.0;
+                }
+                assert_eq!(
+                    spike_activity_features(mode, &activity, outputs).unwrap(),
+                    expected
+                );
+                let expected_embedding: Vec<_> = expected.iter().map(|v| v.tanh()).collect();
+                let mut reverse = ReverseHybridPath::new(
+                    mode,
+                    outputs,
+                    outputs * bins,
+                    CheckingRouter(expected_embedding.clone()),
+                )
+                .unwrap();
+                let routed = reverse.forward_activity(&activity).unwrap();
+                assert_eq!(routed.embedding, expected_embedding);
+                assert_eq!(routed.num_neurons, outputs);
+                assert_eq!(routed.fired_neurons, vec![target]);
+                assert_eq!(routed.selected_experts, Some(vec![1]));
+                if inputs != outputs {
+                    // An input-width reverse host must reject, not silently pad.
+                    let mut wrong = ReverseHybridPath::new(
+                        mode,
+                        inputs,
+                        outputs * bins,
+                        CheckingRouter(vec![]),
+                    )
+                    .unwrap();
+                    assert!(matches!(wrong.forward_activity(&activity),
+                        Err(HybridError::InputLengthMismatch { expected, got })
+                        if expected == inputs && got == outputs));
+                    assert_eq!(wrong.global_step(), 0);
+                }
+            }
+            net.snn.reset();
+            net.snn.reseed(SEED);
+            assert_eq!(
+                net.forward(&[1], Some(mods)).unwrap().fired_neurons,
+                vec![target]
+            );
+        }
+    }
+
+    #[test]
+    fn large_width_matrix_payload_is_two_mib_and_replays() {
         // Regression for the quadratic pre-inference allocation: a LIF bank
         // sized to 16_384 channels stored 268_435_456 synapses in each of
         // weights, eligibility, and the snapshot (~3 GiB of f32 slots, ~4 GiB
         // with 8-byte traces) before the first step.
         const WIDE: usize = 16_384;
+        const OUTPUTS: usize = 8;
         const DOCUMENTED_BYTES: usize = 2_097_152;
         // Counted in u64 so the ~3 GiB comparison does not overflow `usize`
         // on a 32-bit target. 3 * 16_384^2 * 4 = 3 GiB exactly.
@@ -756,18 +895,19 @@ mod tests {
 
         assert_eq!(size_of::<neuromod::EligibilityTrace>(), 8);
         assert_eq!(
-            NeuromodSnn::MAX_LIF_NEURONS * WIDE * (size_of::<f32>() + 8 + size_of::<f32>()),
+            OUTPUTS * WIDE * (size_of::<f32>() + 8 + size_of::<f32>()),
             DOCUMENTED_BYTES
         );
         assert_eq!(
-            NeuromodSnn::pre_inference_matrix_bytes(WIDE),
+            NeuromodSnn::pre_inference_matrix_bytes(WIDE, OUTPUTS),
             DOCUMENTED_BYTES
         );
 
-        let mut snn = NeuromodSnn::with_seed(WIDE, SEED);
+        let mut snn = NeuromodSnn::with_seed(WIDE, OUTPUTS, SEED).unwrap();
         assert_eq!(snn.num_channels(), WIDE);
-        assert_eq!(snn.inner.neurons.len(), NeuromodSnn::MAX_LIF_NEURONS);
-        assert_eq!(snn.initial_weights.len(), NeuromodSnn::MAX_LIF_NEURONS);
+        assert_eq!(snn.num_neurons(), OUTPUTS);
+        assert_eq!(snn.inner.neurons.len(), OUTPUTS);
+        assert_eq!(snn.initial_weights.len(), OUTPUTS);
         for neuron in &snn.inner.neurons {
             assert_eq!(neuron.weights.len(), WIDE);
             assert_eq!(neuron.eligibility.len(), WIDE);
@@ -785,12 +925,8 @@ mod tests {
                 .map(|_| {
                     let fired = snn.step(&stim, &mods).unwrap();
                     assert!(
-                        fired.iter().all(|&i| i < WIDE),
-                        "fired index out of the reported channel width"
-                    );
-                    assert!(
-                        fired.iter().all(|&i| i < NeuromodSnn::MAX_LIF_NEURONS),
-                        "fired index out of the capped LIF bank"
+                        fired.iter().all(|&i| i < OUTPUTS),
+                        "fired index out of the explicitly selected LIF bank"
                     );
                     fired
                 })
@@ -806,7 +942,7 @@ mod tests {
             "reset + reseed must replay the large-width fired sequence"
         );
 
-        let mut twin = NeuromodSnn::with_seed(WIDE, SEED);
+        let mut twin = NeuromodSnn::with_seed(WIDE, OUTPUTS, SEED).unwrap();
         let twin_run = run(&mut twin);
         assert_eq!(
             first, twin_run,
@@ -820,7 +956,7 @@ mod tests {
         // synaptic weight to 0.0, so before the constructor seeds positive
         // weights the backend never spikes. Assert that a fresh network emits at
         // least one non-empty fired-index vector over a short run.
-        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let mut snn = NeuromodSnn::with_seed(N, N, SEED).unwrap();
         let mods = NeuroModulators::default();
         let channels = snn.num_channels();
         let fired_any = (0..32).any(|_| {
@@ -837,36 +973,30 @@ mod tests {
         );
     }
 
-    // ── Zero-channel construction (documented degenerate case) ─────────────
+    // ── Fallible construction, including the old multi-GiB shape ───────────
 
-    // A zero-channel network is a documented degenerate case. Constructors are
-    // infallible: in release builds they build a backend that reports
-    // `num_channels() == 0` (which HybridNetwork::try_new/forward then reject),
-    // while in debug builds a `debug_assert!` flags the misuse eagerly. Pin both
-    // halves of that contract so neither regresses.
-    #[cfg(not(debug_assertions))]
     #[test]
-    fn zero_channels_constructs_without_panic_in_release() {
-        let snn = NeuromodSnn::new(0);
-        assert_eq!(
-            snn.num_channels(),
-            0,
-            "release build constructs a zero-channel backend without panicking"
-        );
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "num_channels > 0")]
-    fn zero_channels_debug_asserts() {
-        let _ = NeuromodSnn::new(0);
+    fn rejects_zero_and_oversized_topologies_before_allocation() {
+        for (inputs, outputs) in [(0, 4), (4, 0), (0, 0), (16_384, 16_384), (usize::MAX, 2)] {
+            assert!(matches!(
+                NeuromodSnn::new(inputs, outputs),
+                Err(HybridError::InvalidConfig(_))
+            ));
+        }
+        // 16 bytes/synapse: 1024 * 4096 is exactly the 64 MiB budget.
+        let at_limit = NeuromodSnn::new(1024, 4096).unwrap();
+        assert_eq!(live_matrix_bytes(&at_limit), 67_108_864);
+        assert!(matches!(
+            NeuromodSnn::new(1024, 4097),
+            Err(HybridError::InvalidConfig(_))
+        ));
     }
 
     // ── Width validation ───────────────────────────────────────────────────
 
     #[test]
     fn rejects_wrong_width_with_input_length_mismatch() {
-        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let mut snn = NeuromodSnn::with_seed(N, 2, SEED).unwrap();
         let mods = NeuroModulators::default();
         let err = snn.step(&[0.1, 0.2], &mods).unwrap_err();
         match err {
@@ -882,7 +1012,7 @@ mod tests {
 
     #[test]
     fn nan_stimulus_maps_to_snn_step_error_not_panic() {
-        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let mut snn = NeuromodSnn::with_seed(N, N, SEED).unwrap();
         let mods = NeuroModulators::default();
         let mut stim = [0.5; N];
         stim[1] = f32::NAN;
@@ -908,7 +1038,7 @@ mod tests {
     fn same_seed_produces_identical_fired_sequences() {
         let mods = NeuroModulators::default();
         let run = |seed: u64| {
-            let mut snn = NeuromodSnn::with_seed(N, seed);
+            let mut snn = NeuromodSnn::with_seed(N, N, seed).unwrap();
             stimulus_sequence()
                 .iter()
                 .map(|s| snn.step(s, &mods).unwrap())
@@ -920,7 +1050,7 @@ mod tests {
     #[test]
     fn reset_then_replay_is_reproducible() {
         let mods = NeuroModulators::default();
-        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        let mut snn = NeuromodSnn::with_seed(N, N, SEED).unwrap();
         let first: Vec<_> = stimulus_sequence()
             .iter()
             .map(|s| snn.step(s, &mods).unwrap())
@@ -938,11 +1068,34 @@ mod tests {
     }
 
     #[test]
+    fn reset_replays_after_modulators_retune_thresholds() {
+        let mut inner = neuromod::SpikingNetwork::with_dimensions(12, 1, 9);
+        inner.neurons[10].weights[8] = 2.0;
+        let mut snn = NeuromodSnn::from_network(inner, SEED);
+        let neutral = NeuroModulators {
+            dopamine: 0.0,
+            acetylcholine: 0.0,
+            ..Default::default()
+        };
+        let mut probe = [0.0; 9];
+        probe[8] = 0.10;
+        // 2 * .10 * 1.5 * .45 * .85 = .11475: above the first-step threshold
+        // (.02 clamped to .05), below the ~.149 reached during reward retuning.
+        assert_eq!(snn.step(&probe, &neutral).unwrap(), vec![10]);
+        for _ in 0..16 {
+            snn.step(&[0.0; 9], &reward_mods()).unwrap();
+        }
+        snn.reset();
+        snn.reseed(SEED);
+        assert_eq!(snn.step(&probe, &neutral).unwrap(), vec![10]);
+    }
+
+    #[test]
     fn seeded_weights_are_distinct_per_neuron() {
         // Regression for the lockstep bug: a single uniform weight makes every
         // LIF neuron behave identically. Assert the seed-derived weights differ
         // across neurons so the bank can fire in heterogeneous subsets.
-        let snn = NeuromodSnn::with_seed(N, SEED);
+        let snn = NeuromodSnn::with_seed(N, N, SEED).unwrap();
         let first = &snn.inner.neurons[0].weights;
         let distinct = snn.inner.neurons.iter().any(|n| n.weights != *first);
         assert!(
@@ -1013,11 +1166,10 @@ mod tests {
         // least one step whose fired set is a proper, non-empty subset of the LIF
         // bank (0 < fired.len() < lif population) — i.e. neuron-level patterns
         // rather than all-or-nothing. The proper-subset bound is the LIF
-        // population (`min(num_channels, MAX_LIF_NEURONS)`), which equals
-        // `num_channels` for this width.
-        let mut snn = NeuromodSnn::with_seed(N, SEED);
+        // population, explicitly equal to the input width in this fixture.
+        let mut snn = NeuromodSnn::with_seed(N, N, SEED).unwrap();
         let bank = snn.inner.neurons.len();
-        assert_eq!(bank, N.min(NeuromodSnn::MAX_LIF_NEURONS));
+        assert_eq!(bank, N);
         let mods = NeuroModulators::default();
         // Weak, varied single-channel pokes to tease apart low- vs high-weight
         // neurons rather than driving the whole bank over threshold at once.
@@ -1095,7 +1247,7 @@ mod tests {
         let mods = reward_mods();
 
         // Reference: fresh adapter, weak probe only, no learning.
-        let mut fresh = NeuromodSnn::with_seed(N, PLASTICITY_SEED);
+        let mut fresh = NeuromodSnn::with_seed(N, N, PLASTICITY_SEED).unwrap();
         let reference: Vec<_> = weak_probe()
             .iter()
             .map(|s| fresh.step(s, &mods).unwrap())
@@ -1103,7 +1255,7 @@ mod tests {
 
         // Plastic adapter: strong block mutates weights, then reset + reseed and
         // run the same weak probe.
-        let mut snn = NeuromodSnn::with_seed(N, PLASTICITY_SEED);
+        let mut snn = NeuromodSnn::with_seed(N, N, PLASTICITY_SEED).unwrap();
         for s in &strong_block() {
             let _ = snn.step(s, &mods).unwrap();
         }

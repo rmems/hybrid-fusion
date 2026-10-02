@@ -54,6 +54,8 @@ pub struct ReverseHybridPath<R: ExpertRouter> {
 
 impl<R: ExpertRouter> ReverseHybridPath<R> {
     /// Rejects `n_neurons == 0` or `embed_dim == 0`.
+    /// `n_neurons` is the SNN OUTPUT population (`SpikingNetwork::num_neurons`),
+    /// not its input width. `embed_dim` is an independent projection choice.
     pub fn new(
         mode: ProjectionMode,
         n_neurons: usize,
@@ -235,6 +237,7 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
             embedding,
             stimuli: Vec::new(),
             fired_neurons,
+            num_neurons: self.n_neurons,
             global_step: self.global_step,
             expert_weights: Some(expert_weights),
             selected_experts: Some(route.selected_experts),

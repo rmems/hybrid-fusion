@@ -162,9 +162,10 @@ fn test_forward_output_shapes() {
     assert_eq!(out.stimuli.len(), snn_channels);
     assert_ne!(out.stimuli.len(), net.config().snn_input_channels);
 
-    // fired_neurons is a subset of valid channel indices
+    // This legacy mock uses the default one-output-per-input trait method.
+    assert_eq!(out.num_neurons, snn_channels);
     for &idx in &out.fired_neurons {
-        assert!(idx < snn_channels, "fired neuron index out of range");
+        assert!(idx < out.num_neurons, "fired neuron index out of range");
     }
 
     // first forward sets global_step to 1
@@ -913,4 +914,111 @@ fn public_forward_valid_rank2_regression() {
     let dim = net.transformer.dim();
     let expected_0 = 0.01 * dim as f32 * (tokens.len() - 1) as f32 / 2.0;
     assert!((out.embedding[0] - expected_0).abs() < 1e-5);
+}
+
+struct UnequalSnn {
+    inputs: usize,
+    outputs: usize,
+    fired: Vec<usize>,
+    calls: usize,
+}
+
+impl SpikingNetwork for UnequalSnn {
+    fn num_channels(&self) -> usize {
+        self.inputs
+    }
+    fn num_neurons(&self) -> usize {
+        self.outputs
+    }
+    fn step(&mut self, stimuli: &[f32], _: &NeuroModulators) -> hybrid_fusion::Result<Vec<usize>> {
+        assert_eq!(stimuli.len(), self.inputs);
+        self.calls += 1;
+        Ok(self.fired.clone())
+    }
+}
+
+#[test]
+fn forward_output_population_is_independent_and_required_in_serialization() {
+    for (inputs, outputs, fired) in [(16, 3, vec![2]), (4, 12, vec![10]), (16, 3, vec![])] {
+        let mut cfg = HybridConfig::tiny();
+        cfg.snn_input_channels = inputs;
+        let t = MockTransformer {
+            dim: cfg.transformer.dim,
+            max_seq: cfg.transformer.max_seq_len,
+        };
+        let s = UnequalSnn {
+            inputs,
+            outputs,
+            fired: fired.clone(),
+            calls: 0,
+        };
+        let mut net = HybridNetwork::try_new(t, s, cfg).unwrap();
+        let out = net.forward(&[1], None).unwrap();
+        assert_eq!(out.stimuli.len(), inputs);
+        assert_eq!(out.num_neurons, outputs);
+        assert_eq!(out.fired_neurons, fired);
+        let plan = net.execution_plan().unwrap();
+        assert_eq!(
+            plan.stage_by_name("snn.step").unwrap().attrs["num_neurons"],
+            outputs.to_string()
+        );
+        let mut json = serde_json::to_value(&out).unwrap();
+        let restored: HybridOutput = serde_json::from_value(json.clone()).unwrap();
+        let activity =
+            hybrid_fusion::SpikeActivity::from_fired(&restored.fired_neurons, restored.num_neurons)
+                .unwrap();
+        assert_eq!(activity.potentials.len(), outputs);
+        json.as_object_mut().unwrap().remove("num_neurons");
+        let err = serde_json::from_value::<HybridOutput>(json.clone()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "missing field `num_neurons`",
+            "legacy data needs actual topology, not an inferred input-width default"
+        );
+        // A caller-owned migration supplies the known backend population.
+        // 4 -> 12 with ID 10 leaves a silent neuron above the largest fired ID;
+        // 16 -> 3 with no spikes cannot infer any population from activity.
+        json["num_neurons"] = serde_json::json!(outputs);
+        let migrated: HybridOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(migrated.num_neurons, outputs);
+        assert_eq!(migrated.fired_neurons, fired);
+        let activity =
+            hybrid_fusion::SpikeActivity::from_fired(&migrated.fired_neurons, migrated.num_neurons)
+                .unwrap();
+        assert_eq!(activity.potentials.len(), outputs);
+        assert_eq!(activity.spike_train, vec![fired]);
+    }
+}
+
+#[test]
+fn invalid_output_contract_does_not_advance_host_counter() {
+    // 3 is a legal input ID but NOT an output ID for this 8 -> 3 backend.
+    for (outputs, fired, expected_calls) in [(0, vec![], 0), (3, vec![3], 1)] {
+        let mut cfg = HybridConfig::tiny();
+        cfg.snn_input_channels = 8;
+        let t = MockTransformer {
+            dim: cfg.transformer.dim,
+            max_seq: cfg.transformer.max_seq_len,
+        };
+        let s = UnequalSnn {
+            inputs: 8,
+            outputs,
+            fired,
+            calls: 0,
+        };
+        let mut net = HybridNetwork::new(t, s, cfg.clone());
+        let err = net.forward(&[1], None).unwrap_err();
+        assert_eq!(net.global_step(), 0);
+        assert_eq!(net.snn.calls, expected_calls);
+        if outputs == 0 {
+            assert!(matches!(err, HybridError::InvalidConfig(_)));
+            assert!(net.execution_plan().is_err());
+            assert!(matches!(
+                HybridNetwork::try_new(net.transformer, net.snn, cfg),
+                Err(HybridError::InvalidConfig(_))
+            ));
+        } else {
+            assert!(matches!(err, HybridError::SnnStep(_)));
+        }
+    }
 }

@@ -100,6 +100,7 @@ never calls it during inference. Return `0` if you don't track parameters.
 pub trait SpikingNetwork {
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>;
     fn num_channels(&self) -> usize;
+    fn num_neurons(&self) -> usize { self.num_channels() }
 }
 ```
 
@@ -116,7 +117,7 @@ Advance the SNN by one timestep.
 - `modulators` is always provided (defaults are used if the caller passes
   `None` to `HybridNetwork::forward`).
 - Return a `Vec<usize>` of neuron indices that fired this step. Indices
-  must be valid for your neuron population. An empty `Vec` means no neurons
+  must be `< num_neurons()`. An empty `Vec` means no neurons
   fired.
 - Return `Err(HybridError::SnnStep(...))` if the step encounters an
   internal error.
@@ -152,6 +153,15 @@ transformer embedding to match this width.
 transformer might produce a 128-dim embedding while the SNN only has 64
 input channels — the projector handles the resize.
 
+### `num_neurons(&self) -> usize`
+
+The nonzero output population. Fired IDs are in `0..num_neurons()`, independent
+of input width. Both dimensions must remain stable over stepping. The default
+returns `num_channels()` for one-output-per-input backends; unequal-width
+implementations **must override it**. `HybridNetwork` rejects a zero output
+population before stepping and out-of-domain IDs afterward. A failed output
+check leaves the host counter unchanged but cannot roll back the backend step.
+
 ### The real SNN backend: `NeuromodSnn` (optional `neuromod` feature)
 
 `hybrid-fusion` ships one production-oriented `SpikingNetwork` implementation:
@@ -176,19 +186,146 @@ out, and `HybridError` on failure. The modulator conversion (see
 
 **Seeded replay.** `NeuromodSnn` owns its random generator, so stepping is
 deterministic by construction. Build with `NeuromodSnn::with_seed(num_channels,
-seed)` and two instances given the same seed and the same stimulus sequence
+num_neurons, seed)?` and two instances given the same dimensions, seed and stimulus sequence
 emit identical fired-index sequences (the trait `step` routes through the owned
-generator, backed by neuromod's `step_with_rng`). `NeuromodSnn::new(num_channels)`
-uses a fixed default seed. `reset()` resets the neuron dynamics but does not
+generator, backed by neuromod's `step_with_rng`). `NeuromodSnn::new(num_channels, num_neurons)?`
+uses a fixed default seed. `reset()` resets the neuron dynamics and restores
+initial weights and thresholds, but does not
 reseed the generator; call `reseed(seed)` to restart the random stream
 explicitly. Reset plus reseed replays a run from a known starting point.
 
-**Width and memory.** `new` / `with_seed` allocate
-`min(num_channels, NeuromodSnn::MAX_LIF_NEURONS)` LIF neurons (`MAX_LIF_NEURONS`
-is 8). `step` returns those LIF ids, so every index is `< num_channels()` while
-`num_channels()` stays the stimulus width. Weights, eligibility traces, and the
-replay snapshot are therefore linear in width: at 16_384 channels they occupy
-2_097_152 bytes (2 MiB), which `NeuromodSnn::pre_inference_matrix_bytes` reports.
+**Width and memory.** `new` / `with_seed` require explicit input and output
+dimensions. All LIF outputs retain full-width input connectivity. The internal
+Izhikevich neuron does not contribute returned IDs. Weights, eligibility, and
+the replay weight snapshot use 16 × inputs × outputs bytes in neuromod 0.7:
+4-byte weights + 8-byte traces + 4-byte snapshot entries. Constructors reject
+zero dimensions, overflow, and matrix payloads above `MAX_MATRIX_BYTES` (64 MiB)
+before allocating. This fixed guard allows up to 256 outputs at 16,384 inputs
+without permitting the former 4 GiB matrix construction. It is a conservative
+adapter allocation policy, not a neuron-dynamics limit or a total-memory bound.
+
+### RM-1940 migration
+
+This is a source and serialized-output compatibility change. There is no
+implicit default output population and no `MAX_LIF_NEURONS` cap:
+
+```rust
+use hybrid_fusion::{NeuromodSnn, NeuroModulators, SpikeActivity, SpikingNetwork};
+
+// Explicitly opt into PR #49's reduced topology (not per-input output semantics).
+let mut snn = NeuromodSnn::with_seed(16_384, 8, 42)?;
+let fired = snn.step(&vec![0.5; snn.num_channels()], &NeuroModulators::default())?;
+let activity = SpikeActivity::from_fired(&fired, snn.num_neurons())?;
+assert_eq!(activity.potentials.len(), 8);
+// ReverseHybridPath::new(mode, snn.num_neurons(), embed_dim, router)?
+# Ok::<(), hybrid_fusion::HybridError>(())
+```
+
+- Replace `new(inputs)` with `new(inputs, outputs)?`, and
+  `with_seed(inputs, seed)` with `with_seed(inputs, outputs, seed)?` (or handle
+  the returned `Result` explicitly). Choose the output population before
+  construction; allocation rejection is not an instruction to silently retry
+  with fewer neurons.
+- To retain a pre-#49 topology at a modest width, explicitly choose equal
+  input/output counts. Choosing `(width, width.min(8))` retains #49's topology.
+  Populations greater than eight are supported; no spikes are duplicated.
+- Replace `from_fired(fired, snn.num_channels())` with
+  `from_fired(fired, snn.num_neurons())`. After a host forward, use
+  `from_fired(&out.fired_neurons, out.num_neurons)`. Configure the reverse host
+  with the same output count, including for silent steps.
+- RateSum and SpikingTernary have one feature per output neuron;
+  TemporalHistogram has four neuron-major bins per output. MembraneSnapshot
+  also has one feature per output, but `from_fired` supplies zero potentials,
+  not measured membrane values. `embed_dim` remains an independent resize:
+  increasing it does not restore missing neurons or recover old semantics.
+- `HybridOutput.num_neurons` is required on struct literals and deserialization.
+  Migrate stored records using their actual topology, not `stimuli.len()` or
+  `max(fired)+1`. A reduced population has no output positions 8 onward when
+  its count is eight; callers must not silently pad activity to input width.
+- `HybridConfig.snn_lif_neurons` remains a construction hint, not a second
+  runtime source of truth. `HybridNetwork::execution_plan` reads the backend
+  population; config-only plans use the hint and reject zero.
+- Constructors now return `InvalidConfig` for zero dimensions in both debug
+  and release, replacing the old debug assertion / invalid release backend.
+  Step input-length, non-finite input/modulator checks and error mapping stay
+  unchanged. Reset now also restores retuned thresholds; post-reset output can
+  differ from the old adapter's incomplete reset, and agrees with a fresh run.
+
+**Older serialized outputs.** Deserializing a record without `num_neurons`
+fails with ``missing field `num_neurons` ``. There is no serde default or
+automatic legacy conversion. A caller-owned migration must recover the
+actual output count from the producing backend's checkpoint or verified run
+metadata, add it to the record, and validate the fired IDs against that count
+with `SpikeActivity::from_fired` before reverse projection. This also applies
+to reverse-produced outputs, whose `stimuli` is empty. Neither input width,
+embedding length nor the largest observed fired ID identifies the population;
+silent neurons and silent steps still have an output dimension. If that
+provenance is unavailable, keep the record in its legacy format or reject it
+for reverse processing until the topology is recovered; do not invent a count.
+For known PR #49 `NeuromodSnn` runs only, the actual population was
+`min(input_width, 8)`; earlier equal-width runs and custom backends require
+their own verified topology, not that blanket conversion.
+
+**Remaining upstream dependency.** `neuromod` 0.7's
+[`with_dimensions`](https://github.com/rmems/neuromod/blob/v0.7.0/src/engine.rs#L404-L430)
+stores dense weights and eligibility for every neuron/input pair. Reusing
+standalone `LifNeuron` primitives with diagonal connectivity would change
+topology, predictive currents, inhibition and plasticity orchestration; this
+adapter does not implement another engine. Preserving a fully connected
+16,384-output plastic network with bounded memory needs an upstream storage /
+plasticity design, not an ID remapping here. Sparse connectivity alone would
+also change semantics. No full-versus-reduced population or model-quality
+equivalence is claimed, and no downstream experiments have been validated.
+
+**Consumer inventory (RM-1940).** `HybridNetwork` preflight, forward projector,
+config validation and forward-plan input ports consume **input width**.
+`HybridOutput`, forward-plan output metadata, `SpikeActivity::from_fired`,
+reverse projectors and `ReverseHybridPath` consume **output population**.
+`SimpleSnn`, inline example backends and existing generic mocks have one output
+per input, so the trait default preserves their behavior. The neuromod parity
+test uses explicit equal dimensions. Historical design notes under
+`docs/superpowers` describe old proposals, not the current runtime contract.
+
+The 2026-10-02 downstream source/manifests inventory found no dependencies on
+hybrid-fusion or consumers of these APIs at the following main-branch heads:
+
+- [`Limen-Neural/brainstem-daemon`](https://github.com/Limen-Neural/brainstem-daemon/blob/8fe78be5091531c8867a1b8c012a2e52a92b83b8/Cargo.toml#L32-L44)
+  is accessible at its canonical path (the earlier `rmems` path returned 404).
+  It uses neuromod 0.6 directly and independently configures LIF count,
+  Izhikevich count and input channels; it does not consume `HybridOutput`.
+- [`rmems/cortex-tensor`](https://github.com/rmems/cortex-tensor/blob/a7de7137695683bb2b3f33750b7f9a667870786b/src/snn/neuromod_adapter.rs#L27-L56)
+  has its own `NeuromodNetwork` / `SnnBackend` contract with an equality check
+  between total neuron-bank count and channels. It is not this adapter; any
+  future bridge needs a separate review of the actual fired-ID domain.
+- [`Limen-Neural/neuromod`](https://github.com/Limen-Neural/neuromod/tree/a897cc91f7e97efb465d41247fa907e2c1f2332d)
+  is the upstream engine, not a consumer of the changed hybrid-fusion API.
+- [`rmems/corinth-canal`](https://github.com/rmems/corinth-canal/blob/06cefa04fe117ab7e2db4c40946d6664aed8440c/src/projector.rs#L204-L240)
+  has an independent reverse projector. A future bridge must use the actual
+  output population to avoid its filtering of out-of-domain IDs.
+
+No direct API migration was identified in those revisions. This is **source
+inspection only**: no downstream repositories were modified, built or run, and
+unpublished consumers / experiments remain unverified. A future consumer of
+`NeuromodSnn` must use its reported LIF output count, not add its internal
+Izhikevich bank. External consumers must still follow the migration above.
+
+**Allocation evidence.** At `(16_384, 8)`, matrix payload is exactly 2,097,152
+bytes (512 KiB weights + 1 MiB traces + 512 KiB replay weights), independently
+checked against live vectors by the large-width unit test. Additional storage
+includes 192 KiB of input timestamps/predictive state, neuron structs, the RNG,
+32 bytes of saved thresholds, vector headers and allocator overhead. The old
+shape was 3 GiB only if all three matrices were counted as `f32`; actual 8-byte
+traces make its payload 4 GiB. Never interpret the matrix estimate as RSS.
+To measure peak **whole-process** resident memory separately on Linux:
+
+```sh
+cargo build --release --features neuromod --example neuromod_memory
+/usr/bin/time -v target/release/examples/neuromod_memory
+```
+
+This measures one constructor, no stepping, and includes the executable,
+runtime and allocator. RSS is platform-dependent; the PR records observed
+values and the exact tested commit rather than making them a portable bound.
 
 ---
 
@@ -535,6 +672,7 @@ pub struct HybridOutput {
     pub embedding: Vec<f32>,    // pooled hidden state, len == transformer.dim()
     pub stimuli: Vec<f32>,      // tanh-squashed, len == snn.num_channels()
     pub fired_neurons: Vec<usize>,
+    pub num_neurons: usize,     // output population; fired IDs are < this
     pub global_step: u64,
     // MoE reverse-path fields (None on ANN→SNN-only forward):
     pub expert_weights: Option<Vec<f32>>,
@@ -880,7 +1018,9 @@ pub struct SpikeActivity {
 
 Helper: `SpikeActivity::from_fired(fired, n_neurons) -> Result` for one-step
 tests. Rejects `n_neurons == 0` and any fired index `>= n_neurons`; empty
-`fired` with `n_neurons > 0` is valid.
+`fired` with `n_neurons > 0` is valid. Use `snn.num_neurons()` or
+`HybridOutput.num_neurons`, never input width, for this dimension and the
+reverse host's `n_neurons`.
 
 ### `ExpertRouter`
 
