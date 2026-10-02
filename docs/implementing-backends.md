@@ -221,6 +221,11 @@ assert_eq!(activity.potentials.len(), 8);
 # Ok::<(), hybrid_fusion::HybridError>(())
 ```
 
+- Replace `new(inputs)` with `new(inputs, outputs)?`, and
+  `with_seed(inputs, seed)` with `with_seed(inputs, outputs, seed)?` (or handle
+  the returned `Result` explicitly). Choose the output population before
+  construction; allocation rejection is not an instruction to silently retry
+  with fewer neurons.
 - To retain a pre-#49 topology at a modest width, explicitly choose equal
   input/output counts. Choosing `(width, width.min(8))` retains #49's topology.
   Populations greater than eight are supported; no spikes are duplicated.
@@ -246,6 +251,21 @@ assert_eq!(activity.potentials.len(), 8);
   unchanged. Reset now also restores retuned thresholds; post-reset output can
   differ from the old adapter's incomplete reset, and agrees with a fresh run.
 
+**Older serialized outputs.** Deserializing a record without `num_neurons`
+fails with ``missing field `num_neurons` ``. There is no serde default or
+automatic legacy conversion. A caller-owned migration must recover the
+actual output count from the producing backend's checkpoint or verified run
+metadata, add it to the record, and validate the fired IDs against that count
+with `SpikeActivity::from_fired` before reverse projection. This also applies
+to reverse-produced outputs, whose `stimuli` is empty. Neither input width,
+embedding length nor the largest observed fired ID identifies the population;
+silent neurons and silent steps still have an output dimension. If that
+provenance is unavailable, keep the record in its legacy format or reject it
+for reverse processing until the topology is recovered; do not invent a count.
+For known PR #49 `NeuromodSnn` runs only, the actual population was
+`min(input_width, 8)`; earlier equal-width runs and custom backends require
+their own verified topology, not that blanket conversion.
+
 **Remaining upstream dependency.** `neuromod` 0.7's
 [`with_dimensions`](https://github.com/rmems/neuromod/blob/v0.7.0/src/engine.rs#L404-L430)
 stores dense weights and eligibility for every neuron/input pair. Reusing
@@ -265,10 +285,29 @@ reverse projectors and `ReverseHybridPath` consume **output population**.
 per input, so the trait default preserves their behavior. The neuromod parity
 test uses explicit equal dimensions. Historical design notes under
 `docs/superpowers` describe old proposals, not the current runtime contract.
-The 2026-10-02 inventory found no uses of these hybrid-fusion APIs in accessible
-`cortex-tensor`, `neuromod`, or `corinth-canal` main branches (their similarly
-named types are independent). `brainstem-daemon` returned 404 and remains
-unverified; external consumers must still follow the migration above.
+
+The 2026-10-02 downstream source/manifests inventory found no dependencies on
+hybrid-fusion or consumers of these APIs at the following main-branch heads:
+
+- [`Limen-Neural/brainstem-daemon`](https://github.com/Limen-Neural/brainstem-daemon/blob/8fe78be5091531c8867a1b8c012a2e52a92b83b8/Cargo.toml#L32-L44)
+  is accessible at its canonical path (the earlier `rmems` path returned 404).
+  It uses neuromod 0.6 directly and independently configures LIF count,
+  Izhikevich count and input channels; it does not consume `HybridOutput`.
+- [`rmems/cortex-tensor`](https://github.com/rmems/cortex-tensor/blob/a7de7137695683bb2b3f33750b7f9a667870786b/src/snn/neuromod_adapter.rs#L27-L56)
+  has its own `NeuromodNetwork` / `SnnBackend` contract with an equality check
+  between total neuron-bank count and channels. It is not this adapter; any
+  future bridge needs a separate review of the actual fired-ID domain.
+- [`Limen-Neural/neuromod`](https://github.com/Limen-Neural/neuromod/tree/a897cc91f7e97efb465d41247fa907e2c1f2332d)
+  is the upstream engine, not a consumer of the changed hybrid-fusion API.
+- [`rmems/corinth-canal`](https://github.com/rmems/corinth-canal/blob/06cefa04fe117ab7e2db4c40946d6664aed8440c/src/projector.rs#L204-L240)
+  has an independent reverse projector. A future bridge must use the actual
+  output population to avoid its filtering of out-of-domain IDs.
+
+No direct API migration was identified in those revisions. This is **source
+inspection only**: no downstream repositories were modified, built or run, and
+unpublished consumers / experiments remain unverified. A future consumer of
+`NeuromodSnn` must use its reported LIF output count, not add its internal
+Izhikevich bank. External consumers must still follow the migration above.
 
 **Allocation evidence.** At `(16_384, 8)`, matrix payload is exactly 2,097,152
 bytes (512 KiB weights + 1 MiB traces + 512 KiB replay weights), independently

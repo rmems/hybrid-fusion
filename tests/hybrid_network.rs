@@ -969,10 +969,24 @@ fn forward_output_population_is_independent_and_required_in_serialization() {
                 .unwrap();
         assert_eq!(activity.potentials.len(), outputs);
         json.as_object_mut().unwrap().remove("num_neurons");
-        assert!(
-            serde_json::from_value::<HybridOutput>(json).is_err(),
+        let err = serde_json::from_value::<HybridOutput>(json.clone()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "missing field `num_neurons`",
             "legacy data needs actual topology, not an inferred input-width default"
         );
+        // A caller-owned migration supplies the known backend population.
+        // 4 -> 12 with ID 10 leaves a silent neuron above the largest fired ID;
+        // 16 -> 3 with no spikes cannot infer any population from activity.
+        json["num_neurons"] = serde_json::json!(outputs);
+        let migrated: HybridOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(migrated.num_neurons, outputs);
+        assert_eq!(migrated.fired_neurons, fired);
+        let activity =
+            hybrid_fusion::SpikeActivity::from_fired(&migrated.fired_neurons, migrated.num_neurons)
+                .unwrap();
+        assert_eq!(activity.potentials.len(), outputs);
+        assert_eq!(activity.spike_train, vec![fired]);
     }
 }
 
