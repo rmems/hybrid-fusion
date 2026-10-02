@@ -28,24 +28,22 @@ fn stimulus_sequence() -> Vec<[f32; N]> {
 #[test]
 fn both_backends_return_indices_within_range() {
     let mods = NeuroModulators::default();
-    let mut adapter = NeuromodSnn::with_seed(N, SEED);
+    let mut adapter = NeuromodSnn::with_seed(N, N, SEED).unwrap();
     let mut mock = SimpleSnn::new(N);
 
     assert_eq!(adapter.num_channels(), N);
     assert_eq!(mock.num_channels(), N);
 
-    // The adapter's fired indices are LIF-bank indices. The bank is
-    // `min(num_channels, MAX_LIF_NEURONS)`, so every fired index is
-    // `< num_channels()` and the reported width stays the input width.
-    // Bound against `num_channels()`, and separately confirm at least one spike
-    // occurs.
+    // Both fixtures explicitly have N outputs as well as N inputs.
+    assert_eq!(adapter.num_neurons(), N);
+    assert_eq!(mock.num_neurons(), N);
     let mut adapter_fired = false;
     for s in stimulus_sequence() {
         let a = adapter.step(&s, &mods).unwrap();
         let m = mock.step(&s, &mods).unwrap();
         assert!(
-            a.iter().all(|&i| i < adapter.num_channels()),
-            "adapter indices < num_channels()"
+            a.iter().all(|&i| i < adapter.num_neurons()),
+            "adapter indices < num_neurons()"
         );
         assert!(m.iter().all(|&i| i < N), "mock indices in range");
         adapter_fired |= !a.is_empty();
@@ -62,7 +60,7 @@ fn both_backends_return_indices_within_range() {
 #[test]
 fn both_backends_reject_wrong_width() {
     let mods = NeuroModulators::default();
-    let mut adapter = NeuromodSnn::with_seed(N, SEED);
+    let mut adapter = NeuromodSnn::with_seed(N, N, SEED).unwrap();
     let mut mock = SimpleSnn::new(N);
 
     let bad = [0.1, 0.2]; // width 2 != N
@@ -87,7 +85,7 @@ fn both_backends_reject_wrong_width() {
 #[test]
 fn adapter_rejects_non_finite_stimulus() {
     let mods = NeuroModulators::default();
-    let mut adapter = NeuromodSnn::with_seed(N, SEED);
+    let mut adapter = NeuromodSnn::with_seed(N, N, SEED).unwrap();
     let mut stim = [0.5; N];
     stim[2] = f32::NAN;
     let err = adapter.step(&stim, &mods).unwrap_err();
@@ -101,7 +99,7 @@ fn adapter_rejects_non_finite_stimulus() {
 fn adapter_replays_deterministically_under_fixed_seed() {
     let mods = NeuroModulators::default();
     let run = || {
-        let mut adapter = NeuromodSnn::with_seed(N, SEED);
+        let mut adapter = NeuromodSnn::with_seed(N, N, SEED).unwrap();
         stimulus_sequence()
             .iter()
             .map(|s| adapter.step(s, &mods).unwrap())

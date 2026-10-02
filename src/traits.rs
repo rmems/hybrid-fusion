@@ -34,11 +34,24 @@ pub trait Transformer {
 
 /// Spiking backend: bounded stimuli → fired neuron indices.
 ///
-/// [`crate::HybridNetwork::forward`] rejects a zero [`num_channels`](Self::num_channels)
-/// result before projection or [`step`](Self::step).
+/// Input channels and output neurons are separate axes, stable over stepping.
+/// [`crate::HybridNetwork::forward`] rejects either axis being zero before
+/// projection or [`step`](Self::step), and checks returned fired-ID bounds.
 pub trait SpikingNetwork {
+    /// Consume exactly [`num_channels`](Self::num_channels) bounded stimuli.
+    /// Return output neuron IDs in `0..num_neurons()`; do not reinterpret them
+    /// as input-channel IDs or replicate spikes to fill an input-sized vector.
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>;
+
+    /// Stimulus input width, independent of output population.
     fn num_channels(&self) -> usize;
+
+    /// Output population and fired-ID domain. Backends with unequal input and
+    /// output widths MUST override this. The default preserves the existing
+    /// one-output-neuron-per-input-channel contract for downstream implementors.
+    fn num_neurons(&self) -> usize {
+        self.num_channels()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +191,11 @@ pub struct SpikeActivity {
 
 impl SpikeActivity {
     /// Build a one-step activity bag from fired indices (zeroed membranes).
+    ///
+    /// Pass [`SpikingNetwork::num_neurons`] (or [`crate::HybridOutput::num_neurons`]),
+    /// NOT the input channel count. This is the reverse feature's neuron axis;
+    /// a reduced population must not be padded to the input width. The projector
+    /// cannot infer the true population from sparse fired IDs alone.
     ///
     /// # Errors
     ///

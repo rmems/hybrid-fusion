@@ -48,6 +48,9 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     /// - `config.transformer.max_seq_len` against [`Transformer::max_seq_len`]
     /// - `config.snn_input_channels` against [`SpikingNetwork::num_channels`]
     ///
+    /// Also requires a nonzero [`SpikingNetwork::num_neurons`] (otherwise
+    /// [`HybridError::InvalidConfig`]); output population need not equal input width.
+    ///
     /// Each check requires both sides to be non-zero and equal. Failures return
     /// [`HybridError::ConfigMismatch`] naming the field plus configured vs
     /// backend values. The fields are
@@ -144,6 +147,8 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         // transformer runs so a zero-channel backend cannot be stepped.
         let snn_width = self.snn.num_channels();
         validate::validate_snn_width(snn_width)?;
+        let num_neurons = self.snn.num_neurons();
+        validate::validate_snn_population(num_neurons)?;
 
         let hidden = self.transformer.hidden_states(token_ids);
         validate::validate_hidden_state(&hidden, token_ids.len(), self.transformer.dim())?;
@@ -163,6 +168,13 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
                 return Err(err);
             }
         };
+        // The backend may already have advanced. Reject an invalid output
+        // without incrementing the host counter; no backend rollback is implied.
+        if let Some(&id) = fired_neurons.iter().find(|&&id| id >= num_neurons) {
+            return Err(HybridError::SnnStep(format!(
+                "fired neuron {id} outside output population {num_neurons}"
+            )));
+        }
 
         self.global_step = self.global_step.saturating_add(1);
 
@@ -170,6 +182,7 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
             embedding,
             stimuli,
             fired_neurons,
+            num_neurons,
             global_step: self.global_step,
             // Reverse-path MoE fields stay unset on the ANN→SNN forward pass.
             // Use ReverseHybridPath::forward_activity for activity → MoE.
@@ -200,7 +213,8 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     /// zero (the unvalidated [`Self::new`] constructor permits such configs).
     ///
     /// Contracts derive from the backends (`Transformer::dim`,
-    /// `Transformer::max_seq_len`, `SpikingNetwork::num_channels`) — the same
+    /// `Transformer::max_seq_len`, `SpikingNetwork::num_channels`,
+    /// `SpikingNetwork::num_neurons`) — the same
     /// values `forward` validates against — so the plan matches the runnable
     /// pipeline even when `config` disagrees.
     pub fn execution_plan(&self) -> Result<crate::plan::HybridExecutionPlan> {
@@ -208,6 +222,7 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         cfg.transformer.dim = self.transformer.dim();
         cfg.transformer.max_seq_len = self.transformer.max_seq_len();
         cfg.snn_input_channels = self.snn.num_channels();
+        cfg.snn_lif_neurons = self.snn.num_neurons();
         Ok(crate::plan::HybridExecutionPlan::from_hybrid_config(&cfg)?)
     }
 
@@ -218,7 +233,8 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
 
 /// Compare `config` against trait-reported backend sizes. Reads only
 /// [`Transformer::dim`], [`Transformer::max_seq_len`], and
-/// [`SpikingNetwork::num_channels`] — never hidden states or an SNN step.
+/// [`SpikingNetwork::num_channels`] / [`SpikingNetwork::num_neurons`] — never
+/// hidden states or an SNN step.
 fn validate_construction<T: Transformer, S: SpikingNetwork>(
     transformer: &T,
     snn: &S,
@@ -239,7 +255,7 @@ fn validate_construction<T: Transformer, S: SpikingNetwork>(
         config.snn_input_channels,
         snn.num_channels(),
     )?;
-    Ok(())
+    validate::validate_snn_population(snn.num_neurons())
 }
 
 fn check_capacity(field: &'static str, configured: usize, backend: usize) -> Result<()> {

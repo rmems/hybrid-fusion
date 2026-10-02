@@ -103,6 +103,10 @@ pub fn embed_to_stimuli_with_width(embedding: &Tensor, snn_width: usize) -> Vec<
 /// - [`MembraneSnapshot`](ProjectionMode::MembraneSnapshot): clamped membranes only
 ///   (`len == n_neurons`)
 ///
+/// `n_neurons` is the backend's output population, NOT its input width. Feature
+/// position `i` refers to output neuron `i`; resizing to an embedding does not
+/// create additional neurons or redistribute fired IDs into input channels.
+///
 /// Unlike corinth-canal’s full rates+hist+membrane+iz concat (for a learned
 /// linear layer), pure hybrid-fusion modes do not share a common concatenation.
 pub fn spike_activity_features(

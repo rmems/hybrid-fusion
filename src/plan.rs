@@ -893,22 +893,27 @@ impl HybridExecutionPlan {
     /// This is a **description** of the current semantics, not a replacement:
     /// numerical execution still lives in `HybridNetwork::forward`. Stage
     /// contracts are derived from `config` (`transformer.dim`,
-    /// `snn_input_channels`).
+    /// `snn_input_channels`, `snn_lif_neurons`). For an injected backend use
+    /// `HybridNetwork::execution_plan`, which reads its actual output population.
     ///
     /// # Errors
     ///
     /// [`PlanError::InvalidParameters`] if `transformer.dim`,
-    /// `transformer.max_seq_len`, or `snn_input_channels` is `0` (note
+    /// `transformer.max_seq_len`, `snn_input_channels`, or `snn_lif_neurons` is `0` (note
     /// [`crate::HybridNetwork::new`] permits such configs without validation).
     pub fn from_hybrid_config(config: &HybridConfig) -> std::result::Result<Self, PlanError> {
         if config.transformer.dim == 0
             || config.transformer.max_seq_len == 0
             || config.snn_input_channels == 0
+            || config.snn_lif_neurons == 0
         {
             return Err(PlanError::InvalidParameters(format!(
-                "transformer.dim ({}), transformer.max_seq_len ({}), and \
-                 snn_input_channels ({}) must be > 0",
-                config.transformer.dim, config.transformer.max_seq_len, config.snn_input_channels
+                "transformer.dim ({}), transformer.max_seq_len ({}), \
+                 snn_input_channels ({}), and snn_lif_neurons ({}) must be > 0",
+                config.transformer.dim,
+                config.transformer.max_seq_len,
+                config.snn_input_channels,
+                config.snn_lif_neurons
             )));
         }
         let mut g = StageGraph::new();
@@ -951,6 +956,8 @@ impl HybridExecutionPlan {
         );
         g.set_attr(snn, "role", "spiking_network.step");
         g.set_attr(snn, "output_contract", "fired_neurons: Vec<usize>");
+        g.set_attr(snn, "num_neurons", config.snn_lif_neurons.to_string());
+        g.set_attr(snn, "fired_id_domain", "0..num_neurons");
         // step also consumes caller-supplied NeuroModulators alongside the
         // stimulus tensor (see HybridNetwork::forward signature).
         g.set_attr(snn, "aux_inputs", "NeuroModulators");

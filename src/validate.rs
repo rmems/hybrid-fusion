@@ -18,6 +18,16 @@ pub(crate) fn validate_snn_width(snn_width: usize) -> Result<()> {
     Ok(())
 }
 
+/// Reject a zero output population before stepping an injected backend.
+pub(crate) fn validate_snn_population(num_neurons: usize) -> Result<()> {
+    if num_neurons == 0 {
+        return Err(HybridError::InvalidConfig(
+            "SNN num_neurons must be > 0".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate transformer hidden-state rank, axes, storage length, and finiteness.
 ///
 /// `seq_len` is `token_ids.len()` (already known non-empty by the caller).

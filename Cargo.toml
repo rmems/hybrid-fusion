@@ -62,6 +62,10 @@ required-features = ["backends"]
 [[example]]
 name = "hybrid_telemetry"
 
+[[example]]
+name = "neuromod_memory"
+required-features = ["neuromod"]
+
 [profile.release]
 opt-level     = 3
 lto           = true

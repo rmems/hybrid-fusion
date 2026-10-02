@@ -59,6 +59,21 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Changed
 
+- **BREAKING (RM-1940):** `NeuromodSnn::new(inputs, outputs)` and
+  `with_seed(inputs, outputs, seed)` require an explicit output population and
+  return `Result`. The silent eight-neuron cap / `MAX_LIF_NEURONS` is removed.
+  Zero dimensions and matrix payloads above `MAX_MATRIX_BYTES` (64 MiB) return
+  `InvalidConfig` before allocation; `pre_inference_matrix_bytes` takes both
+  dimensions. See [migration](docs/implementing-backends.md#rm-1940-migration).
+- **BREAKING (RM-1940):** `HybridOutput` requires `num_neurons`, including in
+  serialized records. `SpikingNetwork::num_neurons()` defaults to input width
+  for existing one-output-per-input backends; unequal-width backends must
+  override it. Hosts validate the output population/ID bounds and report it in
+  outputs and execution plans. Reverse features use output population, never
+  input width. Config-only plans now reject zero `snn_lif_neurons`.
+- `NeuromodSnn::reset` also restores initial LIF thresholds (RM-1940).
+  Upstream reset preserves reward-retuned thresholds; restoring only weights
+  could change borderline fired IDs after reset/reseed versus a fresh run.
 - Declared MSRV `rust-version = "1.98.1"` (required by neuromod 0.7). Cargo has
   no per-feature MSRV, so this applies to **all** builds, including the default
   dependency-light build, not only when the `neuromod` feature is enabled. The
