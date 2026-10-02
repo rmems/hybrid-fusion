@@ -152,6 +152,37 @@ transformer embedding to match this width.
 transformer might produce a 128-dim embedding while the SNN only has 64
 input channels — the projector handles the resize.
 
+### The real SNN backend: `NeuromodSnn` (optional `neuromod` feature)
+
+`hybrid-fusion` ships one production-oriented `SpikingNetwork` implementation:
+`NeuromodSnn`, behind the optional `neuromod` feature. It adapts
+[`neuromod`](https://crates.io/crates/neuromod) 0.7, a genuine spiking engine
+with LIF and Izhikevich neuron dynamics, to this crate's `SpikingNetwork`
+contract.
+
+```sh
+cargo build --features neuromod
+```
+
+`SimpleSnn` (behind the `backends` feature) is a deterministic reference/mock
+only. It exists for tests and examples and does not model neuron dynamics.
+When you need real dynamics, enable `neuromod` and use `NeuromodSnn`.
+
+`NeuromodSnn` keeps every `neuromod` type out of the public API. Callers work
+only with hybrid-fusion vocabulary: `NeuroModulators` in, `Result<Vec<usize>>`
+out, and `HybridError` on failure. The modulator conversion (see
+[section 3](#3-neuromodulators)) and the mapping of the engine's step errors to
+`HybridError` happen internally.
+
+**Seeded replay.** `NeuromodSnn` owns its random generator, so stepping is
+deterministic by construction. Build with `NeuromodSnn::with_seed(num_channels,
+seed)` and two instances given the same seed and the same stimulus sequence
+emit identical fired-index sequences (the trait `step` routes through the owned
+generator, backed by neuromod's `step_with_rng`). `NeuromodSnn::new(num_channels)`
+uses a fixed default seed. `reset()` resets the neuron dynamics but does not
+reseed the generator; call `reseed(seed)` to restart the random stream
+explicitly. Reset plus reseed replays a run from a known starting point.
+
 ---
 
 ## 3. NeuroModulators
@@ -207,6 +238,28 @@ let modulators = NeuroModulators {
 
 If you don't have a specific signal, use the defaults — they represent a
 neutral, balanced state.
+
+### Mapping to `NeuromodSnn` (the `neuromod` backend)
+
+`neuromod`'s own modulator vocabulary differs from hybrid-fusion's. It exposes
+`{ dopamine, serotonin, acetylcholine, norepinephrine }`, all defaulting to
+`0.0`, whereas hybrid-fusion defaults `dopamine` and `acetylcholine` to `0.5`
+and `tempo` to `1.0`. `NeuromodSnn` converts explicitly, setting every neuromod
+field (no implicit field reuse):
+
+| hybrid-fusion field | neuromod field   | note |
+|---------------------|------------------|------|
+| `dopamine`          | `dopamine`       | `(dopamine + aux_dopamine).clamp(0.0, 1.0)` |
+| `aux_dopamine`      | `dopamine`       | folded into `dopamine` (secondary reward channel) |
+| `cortisol`          | `norepinephrine` | direct; norepinephrine models stress/arousal |
+| `acetylcholine`     | `acetylcholine`  | direct |
+| `tempo`             | *(none)*         | intentionally not mapped: it is a step/timebase policy, and neuromod's step has no timebase input |
+| *(none)*            | `serotonin`      | left at `0.0`; no hybrid-fusion source |
+
+`tempo` is dropped from the conversion rather than forced onto an unrelated
+channel. `serotonin` has no hybrid-fusion source and stays at the neuromod
+default of `0.0`. This conversion is internal to the adapter; no neuromod type
+appears in any public signature.
 
 ---
 

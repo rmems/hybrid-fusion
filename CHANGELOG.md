@@ -10,6 +10,19 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- Optional off-by-default `neuromod` feature providing `NeuromodSnn`, a real SNN
+  backend adapter over [`neuromod`](https://crates.io/crates/neuromod) 0.7's
+  LIF/Izhikevich engine. It implements `SpikingNetwork` and supports seeded
+  deterministic replay (`with_seed` plus a `step` routed through an owned RNG,
+  backed by neuromod's `step_with_rng`), `reset()` (resets dynamics, does not
+  reseed), and `reseed(seed)`. Enable with `cargo build --features neuromod`; the
+  dependency and its transitive `rand` stay out of the default build. No neuromod
+  type appears in any public signature: hybrid-fusion keeps its public
+  `NeuroModulators { dopamine, cortisol, acetylcholine, tempo, aux_dopamine }` and
+  the adapter converts explicitly (dopamine folds in `aux_dopamine` and clamps to
+  `[0, 1]`; `cortisol` maps to neuromod `norepinephrine`; `acetylcholine` maps
+  directly; `tempo` is intentionally unmapped as a step/timebase policy;
+  `serotonin` stays at its `0.0` default) ([#44](https://github.com/rmems/hybrid-fusion/issues/44)).
 - `HybridNetwork::try_new` validates transformer dim, max sequence length, and
   SNN input channels against backend-reported capabilities before the first
   forward call (Linear [RM-1357](https://linear.app/rpd-34/issue/RM-1357)).
@@ -46,6 +59,16 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Changed
 
+- Declared MSRV `rust-version = "1.98.1"` (required by neuromod 0.7). Cargo has
+  no per-feature MSRV, so this applies to **all** builds, including the default
+  dependency-light build, not only when the `neuromod` feature is enabled. The
+  `neuromod` dependency and its transitive `rand` still stay out of the default
+  build ([#44](https://github.com/rmems/hybrid-fusion/issues/44)).
+- Demoted `SimpleSnn` (under the `backends` feature) to a reference/mock-only
+  backend. Its behavior, code, and tests are unchanged; the documentation now
+  states it is a deterministic mock for tests and examples, not a neuron-dynamics
+  engine. Callers needing real dynamics should enable `neuromod` and use
+  `NeuromodSnn` ([#44](https://github.com/rmems/hybrid-fusion/issues/44)).
 - Docs and examples prefer `HybridNetwork::try_new`. `HybridNetwork::new`
   remains an unvalidated pre-1.0 compatibility wrapper and does not panic
   (Linear [RM-1357](https://linear.app/rpd-34/issue/RM-1357)).
