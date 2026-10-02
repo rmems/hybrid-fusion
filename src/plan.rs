@@ -13,10 +13,11 @@
 //! [`crate::HybridNetwork`] / [`crate::ReverseHybridPath`] hosts keep their
 //! numerical semantics unchanged.
 //!
-//! Capability negotiation (RM-1805 `BackendCapabilities`) plugs in later via
-//! the per-stage [`ExecutionDomain`] hooks; this module deliberately does not
-//! model device capabilities, checkpoint parsing, neuron dynamics, or
-//! model-family policy.
+//! Capability negotiation lives in [`crate::capabilities`]: a compiled plan is
+//! the structural input, and [`crate::CapabilityNegotiation`] checks offered
+//! [`crate::BackendCapabilities`] against per-stage requirements before any
+//! backend runs. This module still does not model devices, checkpoint parsing,
+//! neuron dynamics, or model-family policy.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -113,11 +114,15 @@ impl StageKind {
 
 /// Execution-domain assignment for a stage.
 ///
-/// This is the **assignment hook** RM-1804 exposes for later capability
-/// negotiation (RM-1805): a planner may pin a stage to a domain with
-/// [`StageGraph::set_domain`], subject to [`StageKind::allowed_domains`].
-/// [`Auto`](Self::Auto) defers to the kind's default domain at compile time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// This is the **assignment hook** RM-1804 exposes for capability negotiation
+/// (RM-1805 / [`crate::CapabilityNegotiation`]): a planner may pin a stage to a
+/// domain with [`StageGraph::set_domain`], subject to
+/// [`StageKind::allowed_domains`]. [`Auto`](Self::Auto) defers to the kind's
+/// default domain at compile time. Negotiation then checks that an offered
+/// backend actually advertises that domain.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum ExecutionDomain {
     /// Resolved from [`StageKind::default_domain`] during compilation.
     #[default]
@@ -415,6 +420,65 @@ pub enum PlanError {
     /// (e.g. zero-valued dimensions).
     #[error("invalid plan parameters: {0}")]
     InvalidParameters(String),
+
+    /// No offered backend can run `stage` in `domain`.
+    ///
+    /// Produced by capability negotiation ([`crate::CapabilityNegotiation`]),
+    /// not by structural [`StageGraph::compile`]. `reason` names the missing
+    /// offer or domain; callers should match this variant rather than scanning
+    /// the string.
+    #[error("stage {stage} has no backend for domain {domain:?}: {reason}")]
+    UnsupportedBackend {
+        /// Stage that could not be placed.
+        stage: StageId,
+        /// Domain the requirement asked for.
+        domain: ExecutionDomain,
+        /// Why no offer was usable.
+        reason: String,
+    },
+
+    /// A backend advertises the domain but not the required numerical contract.
+    ///
+    /// `field` is a stable name (`"dtype"`, `"channels"`, `"hidden_dim"`,
+    /// `"max_sequence"`, `"max_batch"`, `"streaming"`, `"stateful"`, `"reset"`),
+    /// not a display sentence. `required` and `backend` are the two sides of
+    /// the comparison.
+    #[error("stage {stage} requires {field}={required}, backend advertises {backend}")]
+    IncompatibleCapability {
+        /// Stage whose requirement failed.
+        stage: StageId,
+        /// Stable field name. Match this, not the Display text.
+        field: &'static str,
+        /// Value the stage required.
+        required: String,
+        /// Value the backend advertised (`"unset"` / `"none"` when absent).
+        backend: String,
+    },
+
+    /// A stage requires an optional feature the selected backend does not list.
+    #[error("stage {stage} requires feature '{feature}', which the backend does not advertise")]
+    UnsupportedFeature {
+        /// Stage whose requirement failed.
+        stage: StageId,
+        /// Feature name that was absent.
+        feature: crate::capabilities::RequiredFeature,
+    },
+
+    /// A named fallback matches shape and domain but not the required feature
+    /// set, so substituting it would change stage semantics.
+    #[error(
+        "stage {stage}: backend '{candidate}' is not a semantic substitute for '{rejected}': {reason}"
+    )]
+    SemanticMismatch {
+        /// Stage that would have been substituted.
+        stage: StageId,
+        /// Preferred backend that was rejected.
+        rejected: String,
+        /// Fallback that fit the shape but not the features.
+        candidate: String,
+        /// The feature (or other) mismatch that blocked substitution.
+        reason: String,
+    },
 
     /// A stage's [`StageId`] does not equal its position in the stage list
     /// (possible only on a hand-built or deserialized [`StageGraph`] —

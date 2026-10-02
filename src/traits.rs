@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::capabilities::BackendCapabilities;
 use crate::error::Result;
 use crate::tensor::Tensor;
-use crate::types::{TensorManifestEntry, TensorRole};
+use crate::types::{Dtype, TensorManifestEntry, TensorRole};
 use serde::{Deserialize, Serialize};
 
 /// Transformer backend: token IDs → hidden-state tensor.
@@ -30,6 +31,20 @@ pub trait Transformer {
     fn dim(&self) -> usize;
     fn max_seq_len(&self) -> usize;
     fn param_count(&self) -> usize;
+
+    /// Side-effect-free capability report.
+    ///
+    /// The default derives domain, dtype, hidden width, and sequence window
+    /// from [`dim`](Self::dim) / [`max_seq_len`](Self::max_seq_len) and does
+    /// not advertise batching, streaming, state, reset, or optional features.
+    /// Backends that support those must override this method. Implementations
+    /// must not run [`hidden_states`](Self::hidden_states) or mutate `self`.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::ann(std::any::type_name::<Self>())
+            .with_dtypes([Dtype::F32])
+            .with_hidden_dim(self.dim())
+            .with_max_sequence(self.max_seq_len())
+    }
 }
 
 /// Spiking backend: bounded stimuli → fired neuron indices.
@@ -51,6 +66,20 @@ pub trait SpikingNetwork {
     /// one-output-neuron-per-input-channel contract for downstream implementors.
     fn num_neurons(&self) -> usize {
         self.num_channels()
+    }
+
+    /// Side-effect-free capability report.
+    ///
+    /// The default advertises the SNN domain, `f32`, and the stimulus width.
+    /// It does **not** advertise reset, caller-controlled RNG, or
+    /// neuromodulation — those are opt-in overrides, matching cortex-tensor's
+    /// `SnnCapabilities` flags rather than assumed for every implementor.
+    /// Implementations must not call [`step`](Self::step).
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::snn(std::any::type_name::<Self>())
+            .with_dtypes([Dtype::F32])
+            .with_channels(self.num_channels())
+            .with_stateful(true)
     }
 }
 
