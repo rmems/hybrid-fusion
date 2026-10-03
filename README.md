@@ -162,6 +162,35 @@ is a deterministic reference/mock only, kept for tests and examples; enable
 cargo build --features neuromod
 ```
 
+### Fixed-seed smoke test (issue #45)
+
+`smoke/cortex-neuromod` runs one real cortex-tensor embedding stage into one
+real `NeuromodSnn`. It is a separate package, not a feature of this library
+and not a Cargo workspace member, so resolving or publishing `hybrid-fusion`
+does not fetch cortex-tensor.
+
+```sh
+cargo test --manifest-path smoke/cortex-neuromod/Cargo.toml --locked
+```
+
+The harness pins `cortex-tensor` (not on crates.io; rev
+`5cbee81473ed69bd8e74d53e210ef64c02d232da`) and depends on this crate with
+`neuromod` enabled. `cargo test` and `cargo test --features neuromod` in the
+library root do not build it.
+
+Fixture, also documented at the top of the test module:
+
+- Token ids `[1, 3, 0]` through cortex-tensor `ReferenceExecutor`'s embedding
+  stage (vocab 4, dim 4, fixed token and position tables).
+- `embed_to_stimuli_with_width` mean-pools, resizes to 4 channels, and applies
+  `tanh`.
+- `NeuromodSnn::with_seed(4, 4, 0x45_5EE5)` stepped 4 times on that stimulus.
+- Every hidden value and stimulus must be finite. Fired indices must be in
+  `0..4`. Total spikes must be in `1..=16` (not silent; at most one fire per
+  neuron per step).
+- A second network with the same seed, and `reset()` plus `reseed(0x45_5EE5)`,
+  must emit the same per-step fired indices. A different seed may differ.
+
 The crate's MSRV is `rust-version = 1.98.1` for **all** builds, default and
 feature-enabled alike. Cargo applies `rust-version` package-wide and has no
 per-feature MSRV, so the bump (required by neuromod 0.7) applies even to the

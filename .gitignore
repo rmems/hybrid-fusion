@@ -1,6 +1,9 @@
 # Rust
 /target
-Cargo.lock
+/smoke/cortex-neuromod/target/
+# Root lock only. A bare `Cargo.lock` pattern also matches nested locks, which
+# would drop the smoke harness pin (that package is resolved on its own).
+/Cargo.lock
 
 # IDEs
 .vscode/
