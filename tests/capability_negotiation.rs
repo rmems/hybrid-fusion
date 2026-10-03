@@ -27,11 +27,11 @@
 //! backend counters before and after `capabilities()`.
 
 use hybrid_fusion::error::Result;
-use hybrid_fusion::plan::{ExecutionDomain, PlanError, StageId};
+use hybrid_fusion::plan::{DimSpec, ExecutionDomain, PlanError, StageId};
 use hybrid_fusion::{
     BackendCapabilities, BackendId, CapabilityNegotiation, Dtype, FallbackPolicy, HybridConfig,
-    NegotiationOutcome, NeuroModulators, PortSpec, RequiredFeature, SpikingNetwork, StageGraph,
-    StageKind, StageRequirement, Tensor, Transformer,
+    HybridExecutionPlan, NegotiationOutcome, NeuroModulators, PortSpec, ProjectionMode,
+    RequiredFeature, SpikingNetwork, StageGraph, StageKind, StageRequirement, Tensor, Transformer,
 };
 
 struct CountingTransformer {
@@ -299,6 +299,157 @@ fn requirement_must_match_fixed_transformer_output_port() {
             .expect_err("requirement must not contradict the stage output port");
         assert!(matches!(err, PlanError::InvalidParameters(_)), "{err:?}");
     }
+}
+
+#[test]
+fn every_stage_kind_validates_its_numerical_port_dtype() {
+    let cases = [
+        (StageKind::Embedding, ExecutionDomain::Ann),
+        (StageKind::Attention, ExecutionDomain::Ann),
+        (StageKind::DenseMlp, ExecutionDomain::Ann),
+        (StageKind::MoeRouter, ExecutionDomain::Moe),
+        (StageKind::MoeExperts, ExecutionDomain::Moe),
+        (StageKind::Adaptation, ExecutionDomain::Adapter),
+        (StageKind::Readout, ExecutionDomain::Ann),
+    ];
+
+    for (kind, domain) in cases {
+        let mut graph = StageGraph::new();
+        let stage = graph.add_stage(
+            format!("{kind:?}"),
+            kind,
+            PortSpec::f32_exact(&[4]),
+            PortSpec::f32_exact(&[4]),
+        );
+        let plan = graph.compile().expect("single numerical stage");
+        let caps = BackendCapabilities::ann("f16-only")
+            .with_domains([domain])
+            .with_dtypes([Dtype::F16]);
+
+        let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+            .offer(BackendId::new("f16-only"), caps)
+            .negotiate(
+                &plan,
+                &[StageRequirement::new(stage, domain).with_dtype(Dtype::F16)],
+            )
+            .expect_err("requirement must match the compiled numerical port dtype");
+        assert!(
+            matches!(err, PlanError::InvalidParameters(_)),
+            "{kind:?} bypassed its port contract: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn embedding_requirement_uses_activation_not_token_id_dtype() {
+    let mut graph = StageGraph::new();
+    let stage = graph.add_stage(
+        "embedding",
+        StageKind::Embedding,
+        PortSpec {
+            dtype: Some(Dtype::U32),
+            dims: vec![DimSpec::Symbolic("seq".into())],
+        },
+        PortSpec::f32_exact(&[4]),
+    );
+    let plan = graph.compile().expect("embedding stage");
+
+    CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("embedding"),
+            BackendCapabilities::ann("embedding")
+                .with_dtypes([Dtype::F32])
+                .with_hidden_dim(4),
+        )
+        .negotiate(
+            &plan,
+            &[StageRequirement::new(stage, ExecutionDomain::Ann)
+                .with_dtype(Dtype::F32)
+                .with_hidden_dim(4)],
+        )
+        .expect("token IDs are not the embedding backend's activation dtype");
+}
+
+#[test]
+fn numerical_stage_width_does_not_match_an_unrelated_axis() {
+    let mut graph = StageGraph::new();
+    let stage = graph.add_stage(
+        "mlp",
+        StageKind::DenseMlp,
+        PortSpec::f32_exact(&[2, 4]),
+        PortSpec::f32_exact(&[2, 4]),
+    );
+    let plan = graph.compile().expect("dense stage");
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("wrong-width"),
+            BackendCapabilities::ann("wrong-width")
+                .with_dtypes([Dtype::F32])
+                .with_hidden_dim(2),
+        )
+        .negotiate(
+            &plan,
+            &[StageRequirement::new(stage, ExecutionDomain::Ann)
+                .with_dtype(Dtype::F32)
+                .with_hidden_dim(2)],
+        )
+        .expect_err("sequence axis must not satisfy hidden width");
+    assert!(matches!(err, PlanError::InvalidParameters(_)), "{err:?}");
+}
+
+#[test]
+fn resolved_symbolic_width_constrains_negotiation() {
+    let mut graph = StageGraph::new();
+    let producer = graph.add_stage(
+        "producer",
+        StageKind::Adaptation,
+        PortSpec::any(),
+        PortSpec::f32_exact(&[4]),
+    );
+    let snn = graph.add_stage(
+        "spikes",
+        StageKind::SpikingBlock,
+        PortSpec::f32(vec![DimSpec::Symbolic("width".into())]),
+        PortSpec::any(),
+    );
+    graph.connect(producer, snn);
+    let plan = graph.compile().expect("symbol resolves to producer width");
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("eight-channel"),
+            BackendCapabilities::snn("eight-channel")
+                .with_dtypes([Dtype::F32])
+                .with_channels(8),
+        )
+        .negotiate(
+            &plan,
+            &[StageRequirement::new(snn, ExecutionDomain::Snn)
+                .with_dtype(Dtype::F32)
+                .with_channels(8)],
+        )
+        .expect_err("resolved width four must reject an eight-channel backend");
+    assert!(matches!(err, PlanError::InvalidParameters(_)), "{err:?}");
+}
+
+#[test]
+fn reverse_path_neuron_metadata_constrains_negotiation() {
+    let plan = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 8, 4)
+        .expect("reverse plan");
+    let activity = plan.stage_by_name("snn.activity").unwrap().id;
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("four-neuron"),
+            BackendCapabilities::snn("four-neuron").with_num_neurons(4),
+        )
+        .negotiate(
+            &plan,
+            &[StageRequirement::new(activity, ExecutionDomain::Snn).with_num_neurons(4)],
+        )
+        .expect_err("reverse activity population is fixed at eight");
+    assert!(matches!(err, PlanError::InvalidParameters(_)), "{err:?}");
 }
 
 #[test]
@@ -712,6 +863,34 @@ fn fallback_without_prefer_is_invalid_before_candidate_evaluation() {
         matches!(err, PlanError::InvalidParameters(_)),
         "fallback-only configuration returned the wrong error: {err:?}"
     );
+}
+
+#[test]
+fn fallback_without_prefer_is_rejected_even_for_an_unrequired_stage() {
+    let mut graph = StageGraph::new();
+    let required = ann_stage(&mut graph, "required", 4, 2);
+    let unused = graph.add_stage(
+        "unused-policy-target",
+        StageKind::DenseMlp,
+        PortSpec::f32_exact(&[2, 4]),
+        PortSpec::f32_exact(&[4]),
+    );
+    graph.connect(required, unused);
+    let plan = graph.compile().expect("connected plan");
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::AllowNamed)
+        .offer(
+            BackendId::new("ann"),
+            BackendCapabilities::ann("ann")
+                .with_dtypes([Dtype::F32])
+                .with_hidden_dim(4)
+                .with_max_sequence(2)
+                .with_features([RequiredFeature::new("reference-embedding")]),
+        )
+        .fallback_to(unused, BackendId::new("ann"))
+        .negotiate(&plan, &[requirement_ann(required, 4, 2)])
+        .expect_err("all malformed preference entries must be rejected");
+    assert!(matches!(err, PlanError::InvalidParameters(_)), "{err:?}");
 }
 
 #[test]

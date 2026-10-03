@@ -44,10 +44,12 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::plan::{
-    DimSpec, ExecutionDomain, HybridExecutionPlan, PlanError, Stage, StageId, StageKind,
-};
+use crate::plan::{ExecutionDomain, HybridExecutionPlan, PlanError, StageId};
 use crate::types::Dtype;
+
+mod contract;
+
+use contract::validate_stage_contract;
 
 /// Stable identity of an offered backend. Compared by value, not by pointer.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -590,6 +592,7 @@ impl CapabilityNegotiation {
         requirements: &[StageRequirement],
     ) -> Result<NegotiationReport, PlanError> {
         self.reject_empty_ids()?;
+        self.reject_fallback_only_preferences()?;
         let mut seen = Vec::with_capacity(requirements.len());
         let mut outcomes = Vec::with_capacity(requirements.len());
         for req in requirements {
@@ -605,7 +608,7 @@ impl CapabilityNegotiation {
                     req.stage, req.domain
                 )));
             }
-            validate_stage_contract(req, stage)?;
+            validate_stage_contract(plan, req, stage)?;
             if seen.contains(&req.stage) {
                 return Err(PlanError::InvalidParameters(format!(
                     "stage {} has more than one requirement",
@@ -628,6 +631,20 @@ impl CapabilityNegotiation {
             return Err(PlanError::InvalidParameters(
                 "backend identity must be non-empty".into(),
             ));
+        }
+        Ok(())
+    }
+
+    fn reject_fallback_only_preferences(&self) -> Result<(), PlanError> {
+        if let Some(pref) = self
+            .preferences
+            .iter()
+            .find(|pref| pref.preferred.is_none() && pref.fallback.is_some())
+        {
+            return Err(PlanError::InvalidParameters(format!(
+                "stage {} names a fallback without prefer()",
+                pref.stage
+            )));
         }
         Ok(())
     }
@@ -718,28 +735,17 @@ impl CapabilityNegotiation {
         pref: &Preference,
         preferred_err: PlanError,
     ) -> Result<NegotiationOutcome, PlanError> {
-        if self.policy != FallbackPolicy::AllowNamed {
+        let Some(fallback) = self.fallback_candidate(req, pref)? else {
             return Err(preferred_err);
-        }
-        let Some(fallback_id) = &pref.fallback else {
-            return Err(preferred_err);
-        };
-        if pref.preferred.as_ref() == Some(fallback_id) {
-            return Err(preferred_err);
-        }
-        let Some(fallback) = self.offers.iter().find(|o| &o.id == fallback_id) else {
-            return Err(PlanError::UnsupportedBackend {
-                stage: req.stage,
-                domain: req.domain,
-                reason: format!("named fallback '{fallback_id}' was not offered"),
-            });
         };
         // A fallback that misses a required feature is a semantic mismatch, not
         // a silent shape-only substitution — even when widths and dtypes match.
-        if let Err(err) = compatible(req, &fallback.caps) {
-            if matches!(err, PlanError::UnsupportedFeature { .. }) && shape_ok(req, &fallback.caps)
+        match compatible(req, &fallback.caps) {
+            Err(err)
+                if matches!(err, PlanError::UnsupportedFeature { .. })
+                    && numerical_compatible(req, &fallback.caps).is_ok() =>
             {
-                return Err(PlanError::SemanticMismatch {
+                Err(PlanError::SemanticMismatch {
                     stage: req.stage,
                     rejected: pref
                         .preferred
@@ -748,67 +754,59 @@ impl CapabilityNegotiation {
                         .unwrap_or_else(|| "unnamed".into()),
                     candidate: fallback.id.as_str().to_string(),
                     reason: err.to_string(),
-                });
+                })
             }
-            return Err(err);
+            Err(err) => Err(err),
+            Ok(()) => Ok(NegotiationOutcome::Fallback {
+                rejected: pref
+                    .preferred
+                    .clone()
+                    .expect("fallback-only preferences rejected before selection"),
+                selected: fallback.id.clone(),
+            }),
         }
-        let Some(rejected) = pref.preferred.clone() else {
-            return Err(preferred_err);
+    }
+
+    fn fallback_candidate<'a>(
+        &'a self,
+        req: &StageRequirement,
+        pref: &Preference,
+    ) -> Result<Option<&'a Offer>, PlanError> {
+        let Some(fallback_id) = pref.fallback.as_ref().filter(|fallback_id| {
+            self.policy == FallbackPolicy::AllowNamed
+                && pref.preferred.as_ref() != Some(*fallback_id)
+        }) else {
+            return Ok(None);
         };
-        Ok(NegotiationOutcome::Fallback {
-            rejected,
-            selected: fallback.id.clone(),
-        })
-    }
-}
-
-fn shape_ok(req: &StageRequirement, caps: &BackendCapabilities) -> bool {
-    extent_ok(req.hidden_dim, caps.hidden_dim, true)
-        && extent_ok(req.channels, caps.channels, true)
-        && extent_ok(req.num_neurons, caps.num_neurons, true)
-        && extent_ok(req.max_sequence, caps.max_sequence, false)
-        && extent_ok(req.max_batch, caps.max_batch, false)
-        && dtype_ok(req, caps)
-        && caps.supports_domain(req.domain)
-        && (!req.streaming || caps.streaming)
-        && (!req.stateful || caps.stateful)
-        && (!requires_reset(req) || supports_reset(caps))
-}
-
-fn requires_reset(req: &StageRequirement) -> bool {
-    req.reset
-        || req
-            .features
+        self.offers
             .iter()
-            .any(|feature| feature.as_str() == "reset")
-}
-
-fn supports_reset(caps: &BackendCapabilities) -> bool {
-    caps.reset
-        || caps
-            .features
-            .iter()
-            .any(|feature| feature.as_str() == "reset")
-}
-
-fn dtype_ok(req: &StageRequirement, caps: &BackendCapabilities) -> bool {
-    match req.dtype {
-        Some(dtype) => caps.dtypes.contains(&dtype),
-        None => true,
-    }
-}
-
-/// `exact` widths must match; sequence/batch windows must be at least the requirement.
-fn extent_ok(required: Option<usize>, advertised: Option<usize>, exact: bool) -> bool {
-    match (required, advertised) {
-        (None, _) => true,
-        (Some(_), None) => false,
-        (Some(need), Some(have)) if exact => need == have,
-        (Some(need), Some(have)) => have >= need,
+            .find(|offer| &offer.id == fallback_id)
+            .map(Some)
+            .ok_or_else(|| PlanError::UnsupportedBackend {
+                stage: req.stage,
+                domain: req.domain,
+                reason: format!("named fallback '{fallback_id}' was not offered"),
+            })
     }
 }
 
 fn compatible(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), PlanError> {
+    numerical_compatible(req, caps)?;
+    for feature in &req.features {
+        if !caps.features.iter().any(|advertised| advertised == feature) {
+            return Err(PlanError::UnsupportedFeature {
+                stage: req.stage,
+                feature: feature.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn numerical_compatible(
+    req: &StageRequirement,
+    caps: &BackendCapabilities,
+) -> Result<(), PlanError> {
     if !caps.supports_domain(req.domain) {
         return Err(PlanError::UnsupportedBackend {
             stage: req.stage,
@@ -819,9 +817,50 @@ fn compatible(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), 
             ),
         });
     }
-    if let Some(dtype) = req.dtype
-        && !caps.dtypes.contains(&dtype)
-    {
+    check_dtype(req, caps)?;
+    check_extent(
+        req,
+        "hidden_dim",
+        req.hidden_dim,
+        caps.hidden_dim,
+        ExtentRule::Exact,
+    )?;
+    check_extent(
+        req,
+        "channels",
+        req.channels,
+        caps.channels,
+        ExtentRule::Exact,
+    )?;
+    check_extent(
+        req,
+        "num_neurons",
+        req.num_neurons,
+        caps.num_neurons,
+        ExtentRule::Exact,
+    )?;
+    check_extent(
+        req,
+        "max_sequence",
+        req.max_sequence,
+        caps.max_sequence,
+        ExtentRule::AtLeast,
+    )?;
+    check_extent(
+        req,
+        "max_batch",
+        req.max_batch,
+        caps.max_batch,
+        ExtentRule::AtLeast,
+    )?;
+    check_required_flag(req, "streaming", req.streaming, caps.streaming)?;
+    check_required_flag(req, "stateful", req.stateful, caps.stateful)?;
+    check_required_flag(req, "reset", req.reset, caps.reset)?;
+    Ok(())
+}
+
+fn check_dtype(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), PlanError> {
+    if let Some(dtype) = req.dtype.filter(|dtype| !caps.dtypes.contains(dtype)) {
         let advertised = caps
             .dtypes
             .iter()
@@ -839,166 +878,51 @@ fn compatible(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), 
             },
         });
     }
-    check_exact(req, "hidden_dim", req.hidden_dim, caps.hidden_dim)?;
-    check_exact(req, "channels", req.channels, caps.channels)?;
-    check_exact(req, "num_neurons", req.num_neurons, caps.num_neurons)?;
-    check_at_least(req, "max_sequence", req.max_sequence, caps.max_sequence)?;
-    check_at_least(req, "max_batch", req.max_batch, caps.max_batch)?;
-    if req.streaming && !caps.streaming {
-        return Err(PlanError::IncompatibleCapability {
-            stage: req.stage,
-            field: "streaming",
-            required: "true".into(),
-            backend: "false".into(),
-        });
-    }
-    if req.stateful && !caps.stateful {
-        return Err(PlanError::IncompatibleCapability {
-            stage: req.stage,
-            field: "stateful",
-            required: "true".into(),
-            backend: "false".into(),
-        });
-    }
-    if requires_reset(req) && !supports_reset(caps) {
-        return Err(PlanError::IncompatibleCapability {
-            stage: req.stage,
-            field: "reset",
-            required: "true".into(),
-            backend: "false".into(),
-        });
-    }
-    for feature in &req.features {
-        if feature.as_str() == "reset" {
-            continue;
-        }
-        if !caps.features.iter().any(|f| f == feature) {
-            return Err(PlanError::UnsupportedFeature {
-                stage: req.stage,
-                feature: feature.clone(),
-            });
-        }
-    }
     Ok(())
 }
 
-fn validate_stage_contract(req: &StageRequirement, stage: &Stage) -> Result<(), PlanError> {
-    match stage.kind {
-        StageKind::Transformer => {
-            validate_port_dtype(req, "output dtype", stage.output.dtype)?;
-            if stage.output.dims.len() == 1 {
-                validate_fixed_dim(req, "hidden_dim", req.hidden_dim, &stage.output.dims[0])?;
-            } else if stage.output.dims.len() == 2 {
-                validate_fixed_dim(req, "max_sequence", req.max_sequence, &stage.output.dims[0])?;
-                validate_fixed_dim(req, "hidden_dim", req.hidden_dim, &stage.output.dims[1])?;
-            }
-            validate_metadata_dim(req, stage, "hidden_dim", req.hidden_dim, "last_axis")?;
-        }
-        StageKind::SpikingBlock => {
-            validate_port_dtype(req, "input dtype", stage.input.dtype)?;
-            if stage.input.dims.len() == 1 {
-                validate_fixed_dim(req, "channels", req.channels, &stage.input.dims[0])?;
-            }
-            if stage.output.dims.len() == 1 {
-                validate_fixed_dim(req, "num_neurons", req.num_neurons, &stage.output.dims[0])?;
-            }
-            validate_metadata_dim(req, stage, "num_neurons", req.num_neurons, "num_neurons")?;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn validate_metadata_dim(
-    req: &StageRequirement,
-    stage: &Stage,
-    field: &str,
-    required: Option<usize>,
-    attr: &str,
-) -> Result<(), PlanError> {
-    let (Some(required), Some(value)) = (required, stage.attrs.get(attr)) else {
-        return Ok(());
-    };
-    let contract = value.parse::<usize>().map_err(|_| {
-        PlanError::InvalidParameters(format!(
-            "stage {} has non-numeric {attr} metadata '{value}'",
-            req.stage
-        ))
-    })?;
-    if required != contract {
-        return contract_mismatch(req, field, required.to_string(), contract.to_string());
-    }
-    Ok(())
-}
-
-fn validate_port_dtype(
-    req: &StageRequirement,
-    field: &str,
-    port_dtype: Option<Dtype>,
-) -> Result<(), PlanError> {
-    if let (Some(required), Some(port)) = (req.dtype, port_dtype)
-        && required != port
-    {
-        return contract_mismatch(req, field, format!("{required:?}"), format!("{port:?}"));
-    }
-    Ok(())
-}
-
-fn validate_fixed_dim(
-    req: &StageRequirement,
-    field: &str,
-    required: Option<usize>,
-    port_dim: &DimSpec,
-) -> Result<(), PlanError> {
-    if let (Some(required), DimSpec::Fixed(port)) = (required, port_dim)
-        && required != *port
-    {
-        return contract_mismatch(req, field, required.to_string(), port.to_string());
-    }
-    Ok(())
-}
-
-fn contract_mismatch(
-    req: &StageRequirement,
-    field: &str,
-    required: String,
-    port: String,
-) -> Result<(), PlanError> {
-    Err(PlanError::InvalidParameters(format!(
-        "stage {} {field} port contract is {port}, requirement asks for {required}",
-        req.stage
-    )))
-}
-
-fn check_exact(
+fn check_required_flag(
     req: &StageRequirement,
     field: &'static str,
-    required: Option<usize>,
-    advertised: Option<usize>,
+    required: bool,
+    advertised: bool,
 ) -> Result<(), PlanError> {
-    match (required, advertised) {
-        (None, _) => Ok(()),
-        (Some(need), Some(have)) if need == have => Ok(()),
-        (Some(need), other) => Err(PlanError::IncompatibleCapability {
+    if required && !advertised {
+        return Err(PlanError::IncompatibleCapability {
             stage: req.stage,
             field,
-            required: need.to_string(),
-            backend: other
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "unset".into()),
-        }),
+            required: "true".into(),
+            backend: "false".into(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ExtentRule {
+    Exact,
+    AtLeast,
+}
+
+impl ExtentRule {
+    fn accepts(self, required: usize, advertised: usize) -> bool {
+        match self {
+            Self::Exact => required == advertised,
+            Self::AtLeast => advertised >= required,
+        }
     }
 }
 
-fn check_at_least(
+fn check_extent(
     req: &StageRequirement,
     field: &'static str,
     required: Option<usize>,
     advertised: Option<usize>,
+    rule: ExtentRule,
 ) -> Result<(), PlanError> {
     match (required, advertised) {
         (None, _) => Ok(()),
-        (Some(need), Some(have)) if have >= need => Ok(()),
+        (Some(need), Some(have)) if rule.accepts(need, have) => Ok(()),
         (Some(need), other) => Err(PlanError::IncompatibleCapability {
             stage: req.stage,
             field,

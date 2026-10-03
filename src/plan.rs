@@ -287,6 +287,28 @@ impl DimBindings {
             }
         }
     }
+
+    /// Materialize every symbol whose equivalence class has a fixed extent.
+    fn resolved(mut self) -> BTreeMap<String, usize> {
+        let names: BTreeSet<String> = self
+            .parent
+            .keys()
+            .chain(self.parent.values())
+            .chain(self.value.keys())
+            .cloned()
+            .collect();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let root = self.root(&name);
+                self.value
+                    .get(&root)
+                    .copied()
+                    .flatten()
+                    .map(|value| (name, value))
+            })
+            .collect()
+    }
 }
 
 fn unify_dim(
@@ -621,13 +643,14 @@ impl StageGraph {
         check_contract_sanity(&self.stages)?;
         let order = self.forward_topo_order()?;
         self.check_reachability()?;
-        self.check_edge_contracts()?;
+        let resolved_dims = self.check_edge_contracts()?;
 
         Ok(HybridExecutionPlan {
             stages: self.stages.clone(),
             edges: self.edges.clone(),
             order,
             allow_feedback: self.allow_feedback,
+            resolved_dims,
         })
     }
 
@@ -740,7 +763,7 @@ impl StageGraph {
         Ok(())
     }
 
-    fn check_edge_contracts(&self) -> std::result::Result<(), PlanError> {
+    fn check_edge_contracts(&self) -> std::result::Result<BTreeMap<String, usize>, PlanError> {
         let mut bindings = DimBindings::default();
         for e in &self.edges {
             let producer = self.stage(e.from).expect("endpoint checked");
@@ -753,7 +776,7 @@ impl StageGraph {
                 },
             )?;
         }
-        Ok(())
+        Ok(bindings.resolved())
     }
 }
 
@@ -841,6 +864,10 @@ pub struct HybridExecutionPlan {
     edges: Vec<Edge>,
     order: Vec<StageId>,
     allow_feedback: bool,
+    /// Derived by compilation from edge unification; omitted from wire JSON
+    /// and recomputed by [`Self::from_json`].
+    #[serde(skip)]
+    resolved_dims: BTreeMap<String, usize>,
 }
 
 impl HybridExecutionPlan {
@@ -883,6 +910,15 @@ impl HybridExecutionPlan {
                 s.domain
             }
         })
+    }
+
+    /// Resolve a fixed or compilation-bound symbolic dimension.
+    pub(crate) fn resolved_dim(&self, dim: &DimSpec) -> Option<usize> {
+        match dim {
+            DimSpec::Fixed(value) => Some(*value),
+            DimSpec::Symbolic(name) => self.resolved_dims.get(name).copied(),
+            DimSpec::Any => None,
+        }
     }
 
     /// Forward edges into `stage`, in insertion order.
