@@ -507,6 +507,73 @@ fn canonical_plan_metadata_constrains_backend_dimensions() {
 }
 
 #[test]
+fn canonical_transformer_requires_its_configured_sequence_capacity() {
+    let mut cfg = HybridConfig::tiny();
+    cfg.transformer.max_seq_len = 8;
+    let plan = HybridExecutionPlan::from_hybrid_config(&cfg).unwrap();
+    let transformer = plan.stage_by_name("ann.transformer").unwrap().id;
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("short"),
+            BackendCapabilities::ann("short")
+                .with_dtypes([Dtype::F32])
+                .with_max_sequence(4),
+        )
+        .negotiate(
+            &plan,
+            &[StageRequirement::new(transformer, ExecutionDomain::Ann)
+                .with_dtype(Dtype::F32)
+                .with_max_sequence(4)],
+        )
+        .expect_err("backend capacity must cover the canonical plan");
+    assert!(matches!(err, PlanError::InvalidParameters(_)), "{err:?}");
+}
+
+#[test]
+fn canonical_forward_projector_requires_transformer_hidden_width() {
+    let cfg = HybridConfig::tiny();
+    let plan = HybridExecutionPlan::from_hybrid_config(&cfg).unwrap();
+    let projector = plan.stage_by_name("adapt.project_stimuli").unwrap().id;
+    let wrong = cfg.transformer.dim + 1;
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("wrong-width"),
+            BackendCapabilities::adapter("wrong-width")
+                .with_dtypes([Dtype::F32])
+                .with_hidden_dim(wrong),
+        )
+        .negotiate(
+            &plan,
+            &[StageRequirement::new(projector, ExecutionDomain::Adapter)
+                .with_dtype(Dtype::F32)
+                .with_hidden_dim(wrong)],
+        )
+        .expect_err("forward projector width must match its transformer source");
+    assert!(matches!(err, PlanError::InvalidParameters(_)), "{err:?}");
+}
+
+#[test]
+fn canonical_reverse_projector_requires_activity_population() {
+    let plan = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 8, 4)
+        .expect("reverse plan");
+    let projector = plan.stage_by_name("adapt.project_activity").unwrap().id;
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("four-neuron"),
+            BackendCapabilities::adapter("four-neuron").with_num_neurons(4),
+        )
+        .negotiate(
+            &plan,
+            &[StageRequirement::new(projector, ExecutionDomain::Adapter).with_num_neurons(4)],
+        )
+        .expect_err("reverse projector population must match its activity source");
+    assert!(matches!(err, PlanError::InvalidParameters(_)), "{err:?}");
+}
+
+#[test]
 fn reset_named_feature_uses_the_typed_reset_capability() {
     let mut graph = StageGraph::new();
     let stage = snn_stage(&mut graph, "spikes", 4);
@@ -551,6 +618,57 @@ fn reset_named_feature_uses_the_typed_reset_capability() {
             "legacy-feature"
         )))
     );
+}
+
+#[test]
+fn deserialized_reset_feature_normalizes_to_typed_capability() {
+    let mut value = serde_json::to_value(BackendCapabilities::snn("serialized")).unwrap();
+    value["reset"] = serde_json::json!(false);
+    value["features"] = serde_json::json!(["reset"]);
+
+    let caps: BackendCapabilities = serde_json::from_value(value).unwrap();
+
+    assert!(caps.reset);
+    assert!(caps.features.is_empty());
+}
+
+#[test]
+fn dtype_conversion_requires_backend_support_for_both_ports() {
+    let mut graph = StageGraph::new();
+    let stage = graph.add_stage(
+        "cast",
+        StageKind::Adaptation,
+        PortSpec {
+            dtype: Some(Dtype::F16),
+            dims: vec![DimSpec::Fixed(4)],
+        },
+        PortSpec::f32_exact(&[4]),
+    );
+    let plan = graph.compile().expect("dtype conversion stage");
+    let requirement = StageRequirement::new(stage, ExecutionDomain::Adapter)
+        .with_dtype(Dtype::F16)
+        .with_channels(4);
+
+    CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("converter"),
+            BackendCapabilities::adapter("converter")
+                .with_dtypes([Dtype::F16, Dtype::F32])
+                .with_channels(4),
+        )
+        .negotiate(&plan, std::slice::from_ref(&requirement))
+        .expect("backend supports both conversion port dtypes");
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("input-only"),
+            BackendCapabilities::adapter("input-only")
+                .with_dtypes([Dtype::F16])
+                .with_channels(4),
+        )
+        .negotiate(&plan, &[requirement])
+        .expect_err("backend missing the output dtype must be rejected");
+    assert!(matches!(err, PlanError::IncompatibleCapability { .. }));
 }
 
 #[test]

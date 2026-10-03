@@ -1035,6 +1035,11 @@ impl HybridExecutionPlan {
         g.set_attr(ann, "role", "transformer.hidden_states");
         g.set_attr(ann, "accepted_layouts", "[dim] | [seq, dim]");
         g.set_attr(ann, "last_axis", config.transformer.dim.to_string());
+        g.set_attr(
+            ann,
+            "max_sequence",
+            config.transformer.max_seq_len.to_string(),
+        );
 
         let adapt = g.add_stage(
             "adapt.project_stimuli",
@@ -1045,6 +1050,7 @@ impl HybridExecutionPlan {
             PortSpec::f32_exact(&[config.snn_input_channels]),
         );
         g.set_attr(adapt, "role", "projector::embed_to_stimuli_with_width");
+        g.set_attr(adapt, "hidden_dim", config.transformer.dim.to_string());
         g.set_attr(adapt, "output_bounds", "[-1,1]");
 
         let snn = g.add_stage(
@@ -1121,6 +1127,7 @@ impl HybridExecutionPlan {
         );
         g.set_attr(project, "projection_mode", format!("{mode:?}"));
         g.set_attr(project, "role", "projector::project_spike_activity");
+        g.set_attr(project, "num_neurons", n_neurons.to_string());
 
         let router = g.add_stage(
             "moe.router",

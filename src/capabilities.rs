@@ -44,12 +44,12 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::plan::{ExecutionDomain, HybridExecutionPlan, PlanError, StageId};
+use crate::plan::{ExecutionDomain, HybridExecutionPlan, PlanError, Stage, StageId};
 use crate::types::Dtype;
 
 mod contract;
 
-use contract::validate_stage_contract;
+use contract::{validate_backend_dtypes, validate_stage_contract};
 
 /// Stable identity of an offered backend. Compared by value, not by pointer.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -128,6 +128,7 @@ pub enum DeviceHint {
 /// Absence of a field means "not advertised": a requirement that needs it
 /// fails, rather than assuming a default that happens to match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "BackendCapabilitiesWire")]
 pub struct BackendCapabilities {
     /// Static identity, e.g. `"neuromod::SpikingNetwork"`.
     pub backend_name: String,
@@ -157,6 +158,44 @@ pub struct BackendCapabilities {
     pub device: DeviceHint,
     /// Optional features the backend advertises. Sorted by name, deduplicated.
     pub features: Vec<RequiredFeature>,
+}
+
+#[derive(Deserialize)]
+struct BackendCapabilitiesWire {
+    backend_name: String,
+    domains: Vec<ExecutionDomain>,
+    dtypes: BTreeSet<Dtype>,
+    hidden_dim: Option<usize>,
+    channels: Option<usize>,
+    num_neurons: Option<usize>,
+    max_sequence: Option<usize>,
+    max_batch: Option<usize>,
+    streaming: bool,
+    stateful: bool,
+    reset: bool,
+    device: DeviceHint,
+    features: Vec<RequiredFeature>,
+}
+
+impl From<BackendCapabilitiesWire> for BackendCapabilities {
+    fn from(wire: BackendCapabilitiesWire) -> Self {
+        Self {
+            backend_name: wire.backend_name,
+            domains: wire.domains,
+            dtypes: wire.dtypes,
+            hidden_dim: wire.hidden_dim,
+            channels: wire.channels,
+            num_neurons: wire.num_neurons,
+            max_sequence: wire.max_sequence,
+            max_batch: wire.max_batch,
+            streaming: wire.streaming,
+            stateful: wire.stateful,
+            reset: wire.reset,
+            device: wire.device,
+            features: Vec::new(),
+        }
+        .with_features(wire.features)
+    }
 }
 
 impl BackendCapabilities {
@@ -616,7 +655,7 @@ impl CapabilityNegotiation {
                 )));
             }
             seen.push(req.stage);
-            outcomes.push((req.stage, self.select(req)?));
+            outcomes.push((req.stage, self.select(req, stage)?));
         }
         Ok(NegotiationReport { outcomes })
     }
@@ -649,16 +688,20 @@ impl CapabilityNegotiation {
         Ok(())
     }
 
-    fn select(&self, req: &StageRequirement) -> Result<NegotiationOutcome, PlanError> {
+    fn select(
+        &self,
+        req: &StageRequirement,
+        stage: &Stage,
+    ) -> Result<NegotiationOutcome, PlanError> {
         let pref = self.preferences.iter().find(|p| p.stage == req.stage);
         if let Some(pref) = pref {
-            return self.select_preferred(req, pref);
+            return self.select_preferred(req, stage, pref);
         }
         // A single offer is the implicit preference. Multiple offers without
         // prefer() stay ambiguous — picking the first would hide substitution.
         if self.offers.len() == 1 {
             let only = &self.offers[0];
-            return match compatible(req, &only.caps) {
+            return match compatible(req, stage, &only.caps) {
                 Ok(()) => Ok(NegotiationOutcome::Selected(only.id.clone())),
                 Err(err) => Err(err),
             };
@@ -669,7 +712,7 @@ impl CapabilityNegotiation {
         let mut compatible_offers = self
             .offers
             .iter()
-            .filter(|o| compatible(req, &o.caps).is_ok());
+            .filter(|o| compatible(req, stage, &o.caps).is_ok());
         let first = compatible_offers.next();
         let second = compatible_offers.next();
         match (first, second) {
@@ -679,13 +722,14 @@ impl CapabilityNegotiation {
                 domain: req.domain,
                 reason: "multiple compatible backends; name one with prefer()".into(),
             }),
-            (None, _) => self.unique_domain_mismatch(req),
+            (None, _) => self.unique_domain_mismatch(req, stage),
         }
     }
 
     fn unique_domain_mismatch(
         &self,
         req: &StageRequirement,
+        stage: &Stage,
     ) -> Result<NegotiationOutcome, PlanError> {
         let mut domain_matches = self
             .offers
@@ -694,7 +738,7 @@ impl CapabilityNegotiation {
         let first = domain_matches.next();
         let second = domain_matches.next();
         match first {
-            Some(offer) if second.is_none() => compatible(req, &offer.caps)
+            Some(offer) if second.is_none() => compatible(req, stage, &offer.caps)
                 .map(|()| NegotiationOutcome::Selected(offer.id.clone())),
             _ => Err(PlanError::UnsupportedBackend {
                 stage: req.stage,
@@ -707,6 +751,7 @@ impl CapabilityNegotiation {
     fn select_preferred(
         &self,
         req: &StageRequirement,
+        stage: &Stage,
         pref: &Preference,
     ) -> Result<NegotiationOutcome, PlanError> {
         let Some(preferred_id) = &pref.preferred else {
@@ -721,10 +766,10 @@ impl CapabilityNegotiation {
                 domain: req.domain,
                 reason: format!("preferred backend '{preferred_id}' was not offered"),
             };
-            return self.fallback(req, pref, missing);
+            return self.fallback(req, stage, pref, missing);
         };
-        if let Err(err) = compatible(req, &preferred.caps) {
-            return self.fallback(req, pref, err);
+        if let Err(err) = compatible(req, stage, &preferred.caps) {
+            return self.fallback(req, stage, pref, err);
         }
         Ok(NegotiationOutcome::Selected(preferred.id.clone()))
     }
@@ -732,6 +777,7 @@ impl CapabilityNegotiation {
     fn fallback(
         &self,
         req: &StageRequirement,
+        stage: &Stage,
         pref: &Preference,
         preferred_err: PlanError,
     ) -> Result<NegotiationOutcome, PlanError> {
@@ -740,10 +786,10 @@ impl CapabilityNegotiation {
         };
         // A fallback that misses a required feature is a semantic mismatch, not
         // a silent shape-only substitution — even when widths and dtypes match.
-        match compatible(req, &fallback.caps) {
+        match compatible(req, stage, &fallback.caps) {
             Err(err)
                 if matches!(err, PlanError::UnsupportedFeature { .. })
-                    && numerical_compatible(req, &fallback.caps).is_ok() =>
+                    && numerical_compatible(req, stage, &fallback.caps).is_ok() =>
             {
                 Err(PlanError::SemanticMismatch {
                     stage: req.stage,
@@ -790,8 +836,12 @@ impl CapabilityNegotiation {
     }
 }
 
-fn compatible(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), PlanError> {
-    numerical_compatible(req, caps)?;
+fn compatible(
+    req: &StageRequirement,
+    stage: &Stage,
+    caps: &BackendCapabilities,
+) -> Result<(), PlanError> {
+    numerical_compatible(req, stage, caps)?;
     for feature in &req.features {
         if !caps.features.iter().any(|advertised| advertised == feature) {
             return Err(PlanError::UnsupportedFeature {
@@ -805,6 +855,7 @@ fn compatible(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), 
 
 fn numerical_compatible(
     req: &StageRequirement,
+    stage: &Stage,
     caps: &BackendCapabilities,
 ) -> Result<(), PlanError> {
     if !caps.supports_domain(req.domain) {
@@ -818,6 +869,7 @@ fn numerical_compatible(
         });
     }
     check_dtype(req, caps)?;
+    validate_backend_dtypes(req, stage, caps)?;
     check_extent(
         req,
         "hidden_dim",
