@@ -571,7 +571,8 @@ impl CapabilityNegotiation {
     /// - [`PlanError::UnknownStage`] if a requirement names a missing stage.
     /// - [`PlanError::InvalidParameters`] if a requirement domain disagrees with
     ///   the compiled stage, a stage is required twice, or an offered, preferred,
-    ///   or fallback identity is empty.
+    ///   or fallback identity is empty, or a fallback is named without a preferred
+    ///   backend.
     /// - [`PlanError::UnsupportedBackend`] if no offered backend advertises the
     ///   required domain (or the preferred one does not, and fallback is forbidden
     ///   or unnamed).
@@ -692,12 +693,10 @@ impl CapabilityNegotiation {
         pref: &Preference,
     ) -> Result<NegotiationOutcome, PlanError> {
         let Some(preferred_id) = &pref.preferred else {
-            let missing = PlanError::UnsupportedBackend {
-                stage: req.stage,
-                domain: req.domain,
-                reason: "no preferred backend was named".into(),
-            };
-            return self.fallback(req, pref, missing);
+            return Err(PlanError::InvalidParameters(format!(
+                "stage {} names a fallback without prefer()",
+                req.stage
+            )));
         };
         let Some(preferred) = self.offers.iter().find(|o| &o.id == preferred_id) else {
             let missing = PlanError::UnsupportedBackend {
@@ -893,6 +892,7 @@ fn validate_stage_contract(req: &StageRequirement, stage: &Stage) -> Result<(), 
                 validate_fixed_dim(req, "max_sequence", req.max_sequence, &stage.output.dims[0])?;
                 validate_fixed_dim(req, "hidden_dim", req.hidden_dim, &stage.output.dims[1])?;
             }
+            validate_metadata_dim(req, stage, "hidden_dim", req.hidden_dim, "last_axis")?;
         }
         StageKind::SpikingBlock => {
             validate_port_dtype(req, "input dtype", stage.input.dtype)?;
@@ -902,8 +902,31 @@ fn validate_stage_contract(req: &StageRequirement, stage: &Stage) -> Result<(), 
             if stage.output.dims.len() == 1 {
                 validate_fixed_dim(req, "num_neurons", req.num_neurons, &stage.output.dims[0])?;
             }
+            validate_metadata_dim(req, stage, "num_neurons", req.num_neurons, "num_neurons")?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_metadata_dim(
+    req: &StageRequirement,
+    stage: &Stage,
+    field: &str,
+    required: Option<usize>,
+    attr: &str,
+) -> Result<(), PlanError> {
+    let (Some(required), Some(value)) = (required, stage.attrs.get(attr)) else {
+        return Ok(());
+    };
+    let contract = value.parse::<usize>().map_err(|_| {
+        PlanError::InvalidParameters(format!(
+            "stage {} has non-numeric {attr} metadata '{value}'",
+            req.stage
+        ))
+    })?;
+    if required != contract {
+        return contract_mismatch(req, field, required.to_string(), contract.to_string());
     }
     Ok(())
 }

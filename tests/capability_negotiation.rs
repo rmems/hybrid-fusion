@@ -328,6 +328,34 @@ fn canonical_plan_checks_backend_dtype_on_numerical_ports() {
 }
 
 #[test]
+fn canonical_plan_metadata_constrains_backend_dimensions() {
+    let cfg = HybridConfig::tiny();
+    let plan = hybrid_fusion::HybridExecutionPlan::from_hybrid_config(&cfg).unwrap();
+    let ann = plan.stage_by_name("ann.transformer").unwrap().id;
+    let snn = plan.stage_by_name("snn.step").unwrap().id;
+
+    for requirement in [
+        StageRequirement::new(ann, ExecutionDomain::Ann).with_hidden_dim(cfg.transformer.dim + 1),
+        StageRequirement::new(snn, ExecutionDomain::Snn).with_num_neurons(cfg.snn_lif_neurons + 1),
+    ] {
+        let caps = match requirement.domain() {
+            ExecutionDomain::Ann => {
+                BackendCapabilities::ann("wrong-size").with_hidden_dim(cfg.transformer.dim + 1)
+            }
+            ExecutionDomain::Snn => {
+                BackendCapabilities::snn("wrong-size").with_num_neurons(cfg.snn_lif_neurons + 1)
+            }
+            domain => panic!("unexpected test domain {domain:?}"),
+        };
+        let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+            .offer(BackendId::new("wrong-size"), caps)
+            .negotiate(&plan, &[requirement])
+            .expect_err("canonical stage metadata must constrain backend dimensions");
+        assert!(matches!(err, PlanError::InvalidParameters(_)), "{err:?}");
+    }
+}
+
+#[test]
 fn reset_named_feature_uses_the_typed_reset_capability() {
     let mut graph = StageGraph::new();
     let stage = snn_stage(&mut graph, "spikes", 4);
@@ -661,6 +689,28 @@ fn fallback_without_prefer_does_not_select_an_empty_identity() {
     assert!(
         matches!(err, PlanError::InvalidParameters(_)),
         "empty identity was accepted: {err:?}"
+    );
+}
+
+#[test]
+fn fallback_without_prefer_is_invalid_before_candidate_evaluation() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 2);
+    let plan = graph.compile().unwrap();
+    let fallback = BackendCapabilities::ann("fallback")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(8)
+        .with_features([RequiredFeature::new("reference-embedding")]);
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::AllowNamed)
+        .offer(BackendId::new("fallback"), fallback)
+        .fallback_to(stage, BackendId::new("fallback"))
+        .negotiate(&plan, &[requirement_ann(stage, 4, 2)])
+        .expect_err("fallback_to without prefer must be invalid configuration");
+    assert!(
+        matches!(err, PlanError::InvalidParameters(_)),
+        "fallback-only configuration returned the wrong error: {err:?}"
     );
 }
 

@@ -16,7 +16,8 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   domain, dtype, width, output population, sequence, batch, streaming,
   stateful, reset, and feature pairings return structured `PlanError` variants.
   A requirement must match the stage's resolved domain and every dtype or fixed
-  dimension derivable from its port contract. Fallback runs only under
+  dimension derivable from its port contract or canonical dimension metadata.
+  Fallback runs only under
   `FallbackPolicy::AllowNamed` and only for a backend the caller names,
   including when the preferred backend was not offered; `Forbid` never
   substitutes. Empty backend identities are rejected. The default SNN report
