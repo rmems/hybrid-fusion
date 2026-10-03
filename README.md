@@ -163,16 +163,19 @@ cargo build --features neuromod
 
 ### Fixed-seed smoke test (issue #45)
 
-`tests/cortex_neuromod_smoke.rs` runs one real cortex-tensor embedding stage
-into one real `NeuromodSnn`. It is not part of the default build.
+`smoke/cortex-neuromod` runs one real cortex-tensor embedding stage into one
+real `NeuromodSnn`. It is a separate package, not a feature of this library
+and not a Cargo workspace member, so resolving or publishing `hybrid-fusion`
+does not fetch cortex-tensor.
 
 ```sh
-cargo test --features cortex-smoke
+cargo test --manifest-path smoke/cortex-neuromod/Cargo.toml --locked
 ```
 
-`cortex-smoke` implies `neuromod` and a git pin of `cortex-tensor` (not on
-crates.io; rev `5cbee81473ed69bd8e74d53e210ef64c02d232da`). `cargo test` and
-`cargo test --features neuromod` do not compile the file.
+The harness pins `cortex-tensor` (not on crates.io; rev
+`5cbee81473ed69bd8e74d53e210ef64c02d232da`) and depends on this crate with
+`neuromod` enabled. `cargo test` and `cargo test --features neuromod` in the
+library root do not build it.
 
 Fixture, also documented at the top of the test module:
 

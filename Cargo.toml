@@ -41,24 +41,11 @@ sentry = { version = "0.34", optional = true, default-features = false, features
 # backends.
 neuromod = { version = "0.7", optional = true }
 
-# ── Optional: real ANN stage for the #45 smoke test ──────────────────────────
-# cortex-tensor 0.1.0 is not on crates.io (index 404 as of 2026-10-02). Pinned
-# to the main commit that exports ReferenceExecutor's embedding stage.
-# Pulled only when `neuromod` / `cortex-smoke` is enabled, so `cargo test`
-# with no features does not fetch it. Test-only: no cortex type is in the
-# public API. Authorized by issue #45.
-cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", rev = "5cbee81473ed69bd8e74d53e210ef64c02d232da", optional = true }
-
 [features]
 default  = []
 sentry   = ["dep:sentry"]
 backends = []
 neuromod = ["dep:neuromod"]
-# Issue #45 smoke test. Implies `neuromod` and the pinned cortex-tensor git
-# dependency. Not part of `default`, and not implied by `neuromod` alone, so
-# `cargo test --features neuromod` stays free of the unpublished ANN crate.
-# Run with `cargo test --features cortex-smoke`.
-cortex-smoke = ["neuromod", "dep:cortex-tensor"]
 
 [dev-dependencies]
 serde_json = "1.0"

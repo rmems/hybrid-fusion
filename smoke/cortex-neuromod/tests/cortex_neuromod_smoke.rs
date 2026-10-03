@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-#![cfg(feature = "cortex-smoke")]
 
 //! Fixed-seed smoke test: one real cortex-tensor embedding stage into one real
 //! `neuromod` 0.7 network through [`hybrid_fusion::NeuromodSnn`] (issue #45).
 //!
-//! Compile and run with `cargo test --features cortex-smoke`. That feature
-//! implies `neuromod`. The default build and `cargo test --features neuromod`
-//! do not compile this file and do not fetch cortex-tensor.
+//! This file lives in the `smoke/cortex-neuromod` package, not in the library.
+//! Run it with `cargo test --manifest-path smoke/cortex-neuromod/Cargo.toml --locked`.
+//! The library's default build and `cargo test --features neuromod` do not
+//! resolve this package and do not fetch cortex-tensor.
 //!
 //! # Fixture
 //!
