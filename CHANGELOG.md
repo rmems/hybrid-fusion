@@ -10,6 +10,16 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- `cortex-smoke` feature and `tests/cortex_neuromod_smoke.rs`: one real
+  cortex-tensor `ReferenceExecutor` embedding stage, projected with
+  `embed_to_stimuli_with_width`, into `NeuromodSnn::with_seed`. Fixed seed
+  `0x45_5EE5`, 4 channels, 4 steps. Asserts finite hidden state and stimuli,
+  in-range fired indices, a spike total in `1..=16`, and identical fired
+  indices across two same-seed runs and after `reset()` + `reseed`. A different
+  seed may differ. cortex-tensor is not on crates.io; the feature pins git rev
+  `5cbee81473ed69bd8e74d53e210ef64c02d232da`. Default and `neuromod`-only builds
+  do not compile the test
+  ([#45](https://github.com/rmems/hybrid-fusion/issues/45)).
 - Optional off-by-default `neuromod` feature providing `NeuromodSnn`, a real SNN
   backend adapter over [`neuromod`](https://crates.io/crates/neuromod) 0.7's
   LIF/Izhikevich engine. It implements `SpikingNetwork` and supports seeded
