@@ -70,16 +70,18 @@ pub trait SpikingNetwork {
 
     /// Side-effect-free capability report.
     ///
-    /// The default advertises the SNN domain, `f32`, and the stimulus width.
-    /// It does **not** advertise reset, caller-controlled RNG, or
-    /// neuromodulation — those are opt-in overrides, matching cortex-tensor's
-    /// `SnnCapabilities` flags rather than assumed for every implementor.
+    /// The default advertises the SNN domain, `f32`, the stimulus width, the
+    /// output population, and `step` (the trait method itself). It does **not**
+    /// advertise cross-call state, reset, caller-controlled RNG, or
+    /// neuromodulation — those are opt-in overrides. A stateless `step` that
+    /// depends only on the current stimuli must not be treated as recurrent.
     /// Implementations must not call [`step`](Self::step).
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities::snn(std::any::type_name::<Self>())
             .with_dtypes([Dtype::F32])
             .with_channels(self.num_channels())
-            .with_stateful(true)
+            .with_num_neurons(self.num_neurons())
+            .with_features([crate::capabilities::RequiredFeature::new("step")])
     }
 }
 

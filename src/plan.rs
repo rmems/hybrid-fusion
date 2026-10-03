@@ -439,8 +439,9 @@ pub enum PlanError {
 
     /// A backend advertises the domain but not the required numerical contract.
     ///
-    /// `field` is a stable name (`"dtype"`, `"channels"`, `"hidden_dim"`,
-    /// `"max_sequence"`, `"max_batch"`, `"streaming"`, `"stateful"`, `"reset"`),
+    /// `field` is a stable name (`"dtype"`, `"channels"`, `"num_neurons"`,
+    /// `"hidden_dim"`, `"max_sequence"`, `"max_batch"`, `"streaming"`,
+    /// `"stateful"`, `"reset"`),
     /// not a display sentence. `required` and `backend` are the two sides of
     /// the comparison.
     #[error("stage {stage} requires {field}={required}, backend advertises {backend}")]

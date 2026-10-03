@@ -99,6 +99,20 @@ impl SpikingNetwork for SimpleSnn {
     fn num_channels(&self) -> usize {
         self.num_channels
     }
+
+    fn capabilities(&self) -> crate::BackendCapabilities {
+        // Membrane potentials persist across steps. The trait default leaves
+        // `stateful` false so a stimuli-only backend is not treated as
+        // recurrent. Reset stays unadvertised: it is a concrete method, not a
+        // trait operation.
+        use crate::capabilities::RequiredFeature;
+        crate::BackendCapabilities::snn(std::any::type_name::<Self>())
+            .with_dtypes([crate::Dtype::F32])
+            .with_channels(self.num_channels())
+            .with_num_neurons(self.num_neurons())
+            .with_features([RequiredFeature::new("step")])
+            .with_stateful(true)
+    }
 }
 
 #[cfg(test)]

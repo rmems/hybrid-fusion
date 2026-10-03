@@ -108,6 +108,7 @@ pub trait SpikingNetwork {
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>;
     fn num_channels(&self) -> usize;
     fn num_neurons(&self) -> usize { self.num_channels() }
+    fn capabilities(&self) -> BackendCapabilities { /* default report */ }
 }
 ```
 
@@ -172,8 +173,10 @@ check leaves the host counter unchanged but cannot roll back the backend step.
 ### `capabilities(&self) -> BackendCapabilities`
 
 Side-effect-free report. The default advertises the SNN domain, `f32`, the
-stimulus width, and `stateful = true`. It does **not** advertise reset or
-`caller_rng`. `NeuromodSnn` overrides this to report
+stimulus width, `num_neurons()`, and the mandatory `step` feature. It does
+**not** advertise cross-call state, reset, or `caller_rng`. Override
+`capabilities` with `with_stateful(true)` only when `step` retains state
+across calls. `NeuromodSnn` overrides this to report
 `backend_name: "neuromod::SpikingNetwork"` plus `reset`, `caller_rng`,
 `plasticity`, and `neuromodulation`, matching cortex-tensor's neuromod
 adapter. Frozen evaluation is intentionally absent. Do not call `step`.

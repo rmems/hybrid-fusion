@@ -466,6 +466,7 @@ impl SpikingNetwork for NeuromodSnn {
         crate::BackendCapabilities::snn("neuromod::SpikingNetwork")
             .with_dtypes([crate::Dtype::F32])
             .with_channels(self.num_channels())
+            .with_num_neurons(self.num_neurons())
             .with_max_sequence(1)
             .with_stateful(true)
             .with_reset(true)

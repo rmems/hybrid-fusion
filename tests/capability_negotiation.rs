@@ -10,6 +10,12 @@
 // - two backends that both fit a stage are treated as interchangeable when their
 //   semantic feature sets differ (caller_rng vs not);
 // - capability discovery mutates the backend (step counter, membrane, seed).
+// - a requirement domain that disagrees with the compiled stage is accepted;
+// - a named fallback is ignored when the preferred backend was not offered;
+// - an empty backend identity is selected;
+// - two requirements for one stage select different backends;
+// - matching stimulus width hides a different output population;
+// - a unique domain-matching backend's dtype error is reported as "no backend".
 
 //! Capability negotiation for hybrid stages (issue #41 / RM-1805).
 //!
@@ -201,13 +207,38 @@ fn compatible_backend_is_selected_without_fallback() {
 }
 
 #[test]
-fn unsupported_domain_is_a_structured_error_not_a_string_scan() {
+fn requirement_domain_must_match_the_compiled_stage() {
     let mut graph = StageGraph::new();
     let stage = ann_stage(&mut graph, "tower", 4, 2);
     let plan = graph.compile().expect("single stage");
 
-    // ANN-only backend offered for an ANN stage whose requirement asks for SNN.
-    // The break: treating domain as a free string and accepting any non-empty name.
+    // Compiled Transformer stage is ANN. An SNN requirement plus an SNN offer
+    // must not succeed just because the requirement and the offer agree.
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("snn-only"),
+            BackendCapabilities::snn("snn-only").with_dtypes([Dtype::F32]),
+        )
+        .negotiate(&plan, &[StageRequirement::new(stage, ExecutionDomain::Snn)])
+        .expect_err("requirement domain must match the compiled stage");
+
+    match err {
+        PlanError::InvalidParameters(reason) => {
+            assert!(
+                reason.contains("Ann") && reason.contains("Snn"),
+                "domain disagreement was not named: {reason}"
+            );
+        }
+        other => panic!("expected InvalidParameters, got {other:?}"),
+    }
+}
+
+#[test]
+fn unsupported_domain_is_a_structured_error_not_a_string_scan() {
+    let mut graph = StageGraph::new();
+    let stage = snn_stage(&mut graph, "spikes", 4);
+    let plan = graph.compile().expect("single stage");
+
     let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
         .offer(
             BackendId::new("ann-only"),
@@ -333,9 +364,10 @@ fn forbid_policy_does_not_silently_substitute_a_compatible_fallback() {
     let mut graph = StageGraph::new();
     let stage = ann_stage(&mut graph, "tower", 4, 2);
     let plan = graph.compile().unwrap();
+    // Width 8 does not equal the required hidden width 4.
     let preferred = BackendCapabilities::ann("preferred")
         .with_dtypes([Dtype::F32])
-        .with_hidden_dim(8); // too narrow for the requirement
+        .with_hidden_dim(8);
     let fallback = BackendCapabilities::ann("fallback")
         .with_dtypes([Dtype::F32])
         .with_hidden_dim(4)
@@ -428,6 +460,182 @@ fn semantic_inequivalence_rejects_substitution_even_when_shapes_match() {
         matches!(err, PlanError::SemanticMismatch { .. }),
         "shape-compatible unseeded backend was accepted as a semantic substitute: {err:?}"
     );
+}
+
+#[test]
+fn named_fallback_runs_when_the_preferred_backend_was_not_offered() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 2);
+    let plan = graph.compile().unwrap();
+    let fallback = BackendCapabilities::ann("fallback")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(8)
+        .with_features([RequiredFeature::new("reference-embedding")]);
+
+    let outcome = CapabilityNegotiation::new(FallbackPolicy::AllowNamed)
+        .offer(BackendId::new("fallback"), fallback)
+        .prefer(stage, BackendId::new("missing"))
+        .fallback_to(stage, BackendId::new("fallback"))
+        .negotiate(&plan, &[requirement_ann(stage, 4, 2)])
+        .expect("absent preferred backend should try the named fallback");
+
+    assert_eq!(
+        outcome.selection(stage),
+        Some(&NegotiationOutcome::Fallback {
+            rejected: BackendId::new("missing"),
+            selected: BackendId::new("fallback"),
+        })
+    );
+}
+
+#[test]
+fn fallback_without_prefer_does_not_select_an_empty_identity() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 2);
+    let plan = graph.compile().unwrap();
+    let named = BackendCapabilities::ann("named")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(8)
+        .with_features([RequiredFeature::new("reference-embedding")]);
+    let empty = BackendCapabilities::ann("empty")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(8)
+        .with_features([RequiredFeature::new("reference-embedding")]);
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::AllowNamed)
+        .offer(BackendId::new(""), empty)
+        .offer(BackendId::new("named"), named)
+        .fallback_to(stage, BackendId::new("named"))
+        .negotiate(&plan, &[requirement_ann(stage, 4, 2)])
+        .expect_err("empty offer must not be selected ahead of the named fallback");
+    assert!(
+        matches!(err, PlanError::InvalidParameters(_)),
+        "empty identity was accepted: {err:?}"
+    );
+}
+
+#[test]
+fn duplicate_stage_requirements_are_rejected() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 2);
+    let plan = graph.compile().unwrap();
+    let wide = BackendCapabilities::ann("wide")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(8)
+        .with_features([
+            RequiredFeature::new("reference-embedding"),
+            RequiredFeature::new("streaming-embed"),
+        ]);
+    let replay = BackendCapabilities::ann("replay")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(8)
+        .with_features([
+            RequiredFeature::new("reference-embedding"),
+            RequiredFeature::new("caller_rng"),
+        ]);
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(BackendId::new("wide"), wide)
+        .offer(BackendId::new("replay"), replay)
+        .negotiate(
+            &plan,
+            &[
+                requirement_ann(stage, 4, 2).with_feature(RequiredFeature::new("streaming-embed")),
+                requirement_ann(stage, 4, 2).with_feature(RequiredFeature::new("caller_rng")),
+            ],
+        )
+        .expect_err("two requirements for one stage must not both succeed");
+    assert!(
+        matches!(err, PlanError::InvalidParameters(_)),
+        "conflicting assignments were accepted: {err:?}"
+    );
+}
+
+#[test]
+fn output_population_is_checked_apart_from_stimulus_width() {
+    let mut graph = StageGraph::new();
+    let stage = snn_stage(&mut graph, "spikes", 4);
+    let plan = graph.compile().unwrap();
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("unequal"),
+            BackendCapabilities::snn("unequal")
+                .with_dtypes([Dtype::F32])
+                .with_channels(4)
+                .with_num_neurons(2)
+                .with_stateful(true)
+                .with_reset(true)
+                .with_features([RequiredFeature::new("step")]),
+        )
+        .negotiate(&plan, &[requirement_snn(stage, 4).with_num_neurons(8)])
+        .unwrap_err();
+    match err {
+        PlanError::IncompatibleCapability {
+            field,
+            required,
+            backend,
+            ..
+        } => {
+            assert_eq!(field, "num_neurons");
+            assert_eq!(required, "8");
+            assert_eq!(backend, "2");
+        }
+        other => panic!("expected output-population mismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn sole_domain_match_keeps_its_capability_error() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 2);
+    let plan = graph.compile().unwrap();
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("ann-f16"),
+            BackendCapabilities::ann("ann-f16").with_dtypes([Dtype::F16]),
+        )
+        .offer(
+            BackendId::new("snn"),
+            BackendCapabilities::snn("snn").with_dtypes([Dtype::F32]),
+        )
+        .negotiate(&plan, &[requirement_ann(stage, 4, 2)])
+        .unwrap_err();
+    match err {
+        PlanError::IncompatibleCapability { field, .. } => assert_eq!(field, "dtype"),
+        other => panic!("dtype mismatch was collapsed to a domain error: {other:?}"),
+    }
+}
+
+#[test]
+fn fallback_that_also_misses_the_sequence_window_is_not_semantic() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 8);
+    let plan = graph.compile().unwrap();
+    let preferred = BackendCapabilities::ann("preferred").with_dtypes([Dtype::F16]);
+    let short = BackendCapabilities::ann("short")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(2);
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::AllowNamed)
+        .offer(BackendId::new("preferred"), preferred)
+        .offer(BackendId::new("short"), short)
+        .prefer(stage, BackendId::new("preferred"))
+        .fallback_to(stage, BackendId::new("short"))
+        .negotiate(
+            &plan,
+            &[requirement_ann(stage, 4, 8).with_feature(RequiredFeature::new("caller_rng"))],
+        )
+        .unwrap_err();
+    match err {
+        PlanError::IncompatibleCapability { field, .. } => assert_eq!(field, "max_sequence"),
+        other => panic!("sequence miss was reported as a semantic mismatch: {other:?}"),
+    }
 }
 
 #[test]

@@ -52,10 +52,16 @@ use crate::types::Dtype;
 pub struct BackendId(String);
 
 impl BackendId {
-    /// Identity from a caller-chosen name. Empty names are rejected at
-    /// negotiation time, not here, so static construction stays infallible.
+    /// Identity from a caller-chosen name.
+    ///
+    /// Empty names stay constructible so static reports stay infallible.
+    /// [`CapabilityNegotiation`] rejects them before selection.
     pub fn new(name: impl Into<String>) -> Self {
         Self(name.into())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// Borrowed name.
@@ -127,6 +133,9 @@ pub struct BackendCapabilities {
     pub hidden_dim: Option<usize>,
     /// Stimulus / input-channel width, when the backend is an SNN stage.
     pub channels: Option<usize>,
+    /// Output population (`SpikingNetwork::num_neurons`), independent of
+    /// stimulus width. Unset means the backend did not advertise one.
+    pub num_neurons: Option<usize>,
     /// Longest sequence or temporal window the backend accepts.
     pub max_sequence: Option<usize>,
     /// Largest batch the backend accepts. `None` means batching is not advertised.
@@ -151,6 +160,7 @@ impl BackendCapabilities {
             dtypes: BTreeSet::new(),
             hidden_dim: None,
             channels: None,
+            num_neurons: None,
             max_sequence: None,
             max_batch: None,
             streaming: false,
@@ -205,6 +215,12 @@ impl BackendCapabilities {
     /// Advertise a fixed stimulus width.
     pub fn with_channels(mut self, channels: usize) -> Self {
         self.channels = Some(channels);
+        self
+    }
+
+    /// Advertise the output population, independent of stimulus width.
+    pub fn with_num_neurons(mut self, neurons: usize) -> Self {
+        self.num_neurons = Some(neurons);
         self
     }
 
@@ -280,6 +296,7 @@ pub struct StageRequirement {
     dtype: Option<Dtype>,
     hidden_dim: Option<usize>,
     channels: Option<usize>,
+    num_neurons: Option<usize>,
     max_sequence: Option<usize>,
     max_batch: Option<usize>,
     streaming: bool,
@@ -297,6 +314,7 @@ impl StageRequirement {
             dtype: None,
             hidden_dim: None,
             channels: None,
+            num_neurons: None,
             max_sequence: None,
             max_batch: None,
             streaming: false,
@@ -331,6 +349,12 @@ impl StageRequirement {
     /// Require this stimulus width (exact).
     pub fn with_channels(mut self, channels: usize) -> Self {
         self.channels = Some(channels);
+        self
+    }
+
+    /// Require this output population (exact), independent of stimulus width.
+    pub fn with_num_neurons(mut self, neurons: usize) -> Self {
+        self.num_neurons = Some(neurons);
         self
     }
 
@@ -447,7 +471,9 @@ struct Offer {
 #[derive(Debug, Clone)]
 struct Preference {
     stage: StageId,
-    preferred: BackendId,
+    /// Absent when [`CapabilityNegotiation::fallback_to`] was called without
+    /// [`CapabilityNegotiation::prefer`]. Never an empty sentinel.
+    preferred: Option<BackendId>,
     fallback: Option<BackendId>,
 }
 
@@ -473,6 +499,9 @@ impl CapabilityNegotiation {
     }
 
     /// Offer a backend report. A repeated id replaces the earlier report.
+    ///
+    /// An empty [`BackendId`] is stored and rejected by [`Self::negotiate`], so
+    /// a caller cannot select it ahead of a named fallback.
     pub fn offer(mut self, id: BackendId, caps: BackendCapabilities) -> Self {
         if let Some(existing) = self.offers.iter_mut().find(|o| o.id == id) {
             existing.caps = caps;
@@ -485,29 +514,31 @@ impl CapabilityNegotiation {
     /// Name the backend to try first for `stage`.
     pub fn prefer(mut self, stage: StageId, id: BackendId) -> Self {
         if let Some(pref) = self.preferences.iter_mut().find(|p| p.stage == stage) {
-            pref.preferred = id;
+            pref.preferred = Some(id);
         } else {
             self.preferences.push(Preference {
                 stage,
-                preferred: id,
+                preferred: Some(id),
                 fallback: None,
             });
         }
         self
     }
 
-    /// Name the only backend that may replace a rejected preferred backend.
+    /// Name the only backend that may replace a rejected or missing preferred backend.
     ///
     /// Ignored when the policy is [`FallbackPolicy::Forbid`]. Calling this
-    /// without [`prefer`](Self::prefer) does not select `id`: a fallback is a
-    /// substitute for a rejected preference, not a preference itself.
+    /// without [`prefer`](Self::prefer) does not select `id` and does not invent
+    /// a preferred identity: a fallback is a substitute, not a preference.
+    /// Under [`FallbackPolicy::AllowNamed`], an absent preferred offer tries
+    /// this named backend before failing.
     pub fn fallback_to(mut self, stage: StageId, id: BackendId) -> Self {
         if let Some(pref) = self.preferences.iter_mut().find(|p| p.stage == stage) {
             pref.fallback = Some(id);
         } else {
             self.preferences.push(Preference {
                 stage,
-                preferred: BackendId::new(""),
+                preferred: None,
                 fallback: Some(id),
             });
         }
@@ -516,33 +547,69 @@ impl CapabilityNegotiation {
 
     /// Validate `requirements` against the offered reports and `plan`.
     ///
-    /// `plan` is used to reject a requirement that names a stage the plan does
-    /// not contain. It is not executed.
+    /// `plan` is not executed. Each requirement's domain must equal the stage's
+    /// resolved domain, and each stage may appear once. Empty backend identities
+    /// are rejected before selection.
     ///
     /// # Errors
     ///
     /// - [`PlanError::UnknownStage`] if a requirement names a missing stage.
+    /// - [`PlanError::InvalidParameters`] if a requirement domain disagrees with
+    ///   the compiled stage, a stage is required twice, or an offered, preferred,
+    ///   or fallback identity is empty.
     /// - [`PlanError::UnsupportedBackend`] if no offered backend advertises the
     ///   required domain (or the preferred one does not, and fallback is forbidden
     ///   or unnamed).
-    /// - [`PlanError::IncompatibleCapability`] for a dtype, width, sequence,
-    ///   batch, streaming, stateful, or reset mismatch.
+    /// - [`PlanError::IncompatibleCapability`] for a dtype, width, output
+    ///   population, sequence, batch, streaming, stateful, or reset mismatch.
+    ///   When several backends are offered and exactly one advertises the domain,
+    ///   that backend's mismatch is returned instead of a domain-only error.
     /// - [`PlanError::UnsupportedFeature`] when a required feature is absent.
-    /// - [`PlanError::SemanticMismatch`] when a named fallback fits the shape
-    ///   but not the required feature set (substitution would change semantics).
+    /// - [`PlanError::SemanticMismatch`] when a named fallback fits the numerical
+    ///   contract (including sequence and batch windows) but not the required
+    ///   feature set.
     pub fn negotiate(
         &self,
         plan: &HybridExecutionPlan,
         requirements: &[StageRequirement],
     ) -> Result<NegotiationReport, PlanError> {
+        self.reject_empty_ids()?;
+        let mut seen = Vec::with_capacity(requirements.len());
         let mut outcomes = Vec::with_capacity(requirements.len());
         for req in requirements {
-            if plan.stage(req.stage).is_none() {
+            let Some(resolved) = plan.resolved_domain(req.stage) else {
                 return Err(PlanError::UnknownStage { stage: req.stage });
+            };
+            if resolved != req.domain {
+                return Err(PlanError::InvalidParameters(format!(
+                    "stage {} is compiled for domain {resolved:?}, requirement asks for {:?}",
+                    req.stage, req.domain
+                )));
             }
+            if seen.contains(&req.stage) {
+                return Err(PlanError::InvalidParameters(format!(
+                    "stage {} has more than one requirement",
+                    req.stage
+                )));
+            }
+            seen.push(req.stage);
             outcomes.push((req.stage, self.select(req)?));
         }
         Ok(NegotiationReport { outcomes })
+    }
+
+    fn reject_empty_ids(&self) -> Result<(), PlanError> {
+        let empty_offer = self.offers.iter().any(|o| o.id.is_empty());
+        let empty_pref = self.preferences.iter().any(|p| {
+            p.preferred.as_ref().is_some_and(BackendId::is_empty)
+                || p.fallback.as_ref().is_some_and(BackendId::is_empty)
+        });
+        if empty_offer || empty_pref {
+            return Err(PlanError::InvalidParameters(
+                "backend identity must be non-empty".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn select(&self, req: &StageRequirement) -> Result<NegotiationOutcome, PlanError> {
@@ -559,24 +626,43 @@ impl CapabilityNegotiation {
                 Err(err) => Err(err),
             };
         }
-        // No preference: the unique domain-matching compatible backend, if any.
-        let mut matches = self
+        // No preference: the unique fully compatible backend. If none is fully
+        // compatible, a unique domain match keeps its capability error instead
+        // of claiming the domain itself is unsupported.
+        let mut compatible_offers = self
             .offers
             .iter()
             .filter(|o| compatible(req, &o.caps).is_ok());
-        let first = matches.next();
-        let second = matches.next();
+        let first = compatible_offers.next();
+        let second = compatible_offers.next();
         match (first, second) {
             (Some(offer), None) => Ok(NegotiationOutcome::Selected(offer.id.clone())),
-            (None, _) => Err(PlanError::UnsupportedBackend {
-                stage: req.stage,
-                domain: req.domain,
-                reason: format!("no offered backend supports domain {:?}", req.domain),
-            }),
             (Some(_), Some(_)) => Err(PlanError::UnsupportedBackend {
                 stage: req.stage,
                 domain: req.domain,
                 reason: "multiple compatible backends; name one with prefer()".into(),
+            }),
+            (None, _) => self.unique_domain_mismatch(req),
+        }
+    }
+
+    fn unique_domain_mismatch(
+        &self,
+        req: &StageRequirement,
+    ) -> Result<NegotiationOutcome, PlanError> {
+        let mut domain_matches = self
+            .offers
+            .iter()
+            .filter(|o| o.caps.supports_domain(req.domain));
+        let first = domain_matches.next();
+        let second = domain_matches.next();
+        match first {
+            Some(offer) if second.is_none() => compatible(req, &offer.caps)
+                .map(|()| NegotiationOutcome::Selected(offer.id.clone())),
+            _ => Err(PlanError::UnsupportedBackend {
+                stage: req.stage,
+                domain: req.domain,
+                reason: format!("no offered backend supports domain {:?}", req.domain),
             }),
         }
     }
@@ -586,12 +672,21 @@ impl CapabilityNegotiation {
         req: &StageRequirement,
         pref: &Preference,
     ) -> Result<NegotiationOutcome, PlanError> {
-        let Some(preferred) = self.offers.iter().find(|o| o.id == pref.preferred) else {
-            return Err(PlanError::UnsupportedBackend {
+        let Some(preferred_id) = &pref.preferred else {
+            let missing = PlanError::UnsupportedBackend {
                 stage: req.stage,
                 domain: req.domain,
-                reason: format!("preferred backend '{}' was not offered", pref.preferred),
-            });
+                reason: "no preferred backend was named".into(),
+            };
+            return self.fallback(req, pref, missing);
+        };
+        let Some(preferred) = self.offers.iter().find(|o| &o.id == preferred_id) else {
+            let missing = PlanError::UnsupportedBackend {
+                stage: req.stage,
+                domain: req.domain,
+                reason: format!("preferred backend '{preferred_id}' was not offered"),
+            };
+            return self.fallback(req, pref, missing);
         };
         if let Err(err) = compatible(req, &preferred.caps) {
             return self.fallback(req, pref, err);
@@ -611,7 +706,7 @@ impl CapabilityNegotiation {
         let Some(fallback_id) = &pref.fallback else {
             return Err(preferred_err);
         };
-        if fallback_id == &pref.preferred {
+        if pref.preferred.as_ref() == Some(fallback_id) {
             return Err(preferred_err);
         }
         let Some(fallback) = self.offers.iter().find(|o| &o.id == fallback_id) else {
@@ -628,15 +723,22 @@ impl CapabilityNegotiation {
             {
                 return Err(PlanError::SemanticMismatch {
                     stage: req.stage,
-                    rejected: pref.preferred.as_str().to_string(),
+                    rejected: pref
+                        .preferred
+                        .as_ref()
+                        .map(|id| id.as_str().to_string())
+                        .unwrap_or_else(|| "unnamed".into()),
                     candidate: fallback.id.as_str().to_string(),
                     reason: err.to_string(),
                 });
             }
             return Err(err);
         }
+        let Some(rejected) = pref.preferred.clone() else {
+            return Err(preferred_err);
+        };
         Ok(NegotiationOutcome::Fallback {
-            rejected: pref.preferred.clone(),
+            rejected,
             selected: fallback.id.clone(),
         })
     }
@@ -645,8 +747,14 @@ impl CapabilityNegotiation {
 fn shape_ok(req: &StageRequirement, caps: &BackendCapabilities) -> bool {
     extent_ok(req.hidden_dim, caps.hidden_dim, true)
         && extent_ok(req.channels, caps.channels, true)
+        && extent_ok(req.num_neurons, caps.num_neurons, true)
+        && extent_ok(req.max_sequence, caps.max_sequence, false)
+        && extent_ok(req.max_batch, caps.max_batch, false)
         && dtype_ok(req, caps)
         && caps.supports_domain(req.domain)
+        && (!req.streaming || caps.streaming)
+        && (!req.stateful || caps.stateful)
+        && (!req.reset || caps.reset)
 }
 
 fn dtype_ok(req: &StageRequirement, caps: &BackendCapabilities) -> bool {
@@ -699,6 +807,7 @@ fn compatible(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), 
     }
     check_exact(req, "hidden_dim", req.hidden_dim, caps.hidden_dim)?;
     check_exact(req, "channels", req.channels, caps.channels)?;
+    check_exact(req, "num_neurons", req.num_neurons, caps.num_neurons)?;
     check_at_least(req, "max_sequence", req.max_sequence, caps.max_sequence)?;
     check_at_least(req, "max_batch", req.max_batch, caps.max_batch)?;
     if req.streaming && !caps.streaming {

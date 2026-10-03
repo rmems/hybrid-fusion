@@ -13,16 +13,21 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - `BackendCapabilities` plus `CapabilityNegotiation`: ANN and SNN traits expose
   a side-effect-free capability report, and a compiled `HybridExecutionPlan`
   can be checked against offered backends before execution. Unsupported
-  domain, dtype, width, sequence, batch, streaming, stateful, reset, and
-  feature pairings return structured `PlanError` variants
-  (`UnsupportedBackend`, `IncompatibleCapability`, `UnsupportedFeature`,
-  `SemanticMismatch`). Fallback runs only under `FallbackPolicy::AllowNamed`
-  and only for a backend the caller names; `Forbid` never substitutes.
+  domain, dtype, width, output population, sequence, batch, streaming,
+  stateful, reset, and feature pairings return structured `PlanError` variants.
+  A requirement domain must match the stage's resolved domain. Fallback runs
+  only under `FallbackPolicy::AllowNamed` and only for a backend the caller
+  names, including when the preferred backend was not offered; `Forbid` never
+  substitutes. Empty backend identities are rejected. The default SNN report
+  advertises `step` and does not claim cross-call state.
   `NeuromodSnn::capabilities` reports `backend_name: "neuromod::SpikingNetwork"`
   with the same flags cortex-tensor's adapter publishes (caller RNG, plasticity,
   neuromodulation; frozen evaluation absent). Linear RM-1421 produced no audit
   findings — its only session died on a GitHub rate limit — so there was no
   finding list to port ([#41](https://github.com/rmems/hybrid-fusion/issues/41)).
+- **BREAKING**: `PlanError` gains `UnsupportedBackend`, `IncompatibleCapability`,
+  `UnsupportedFeature`, and `SemanticMismatch` (exhaustive enum; downstream
+  `match` arms must be updated) ([#41](https://github.com/rmems/hybrid-fusion/issues/41)).
 - Optional off-by-default `neuromod` feature providing `NeuromodSnn`, a real SNN
   backend adapter over [`neuromod`](https://crates.io/crates/neuromod) 0.7's
   LIF/Izhikevich engine. It implements `SpikingNetwork` and supports seeded
