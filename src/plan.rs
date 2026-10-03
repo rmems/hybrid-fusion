@@ -13,10 +13,11 @@
 //! [`crate::HybridNetwork`] / [`crate::ReverseHybridPath`] hosts keep their
 //! numerical semantics unchanged.
 //!
-//! Capability negotiation (RM-1805 `BackendCapabilities`) plugs in later via
-//! the per-stage [`ExecutionDomain`] hooks; this module deliberately does not
-//! model device capabilities, checkpoint parsing, neuron dynamics, or
-//! model-family policy.
+//! Capability negotiation lives in [`crate::capabilities`]: a compiled plan is
+//! the structural input, and [`crate::CapabilityNegotiation`] checks offered
+//! [`crate::BackendCapabilities`] against per-stage requirements before any
+//! backend runs. This module still does not model devices, checkpoint parsing,
+//! neuron dynamics, or model-family policy.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -113,11 +114,15 @@ impl StageKind {
 
 /// Execution-domain assignment for a stage.
 ///
-/// This is the **assignment hook** RM-1804 exposes for later capability
-/// negotiation (RM-1805): a planner may pin a stage to a domain with
-/// [`StageGraph::set_domain`], subject to [`StageKind::allowed_domains`].
-/// [`Auto`](Self::Auto) defers to the kind's default domain at compile time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// This is the **assignment hook** RM-1804 exposes for capability negotiation
+/// (RM-1805 / [`crate::CapabilityNegotiation`]): a planner may pin a stage to a
+/// domain with [`StageGraph::set_domain`], subject to
+/// [`StageKind::allowed_domains`]. [`Auto`](Self::Auto) defers to the kind's
+/// default domain at compile time. Negotiation then checks that an offered
+/// backend actually advertises that domain.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum ExecutionDomain {
     /// Resolved from [`StageKind::default_domain`] during compilation.
     #[default]
@@ -282,6 +287,28 @@ impl DimBindings {
             }
         }
     }
+
+    /// Materialize every symbol whose equivalence class has a fixed extent.
+    fn resolved(mut self) -> BTreeMap<String, usize> {
+        let names: BTreeSet<String> = self
+            .parent
+            .keys()
+            .chain(self.parent.values())
+            .chain(self.value.keys())
+            .cloned()
+            .collect();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let root = self.root(&name);
+                self.value
+                    .get(&root)
+                    .copied()
+                    .flatten()
+                    .map(|value| (name, value))
+            })
+            .collect()
+    }
 }
 
 fn unify_dim(
@@ -415,6 +442,66 @@ pub enum PlanError {
     /// (e.g. zero-valued dimensions).
     #[error("invalid plan parameters: {0}")]
     InvalidParameters(String),
+
+    /// No offered backend can run `stage` in `domain`.
+    ///
+    /// Produced by capability negotiation ([`crate::CapabilityNegotiation`]),
+    /// not by structural [`StageGraph::compile`]. `reason` names the missing
+    /// offer or domain; callers should match this variant rather than scanning
+    /// the string.
+    #[error("stage {stage} has no backend for domain {domain:?}: {reason}")]
+    UnsupportedBackend {
+        /// Stage that could not be placed.
+        stage: StageId,
+        /// Domain the requirement asked for.
+        domain: ExecutionDomain,
+        /// Why no offer was usable.
+        reason: String,
+    },
+
+    /// A backend advertises the domain but not the required numerical contract.
+    ///
+    /// `field` is a stable name (`"dtype"`, `"channels"`, `"num_neurons"`,
+    /// `"hidden_dim"`, `"max_sequence"`, `"max_batch"`, `"streaming"`,
+    /// `"stateful"`, `"reset"`),
+    /// not a display sentence. `required` and `backend` are the two sides of
+    /// the comparison.
+    #[error("stage {stage} requires {field}={required}, backend advertises {backend}")]
+    IncompatibleCapability {
+        /// Stage whose requirement failed.
+        stage: StageId,
+        /// Stable field name. Match this, not the Display text.
+        field: &'static str,
+        /// Value the stage required.
+        required: String,
+        /// Value the backend advertised (`"unset"` / `"none"` when absent).
+        backend: String,
+    },
+
+    /// A stage requires an optional feature the selected backend does not list.
+    #[error("stage {stage} requires feature '{feature}', which the backend does not advertise")]
+    UnsupportedFeature {
+        /// Stage whose requirement failed.
+        stage: StageId,
+        /// Feature name that was absent.
+        feature: crate::capabilities::RequiredFeature,
+    },
+
+    /// A named fallback matches shape and domain but not the required feature
+    /// set, so substituting it would change stage semantics.
+    #[error(
+        "stage {stage}: backend '{candidate}' is not a semantic substitute for '{rejected}': {reason}"
+    )]
+    SemanticMismatch {
+        /// Stage that would have been substituted.
+        stage: StageId,
+        /// Preferred backend that was rejected.
+        rejected: String,
+        /// Fallback that fit the shape but not the features.
+        candidate: String,
+        /// The feature (or other) mismatch that blocked substitution.
+        reason: String,
+    },
 
     /// A stage's [`StageId`] does not equal its position in the stage list
     /// (possible only on a hand-built or deserialized [`StageGraph`] —
@@ -556,13 +643,14 @@ impl StageGraph {
         check_contract_sanity(&self.stages)?;
         let order = self.forward_topo_order()?;
         self.check_reachability()?;
-        self.check_edge_contracts()?;
+        let resolved_dims = self.check_edge_contracts()?;
 
         Ok(HybridExecutionPlan {
             stages: self.stages.clone(),
             edges: self.edges.clone(),
             order,
             allow_feedback: self.allow_feedback,
+            resolved_dims,
         })
     }
 
@@ -675,7 +763,7 @@ impl StageGraph {
         Ok(())
     }
 
-    fn check_edge_contracts(&self) -> std::result::Result<(), PlanError> {
+    fn check_edge_contracts(&self) -> std::result::Result<BTreeMap<String, usize>, PlanError> {
         let mut bindings = DimBindings::default();
         for e in &self.edges {
             let producer = self.stage(e.from).expect("endpoint checked");
@@ -688,7 +776,7 @@ impl StageGraph {
                 },
             )?;
         }
-        Ok(())
+        Ok(bindings.resolved())
     }
 }
 
@@ -776,6 +864,10 @@ pub struct HybridExecutionPlan {
     edges: Vec<Edge>,
     order: Vec<StageId>,
     allow_feedback: bool,
+    /// Derived by compilation from edge unification; omitted from wire JSON
+    /// and recomputed by [`Self::from_json`].
+    #[serde(skip)]
+    resolved_dims: BTreeMap<String, usize>,
 }
 
 impl HybridExecutionPlan {
@@ -818,6 +910,15 @@ impl HybridExecutionPlan {
                 s.domain
             }
         })
+    }
+
+    /// Resolve a fixed or compilation-bound symbolic dimension.
+    pub(crate) fn resolved_dim(&self, dim: &DimSpec) -> Option<usize> {
+        match dim {
+            DimSpec::Fixed(value) => Some(*value),
+            DimSpec::Symbolic(name) => self.resolved_dims.get(name).copied(),
+            DimSpec::Any => None,
+        }
     }
 
     /// Forward edges into `stage`, in insertion order.
@@ -934,6 +1035,11 @@ impl HybridExecutionPlan {
         g.set_attr(ann, "role", "transformer.hidden_states");
         g.set_attr(ann, "accepted_layouts", "[dim] | [seq, dim]");
         g.set_attr(ann, "last_axis", config.transformer.dim.to_string());
+        g.set_attr(
+            ann,
+            "max_sequence",
+            config.transformer.max_seq_len.to_string(),
+        );
 
         let adapt = g.add_stage(
             "adapt.project_stimuli",
@@ -944,6 +1050,7 @@ impl HybridExecutionPlan {
             PortSpec::f32_exact(&[config.snn_input_channels]),
         );
         g.set_attr(adapt, "role", "projector::embed_to_stimuli_with_width");
+        g.set_attr(adapt, "hidden_dim", config.transformer.dim.to_string());
         g.set_attr(adapt, "output_bounds", "[-1,1]");
 
         let snn = g.add_stage(
@@ -1020,6 +1127,7 @@ impl HybridExecutionPlan {
         );
         g.set_attr(project, "projection_mode", format!("{mode:?}"));
         g.set_attr(project, "role", "projector::project_spike_activity");
+        g.set_attr(project, "num_neurons", n_neurons.to_string());
 
         let router = g.add_stage(
             "moe.router",

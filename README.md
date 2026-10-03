@@ -128,8 +128,8 @@ assert_eq!(out.embedding.len(), 128);
 |------|---------|
 | `HybridNetwork<T, S>` | Generic orchestrator over any `Transformer` + `SpikingNetwork`. Prefer `try_new` for construction. |
 | `ReverseHybridPath<R>` | Reverse-path host: activity → project → `ExpertRouter` → MoE fields. |
-| `Transformer` trait | Backend-agnostic transformer interface. |
-| `SpikingNetwork` trait | Backend-agnostic SNN interface. |
+| `Transformer` trait | Backend-agnostic transformer interface. Reports `BackendCapabilities`. |
+| `SpikingNetwork` trait | Backend-agnostic SNN interface. Reports `BackendCapabilities`. |
 | `ExpertRouter` trait | MoE routing: embedding → expert weights / selection. |
 | `SpikeActivity` | Pure spike/membrane bag for reverse-path projection. |
 | `ProjectionMode` + `project_spike_activity` | SNN activity → dense embedding for MoE (pure modes). |
@@ -142,6 +142,7 @@ assert_eq!(out.embedding.len(), 128);
 | `projector::embed_to_stimuli_with_width` | Pool -> resize -> tanh adapter. |
 | `Tensor` | Lightweight owned tensor (data + shape). |
 | `HybridError` / `ForwardValueStage` | Orchestration errors, including hidden-state contract diagnostics. |
+| `BackendCapabilities` / `CapabilityNegotiation` | Side-effect-free backend reports and policy-driven stage/backend compatibility. No device management. |
 
 ## Guides
 
