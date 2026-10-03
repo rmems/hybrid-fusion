@@ -48,6 +48,12 @@ jobs:
       - name: Test
         run: cargo test --all-features
 
+      # Issue #45. Own package and lockfile so the unpublished cortex-tensor
+      # git pin is not part of hybrid-fusion's resolve graph.
+      - name: Test (cortex-neuromod smoke)
+        working-directory: smoke/cortex-neuromod
+        run: cargo test --locked
+
   msrv:
     name: MSRV (1.98.1)
     runs-on: ubuntu-latest
@@ -97,3 +103,11 @@ jobs:
 
       - name: Test (neuromod + backends)
         run: cargo test --features "neuromod backends"
+
+      # Issue #45: real cortex-tensor embedding stage → NeuromodSnn.
+      # Separate package so the unpublished git pin never enters this
+      # library's dependency graph (Cargo resolves optional deps for the
+      # lockfile even when the feature is off).
+      - name: Test (cortex-neuromod smoke)
+        working-directory: smoke/cortex-neuromod
+        run: cargo test --locked
