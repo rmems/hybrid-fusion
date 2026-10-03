@@ -2,7 +2,7 @@
 
 //! Validation of backend requirements against compiled stage port contracts.
 
-use super::{BackendCapabilities, StageRequirement};
+use super::{BackendCapabilities, StageRequirement, incompatible_dtype};
 use crate::plan::{DimSpec, HybridExecutionPlan, PlanError, Stage, StageKind};
 use crate::types::Dtype;
 
@@ -139,22 +139,7 @@ pub(super) fn validate_backend_dtypes(
 ) -> Result<(), PlanError> {
     for dtype in numerical_port_dtypes(stage).into_iter().flatten() {
         if !caps.dtypes.contains(&dtype) {
-            let advertised = caps
-                .dtypes
-                .iter()
-                .map(|dtype| format!("{dtype:?}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            return Err(PlanError::IncompatibleCapability {
-                stage: req.stage,
-                field: "dtype",
-                required: format!("{dtype:?}"),
-                backend: if advertised.is_empty() {
-                    "none".into()
-                } else {
-                    advertised
-                },
-            });
+            return Err(incompatible_dtype(req, dtype, caps));
         }
     }
     Ok(())

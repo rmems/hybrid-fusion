@@ -913,24 +913,32 @@ fn numerical_compatible(
 
 fn check_dtype(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), PlanError> {
     if let Some(dtype) = req.dtype.filter(|dtype| !caps.dtypes.contains(dtype)) {
-        let advertised = caps
-            .dtypes
-            .iter()
-            .map(|d| format!("{d:?}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        return Err(PlanError::IncompatibleCapability {
-            stage: req.stage,
-            field: "dtype",
-            required: format!("{dtype:?}"),
-            backend: if advertised.is_empty() {
-                "none".into()
-            } else {
-                advertised
-            },
-        });
+        return Err(incompatible_dtype(req, dtype, caps));
     }
     Ok(())
+}
+
+fn incompatible_dtype(
+    req: &StageRequirement,
+    required: Dtype,
+    caps: &BackendCapabilities,
+) -> PlanError {
+    let advertised = caps
+        .dtypes
+        .iter()
+        .map(|dtype| format!("{dtype:?}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    PlanError::IncompatibleCapability {
+        stage: req.stage,
+        field: "dtype",
+        required: format!("{required:?}"),
+        backend: if advertised.is_empty() {
+            "none".into()
+        } else {
+            advertised
+        },
+    }
 }
 
 fn check_required_flag(
