@@ -108,6 +108,7 @@ pub trait SpikingNetwork {
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>;
     fn num_channels(&self) -> usize;
     fn num_neurons(&self) -> usize { self.num_channels() }
+    fn reset(&mut self) -> Result<()> { /* unsupported by default */ }
     fn capabilities(&self) -> BackendCapabilities { /* default report */ }
 }
 ```
@@ -170,13 +171,22 @@ implementations **must override it**. `HybridNetwork` rejects a zero output
 population before stepping and out-of-domain IDs afterward. A failed output
 check leaves the host counter unchanged but cannot roll back the backend step.
 
+### `reset(&mut self) -> Result<()>`
+
+Restore pre-step dynamics for a reset-capable backend. The default returns an
+unsupported-operation `HybridError::SnnStep`; every backend that advertises
+`with_reset(true)` must override it. `RequiredFeature::new("reset")` is accepted
+as a compatibility alias but normalizes to this typed reset capability.
+
 ### `capabilities(&self) -> BackendCapabilities`
 
 Side-effect-free report. The default advertises the SNN domain, `f32`, the
-stimulus width, `num_neurons()`, and the mandatory `step` feature. It does
-**not** advertise cross-call state, reset, or `caller_rng`. Override
+stimulus width, `num_neurons()`, the mandatory one-step temporal window, and
+the mandatory `step` feature. It does **not** advertise cross-call state,
+reset, or `caller_rng`. Override
 `capabilities` with `with_stateful(true)` only when `step` retains state
-across calls. `NeuromodSnn` overrides this to report
+across calls, and override `reset` whenever `with_reset(true)` is reported.
+`NeuromodSnn` overrides both to report
 `backend_name: "neuromod::SpikingNetwork"` plus `reset`, `caller_rng`,
 `plasticity`, and `neuromodulation`, matching cortex-tensor's neuromod
 adapter. Frozen evaluation is intentionally absent. Do not call `step`.

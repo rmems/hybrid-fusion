@@ -455,6 +455,11 @@ impl SpikingNetwork for NeuromodSnn {
         self.inner.neurons.len()
     }
 
+    fn reset(&mut self) -> Result<()> {
+        NeuromodSnn::reset(self);
+        Ok(())
+    }
+
     /// Same report cortex-tensor's neuromod adapter publishes
     /// (`backend_name: "neuromod::SpikingNetwork"`, plasticity and
     /// neuromodulation on, frozen evaluation off, caller-controlled RNG on),
@@ -472,7 +477,6 @@ impl SpikingNetwork for NeuromodSnn {
             .with_reset(true)
             .with_features([
                 RequiredFeature::new("step"),
-                RequiredFeature::new("reset"),
                 RequiredFeature::new("caller_rng"),
                 RequiredFeature::new("plasticity"),
                 RequiredFeature::new("neuromodulation"),

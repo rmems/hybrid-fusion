@@ -16,6 +16,9 @@
 // - two requirements for one stage select different backends;
 // - matching stimulus width hides a different output population;
 // - a unique domain-matching backend's dtype error is reported as "no backend".
+// - requirements contradict the compiled stage's fixed port contract;
+// - reset's named-feature spelling disagrees with its typed capability;
+// - a default SNN report omits the mandatory one-step temporal window.
 
 //! Capability negotiation for hybrid stages (issue #41 / RM-1805).
 //!
@@ -110,8 +113,23 @@ impl SpikingNetwork for CountingSnn {
     fn num_neurons(&self) -> usize {
         self.neurons
     }
+    fn reset(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn capabilities(&self) -> BackendCapabilities {
         self.caps.clone()
+    }
+}
+
+struct DefaultCapsSnn;
+
+impl SpikingNetwork for DefaultCapsSnn {
+    fn step(&mut self, _stimuli: &[f32], _modulators: &NeuroModulators) -> Result<Vec<usize>> {
+        Ok(Vec::new())
+    }
+
+    fn num_channels(&self) -> usize {
+        4
     }
 }
 
@@ -231,6 +249,135 @@ fn requirement_domain_must_match_the_compiled_stage() {
         }
         other => panic!("expected InvalidParameters, got {other:?}"),
     }
+}
+
+#[test]
+fn requirement_must_match_fixed_snn_input_port() {
+    let mut graph = StageGraph::new();
+    let stage = snn_stage(&mut graph, "spikes", 4);
+    let plan = graph.compile().expect("single stage");
+    let caps = BackendCapabilities::snn("eight-channel")
+        .with_dtypes([Dtype::F32])
+        .with_channels(8);
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(BackendId::new("eight-channel"), caps)
+        .negotiate(
+            &plan,
+            &[StageRequirement::new(stage, ExecutionDomain::Snn)
+                .with_dtype(Dtype::F32)
+                .with_channels(8)],
+        )
+        .expect_err("requirement must not contradict the stage input port");
+
+    match err {
+        PlanError::InvalidParameters(reason) => {
+            assert!(reason.contains("channels") && reason.contains("4") && reason.contains("8"));
+        }
+        other => panic!("expected InvalidParameters, got {other:?}"),
+    }
+}
+
+#[test]
+fn requirement_must_match_fixed_transformer_output_port() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 2);
+    let plan = graph.compile().expect("single stage");
+    let caps = BackendCapabilities::ann("wrong-contract")
+        .with_dtypes([Dtype::F16])
+        .with_hidden_dim(8)
+        .with_max_sequence(3);
+
+    for requirement in [
+        StageRequirement::new(stage, ExecutionDomain::Ann).with_dtype(Dtype::F16),
+        StageRequirement::new(stage, ExecutionDomain::Ann).with_hidden_dim(8),
+        StageRequirement::new(stage, ExecutionDomain::Ann).with_max_sequence(3),
+    ] {
+        let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+            .offer(BackendId::new("wrong-contract"), caps.clone())
+            .negotiate(&plan, &[requirement])
+            .expect_err("requirement must not contradict the stage output port");
+        assert!(matches!(err, PlanError::InvalidParameters(_)), "{err:?}");
+    }
+}
+
+#[test]
+fn canonical_plan_checks_backend_dtype_on_numerical_ports() {
+    let cfg = HybridConfig::tiny();
+    let plan = hybrid_fusion::HybridExecutionPlan::from_hybrid_config(&cfg).unwrap();
+    let ann = plan.stage_by_name("ann.transformer").unwrap().id;
+    let snn = plan.stage_by_name("snn.step").unwrap().id;
+
+    CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("ann"),
+            BackendCapabilities::ann("ann").with_dtypes([Dtype::F32]),
+        )
+        .offer(
+            BackendId::new("snn"),
+            BackendCapabilities::snn("snn").with_dtypes([Dtype::F32]),
+        )
+        .negotiate(
+            &plan,
+            &[
+                StageRequirement::new(ann, ExecutionDomain::Ann).with_dtype(Dtype::F32),
+                StageRequirement::new(snn, ExecutionDomain::Snn).with_dtype(Dtype::F32),
+            ],
+        )
+        .expect("U32 token IDs must not conflict with the F32 Transformer output dtype");
+}
+
+#[test]
+fn reset_named_feature_uses_the_typed_reset_capability() {
+    let mut graph = StageGraph::new();
+    let stage = snn_stage(&mut graph, "spikes", 4);
+    let plan = graph.compile().expect("single stage");
+
+    let report = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("resettable"),
+            BackendCapabilities::snn("resettable")
+                .with_dtypes([Dtype::F32])
+                .with_channels(4)
+                .with_reset(true),
+        )
+        .negotiate(
+            &plan,
+            &[StageRequirement::new(stage, ExecutionDomain::Snn)
+                .with_feature(RequiredFeature::new("reset"))],
+        )
+        .expect("reset feature alias should use the typed reset capability");
+
+    assert_eq!(
+        report.selection(stage),
+        Some(&NegotiationOutcome::Selected(BackendId::new("resettable")))
+    );
+
+    let normalized_caps = BackendCapabilities::snn("legacy-feature")
+        .with_dtypes([Dtype::F32])
+        .with_channels(4)
+        .with_features([RequiredFeature::new("reset")]);
+    assert!(normalized_caps.reset);
+    assert!(normalized_caps.features.is_empty());
+    let feature_report = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(BackendId::new("legacy-feature"), normalized_caps)
+        .negotiate(
+            &plan,
+            &[StageRequirement::new(stage, ExecutionDomain::Snn).requires_reset()],
+        )
+        .expect("reset feature report should normalize to the typed capability");
+    assert_eq!(
+        feature_report.selection(stage),
+        Some(&NegotiationOutcome::Selected(BackendId::new(
+            "legacy-feature"
+        )))
+    );
+}
+
+#[test]
+fn default_snn_report_advertises_one_step_window() {
+    let caps = DefaultCapsSnn.capabilities();
+    assert_eq!(caps.max_sequence, Some(1));
 }
 
 #[test]

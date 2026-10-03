@@ -15,11 +15,14 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   can be checked against offered backends before execution. Unsupported
   domain, dtype, width, output population, sequence, batch, streaming,
   stateful, reset, and feature pairings return structured `PlanError` variants.
-  A requirement domain must match the stage's resolved domain. Fallback runs
-  only under `FallbackPolicy::AllowNamed` and only for a backend the caller
-  names, including when the preferred backend was not offered; `Forbid` never
+  A requirement must match the stage's resolved domain and every dtype or fixed
+  dimension derivable from its port contract. Fallback runs only under
+  `FallbackPolicy::AllowNamed` and only for a backend the caller names,
+  including when the preferred backend was not offered; `Forbid` never
   substitutes. Empty backend identities are rejected. The default SNN report
-  advertises `step` and does not claim cross-call state.
+  advertises `step` and a one-step temporal window without claiming cross-call
+  state. Reset is one typed capability (`requires_reset` / `reset`); the named
+  `"reset"` feature is normalized to it.
   `NeuromodSnn::capabilities` reports `backend_name: "neuromod::SpikingNetwork"`
   with the same flags cortex-tensor's adapter publishes (caller RNG, plasticity,
   neuromodulation; frozen evaluation absent). Linear RM-1421 produced no audit
@@ -28,6 +31,9 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - **BREAKING**: `PlanError` gains `UnsupportedBackend`, `IncompatibleCapability`,
   `UnsupportedFeature`, and `SemanticMismatch` (exhaustive enum; downstream
   `match` arms must be updated) ([#41](https://github.com/rmems/hybrid-fusion/issues/41)).
+- `SpikingNetwork::reset` provides the polymorphic operation promised by the
+  reset capability. Its default returns an unsupported-operation error;
+  `SimpleSnn` and `NeuromodSnn` override it and advertise reset support.
 - Optional off-by-default `neuromod` feature providing `NeuromodSnn`, a real SNN
   backend adapter over [`neuromod`](https://crates.io/crates/neuromod) 0.7's
   LIF/Izhikevich engine. It implements `SpikingNetwork` and supports seeded

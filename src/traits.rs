@@ -68,10 +68,21 @@ pub trait SpikingNetwork {
         self.num_channels()
     }
 
+    /// Restore pre-step dynamics when the backend supports reset.
+    ///
+    /// Backends that advertise `BackendCapabilities::reset` must override this
+    /// method. The default is an explicit unsupported-operation error.
+    fn reset(&mut self) -> Result<()> {
+        Err(crate::HybridError::SnnStep(
+            "reset is not supported by this backend".into(),
+        ))
+    }
+
     /// Side-effect-free capability report.
     ///
     /// The default advertises the SNN domain, `f32`, the stimulus width, the
-    /// output population, and `step` (the trait method itself). It does **not**
+    /// output population, a one-step temporal window, and `step` (the trait
+    /// method itself). It does **not**
     /// advertise cross-call state, reset, caller-controlled RNG, or
     /// neuromodulation — those are opt-in overrides. A stateless `step` that
     /// depends only on the current stimuli must not be treated as recurrent.
@@ -81,6 +92,7 @@ pub trait SpikingNetwork {
             .with_dtypes([Dtype::F32])
             .with_channels(self.num_channels())
             .with_num_neurons(self.num_neurons())
+            .with_max_sequence(1)
             .with_features([crate::capabilities::RequiredFeature::new("step")])
     }
 }

@@ -44,7 +44,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::plan::{ExecutionDomain, HybridExecutionPlan, PlanError, StageId};
+use crate::plan::{
+    DimSpec, ExecutionDomain, HybridExecutionPlan, PlanError, Stage, StageId, StageKind,
+};
 use crate::types::Dtype;
 
 /// Stable identity of an offered backend. Compared by value, not by pointer.
@@ -79,9 +81,11 @@ impl fmt::Display for BackendId {
 /// Named optional capability a stage may require and a backend may advertise.
 ///
 /// Names are matched exactly. The well-known set used by the in-tree adapters
-/// is `step`, `reset`, `caller_rng`, `plasticity`, `neuromodulation`,
+/// is `step`, `caller_rng`, `plasticity`, `neuromodulation`,
 /// `frozen_evaluation`, and `reference-embedding`. Callers may use other names;
-/// an unknown name is simply unsupported unless the backend lists it.
+/// an unknown name is simply unsupported unless the backend lists it. `reset`
+/// is accepted as an alias for the typed reset capability and is not retained
+/// in feature lists.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RequiredFeature(String);
 
@@ -127,7 +131,8 @@ pub struct BackendCapabilities {
     pub backend_name: String,
     /// Domains this backend can be assigned to. Sorted, deduplicated.
     pub domains: Vec<ExecutionDomain>,
-    /// Element types the backend accepts and produces.
+    /// Numerical activation types used by the backend. Transformer token IDs
+    /// and SNN fired-index outputs are control/index ports, not activation dtypes.
     pub dtypes: BTreeSet<Dtype>,
     /// Hidden width, when the backend is an ANN stage with a fixed width.
     pub hidden_dim: Option<usize>,
@@ -268,7 +273,15 @@ impl BackendCapabilities {
 
     /// Replace the advertised feature set.
     pub fn with_features(mut self, features: impl IntoIterator<Item = RequiredFeature>) -> Self {
-        self.features = unique_sorted(features);
+        let mut normalized = Vec::new();
+        for feature in features {
+            if feature.as_str() == "reset" {
+                self.reset = true;
+            } else {
+                normalized.push(feature);
+            }
+        }
+        self.features = unique_sorted(normalized);
         self
     }
 
@@ -390,7 +403,9 @@ impl StageRequirement {
 
     /// Require one advertised feature.
     pub fn with_feature(mut self, feature: RequiredFeature) -> Self {
-        if !self.features.iter().any(|f| f == &feature) {
+        if feature.as_str() == "reset" {
+            self.reset = true;
+        } else if !self.features.iter().any(|f| f == &feature) {
             self.features.push(feature);
         }
         self
@@ -577,15 +592,19 @@ impl CapabilityNegotiation {
         let mut seen = Vec::with_capacity(requirements.len());
         let mut outcomes = Vec::with_capacity(requirements.len());
         for req in requirements {
-            let Some(resolved) = plan.resolved_domain(req.stage) else {
+            let Some(stage) = plan.stage(req.stage) else {
                 return Err(PlanError::UnknownStage { stage: req.stage });
             };
+            let resolved = plan
+                .resolved_domain(req.stage)
+                .expect("resolved domain exists for a known stage");
             if resolved != req.domain {
                 return Err(PlanError::InvalidParameters(format!(
                     "stage {} is compiled for domain {resolved:?}, requirement asks for {:?}",
                     req.stage, req.domain
                 )));
             }
+            validate_stage_contract(req, stage)?;
             if seen.contains(&req.stage) {
                 return Err(PlanError::InvalidParameters(format!(
                     "stage {} has more than one requirement",
@@ -754,7 +773,23 @@ fn shape_ok(req: &StageRequirement, caps: &BackendCapabilities) -> bool {
         && caps.supports_domain(req.domain)
         && (!req.streaming || caps.streaming)
         && (!req.stateful || caps.stateful)
-        && (!req.reset || caps.reset)
+        && (!requires_reset(req) || supports_reset(caps))
+}
+
+fn requires_reset(req: &StageRequirement) -> bool {
+    req.reset
+        || req
+            .features
+            .iter()
+            .any(|feature| feature.as_str() == "reset")
+}
+
+fn supports_reset(caps: &BackendCapabilities) -> bool {
+    caps.reset
+        || caps
+            .features
+            .iter()
+            .any(|feature| feature.as_str() == "reset")
 }
 
 fn dtype_ok(req: &StageRequirement, caps: &BackendCapabilities) -> bool {
@@ -826,7 +861,7 @@ fn compatible(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), 
             backend: "false".into(),
         });
     }
-    if req.reset && !caps.reset {
+    if requires_reset(req) && !supports_reset(caps) {
         return Err(PlanError::IncompatibleCapability {
             stage: req.stage,
             field: "reset",
@@ -835,6 +870,9 @@ fn compatible(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), 
         });
     }
     for feature in &req.features {
+        if feature.as_str() == "reset" {
+            continue;
+        }
         if !caps.features.iter().any(|f| f == feature) {
             return Err(PlanError::UnsupportedFeature {
                 stage: req.stage,
@@ -843,6 +881,70 @@ fn compatible(req: &StageRequirement, caps: &BackendCapabilities) -> Result<(), 
         }
     }
     Ok(())
+}
+
+fn validate_stage_contract(req: &StageRequirement, stage: &Stage) -> Result<(), PlanError> {
+    match stage.kind {
+        StageKind::Transformer => {
+            validate_port_dtype(req, "output dtype", stage.output.dtype)?;
+            if stage.output.dims.len() == 1 {
+                validate_fixed_dim(req, "hidden_dim", req.hidden_dim, &stage.output.dims[0])?;
+            } else if stage.output.dims.len() == 2 {
+                validate_fixed_dim(req, "max_sequence", req.max_sequence, &stage.output.dims[0])?;
+                validate_fixed_dim(req, "hidden_dim", req.hidden_dim, &stage.output.dims[1])?;
+            }
+        }
+        StageKind::SpikingBlock => {
+            validate_port_dtype(req, "input dtype", stage.input.dtype)?;
+            if stage.input.dims.len() == 1 {
+                validate_fixed_dim(req, "channels", req.channels, &stage.input.dims[0])?;
+            }
+            if stage.output.dims.len() == 1 {
+                validate_fixed_dim(req, "num_neurons", req.num_neurons, &stage.output.dims[0])?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_port_dtype(
+    req: &StageRequirement,
+    field: &str,
+    port_dtype: Option<Dtype>,
+) -> Result<(), PlanError> {
+    if let (Some(required), Some(port)) = (req.dtype, port_dtype)
+        && required != port
+    {
+        return contract_mismatch(req, field, format!("{required:?}"), format!("{port:?}"));
+    }
+    Ok(())
+}
+
+fn validate_fixed_dim(
+    req: &StageRequirement,
+    field: &str,
+    required: Option<usize>,
+    port_dim: &DimSpec,
+) -> Result<(), PlanError> {
+    if let (Some(required), DimSpec::Fixed(port)) = (required, port_dim)
+        && required != *port
+    {
+        return contract_mismatch(req, field, required.to_string(), port.to_string());
+    }
+    Ok(())
+}
+
+fn contract_mismatch(
+    req: &StageRequirement,
+    field: &str,
+    required: String,
+    port: String,
+) -> Result<(), PlanError> {
+    Err(PlanError::InvalidParameters(format!(
+        "stage {} {field} port contract is {port}, requirement asks for {required}",
+        req.stage
+    )))
 }
 
 fn check_exact(

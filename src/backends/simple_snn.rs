@@ -100,16 +100,22 @@ impl SpikingNetwork for SimpleSnn {
         self.num_channels
     }
 
+    fn reset(&mut self) -> Result<()> {
+        SimpleSnn::reset(self);
+        Ok(())
+    }
+
     fn capabilities(&self) -> crate::BackendCapabilities {
         // Membrane potentials persist across steps. The trait default leaves
         // `stateful` false so a stimuli-only backend is not treated as
-        // recurrent. Reset stays unadvertised: it is a concrete method, not a
-        // trait operation.
+        // recurrent.
         use crate::capabilities::RequiredFeature;
         crate::BackendCapabilities::snn(std::any::type_name::<Self>())
             .with_dtypes([crate::Dtype::F32])
             .with_channels(self.num_channels())
             .with_num_neurons(self.num_neurons())
+            .with_max_sequence(1)
+            .with_reset(true)
             .with_features([RequiredFeature::new("step")])
             .with_stateful(true)
     }
@@ -181,6 +187,18 @@ mod tests {
         snn.reset();
         let fired = snn.step(&[0.5; 4], &NeuroModulators::default()).unwrap();
         assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn trait_reset_is_callable_for_an_advertised_capability() {
+        let mut snn = SimpleSnn::with_params(1, 10.0, 0.5);
+        snn.step(&[1.0], &NeuroModulators::default()).unwrap();
+
+        <SimpleSnn as SpikingNetwork>::reset(&mut snn).unwrap();
+
+        assert_eq!(snn.membrane_potentials, vec![0.0]);
+        assert!(snn.capabilities().reset);
+        assert_eq!(snn.capabilities().max_sequence, Some(1));
     }
 
     #[test]
