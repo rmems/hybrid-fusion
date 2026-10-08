@@ -32,7 +32,10 @@ Thumbs.db
 # AI/Agent tooling
 .mimocode/
 .kilo/
-.cursor/
+.cursor/*
+# Cursor Cloud Agent environment: committed on purpose.
+!.cursor/environment.json
+!.cursor/install.sh
 .codex/
 .beads/
 
