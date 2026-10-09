@@ -126,8 +126,8 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 ### Fixed
 
 - **BREAKING**: `routing::softmax` now returns `Result<Vec<f32>>` and has a
-  documented non-finite policy. It no longer returns a uniform distribution for
-  non-finite input. A single `+Inf` score gives a one-hot result, several `+Inf`
+  documented non-finite policy. `NaN` and `+Inf` scores no longer produce a
+  uniform distribution. A single `+Inf` score gives a one-hot result, several `+Inf`
   scores split the mass equally among only those indices, and any `NaN` returns
   `HybridError::InvalidConfig`. All `-Inf` scores still give a uniform result,
   which is the limit for equal scores. Previously `softmax([+Inf, 0, 0])` and
