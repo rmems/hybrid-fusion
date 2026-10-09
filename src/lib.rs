@@ -2,6 +2,7 @@
 
 #[cfg(feature = "backends")]
 pub mod backends;
+pub mod capabilities;
 pub mod error;
 pub mod hybrid;
 #[cfg(feature = "neuromod")]
@@ -16,6 +17,10 @@ pub mod traits;
 pub mod types;
 mod validate;
 
+pub use capabilities::{
+    BackendCapabilities, BackendId, CapabilityNegotiation, DeviceHint, FallbackPolicy,
+    NegotiationOutcome, NegotiationReport, RequiredFeature, StageRequirement,
+};
 pub use error::{ForwardValueStage, HybridError, Result};
 pub use hybrid::HybridNetwork;
 pub use plan::{

@@ -32,7 +32,7 @@ pub enum ProjectionMode {
 /// Source shape: Hugging Face Safetensors `dtype` strings from
 /// `safetensors::tensor::Dtype`; consumed by [`TensorManifestEntry`] and
 /// [`SafetensorsLayout`](crate::SafetensorsLayout).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Dtype {
     F64,

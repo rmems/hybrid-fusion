@@ -92,6 +92,13 @@ rejects inputs exceeding this with `HybridError::InputLengthMismatch`.
 Total number of parameters. This is purely informational — the pipeline
 never calls it during inference. Return `0` if you don't track parameters.
 
+### `capabilities(&self) -> BackendCapabilities`
+
+Side-effect-free report used by `CapabilityNegotiation` before a plan runs.
+The default advertises the ANN domain, `f32`, `dim()`, and `max_seq_len()`.
+Override it to advertise batching, streaming, reset, or optional features
+such as `"reference-embedding"`. Do not run `hidden_states` from this method.
+
 ---
 
 ## 2. SpikingNetwork trait
@@ -101,6 +108,8 @@ pub trait SpikingNetwork {
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>;
     fn num_channels(&self) -> usize;
     fn num_neurons(&self) -> usize { self.num_channels() }
+    fn reset(&mut self) -> Result<()> { /* unsupported by default */ }
+    fn capabilities(&self) -> BackendCapabilities { /* default report */ }
 }
 ```
 
@@ -161,6 +170,26 @@ returns `num_channels()` for one-output-per-input backends; unequal-width
 implementations **must override it**. `HybridNetwork` rejects a zero output
 population before stepping and out-of-domain IDs afterward. A failed output
 check leaves the host counter unchanged but cannot roll back the backend step.
+
+### `reset(&mut self) -> Result<()>`
+
+Restore pre-step dynamics for a reset-capable backend. The default returns an
+unsupported-operation `HybridError::SnnStep`; every backend that advertises
+`with_reset(true)` must override it. `RequiredFeature::new("reset")` is accepted
+as a compatibility alias but normalizes to this typed reset capability.
+
+### `capabilities(&self) -> BackendCapabilities`
+
+Side-effect-free report. The default advertises the SNN domain, `f32`, the
+stimulus width, `num_neurons()`, the mandatory one-step temporal window, and
+the mandatory `step` feature. It does **not** advertise cross-call state,
+reset, or `caller_rng`. Override
+`capabilities` with `with_stateful(true)` only when `step` retains state
+across calls, and override `reset` whenever `with_reset(true)` is reported.
+`NeuromodSnn` overrides both to report
+`backend_name: "neuromod::SpikingNetwork"` plus `reset`, `caller_rng`,
+`plasticity`, and `neuromodulation`, matching cortex-tensor's neuromod
+adapter. Frozen evaluation is intentionally absent. Do not call `step`.
 
 ### The real SNN backend: `NeuromodSnn` (optional `neuromod` feature)
 

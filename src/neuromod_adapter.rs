@@ -454,6 +454,34 @@ impl SpikingNetwork for NeuromodSnn {
     fn num_neurons(&self) -> usize {
         self.inner.neurons.len()
     }
+
+    fn reset(&mut self) -> Result<()> {
+        NeuromodSnn::reset(self);
+        Ok(())
+    }
+
+    /// Same report cortex-tensor's neuromod adapter publishes
+    /// (`backend_name: "neuromod::SpikingNetwork"`, plasticity and
+    /// neuromodulation on, frozen evaluation off, caller-controlled RNG on),
+    /// translated into [`BackendCapabilities`] rather than a second vocabulary.
+    ///
+    /// Does not step the network or touch the owned RNG.
+    fn capabilities(&self) -> crate::BackendCapabilities {
+        use crate::capabilities::RequiredFeature;
+        crate::BackendCapabilities::snn("neuromod::SpikingNetwork")
+            .with_dtypes([crate::Dtype::F32])
+            .with_channels(self.num_channels())
+            .with_num_neurons(self.num_neurons())
+            .with_max_sequence(1)
+            .with_stateful(true)
+            .with_reset(true)
+            .with_features([
+                RequiredFeature::new("step"),
+                RequiredFeature::new("caller_rng"),
+                RequiredFeature::new("plasticity"),
+                RequiredFeature::new("neuromodulation"),
+            ])
+    }
 }
 
 #[cfg(test)]

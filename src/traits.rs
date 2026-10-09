@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::capabilities::BackendCapabilities;
 use crate::error::Result;
 use crate::tensor::Tensor;
-use crate::types::{TensorManifestEntry, TensorRole};
+use crate::types::{Dtype, TensorManifestEntry, TensorRole};
 use serde::{Deserialize, Serialize};
 
 /// Transformer backend: token IDs → hidden-state tensor.
@@ -30,6 +31,20 @@ pub trait Transformer {
     fn dim(&self) -> usize;
     fn max_seq_len(&self) -> usize;
     fn param_count(&self) -> usize;
+
+    /// Side-effect-free capability report.
+    ///
+    /// The default derives domain, dtype, hidden width, and sequence window
+    /// from [`dim`](Self::dim) / [`max_seq_len`](Self::max_seq_len) and does
+    /// not advertise batching, streaming, state, reset, or optional features.
+    /// Backends that support those must override this method. Implementations
+    /// must not run [`hidden_states`](Self::hidden_states) or mutate `self`.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::ann(std::any::type_name::<Self>())
+            .with_dtypes([Dtype::F32])
+            .with_hidden_dim(self.dim())
+            .with_max_sequence(self.max_seq_len())
+    }
 }
 
 /// Spiking backend: bounded stimuli → fired neuron indices.
@@ -51,6 +66,34 @@ pub trait SpikingNetwork {
     /// one-output-neuron-per-input-channel contract for downstream implementors.
     fn num_neurons(&self) -> usize {
         self.num_channels()
+    }
+
+    /// Restore pre-step dynamics when the backend supports reset.
+    ///
+    /// Backends that advertise `BackendCapabilities::reset` must override this
+    /// method. The default is an explicit unsupported-operation error.
+    fn reset(&mut self) -> Result<()> {
+        Err(crate::HybridError::SnnStep(
+            "reset is not supported by this backend".into(),
+        ))
+    }
+
+    /// Side-effect-free capability report.
+    ///
+    /// The default advertises the SNN domain, `f32`, the stimulus width, the
+    /// output population, a one-step temporal window, and `step` (the trait
+    /// method itself). It does **not**
+    /// advertise cross-call state, reset, caller-controlled RNG, or
+    /// neuromodulation — those are opt-in overrides. A stateless `step` that
+    /// depends only on the current stimuli must not be treated as recurrent.
+    /// Implementations must not call [`step`](Self::step).
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::snn(std::any::type_name::<Self>())
+            .with_dtypes([Dtype::F32])
+            .with_channels(self.num_channels())
+            .with_num_neurons(self.num_neurons())
+            .with_max_sequence(1)
+            .with_features([crate::capabilities::RequiredFeature::new("step")])
     }
 }
 

@@ -10,6 +10,31 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- `BackendCapabilities` plus `CapabilityNegotiation`: ANN and SNN traits expose
+  a side-effect-free capability report, and a compiled `HybridExecutionPlan`
+  can be checked against offered backends before execution. Unsupported
+  domain, dtype, width, output population, sequence, batch, streaming,
+  stateful, reset, and feature pairings return structured `PlanError` variants.
+  A requirement must match the stage's resolved domain and every dtype or fixed
+  dimension derivable from its port contract or canonical dimension metadata.
+  Fallback runs only under
+  `FallbackPolicy::AllowNamed` and only for a backend the caller names,
+  including when the preferred backend was not offered; `Forbid` never
+  substitutes. Empty backend identities are rejected. The default SNN report
+  advertises `step` and a one-step temporal window without claiming cross-call
+  state. Reset is one typed capability (`requires_reset` / `reset`); the named
+  `"reset"` feature is normalized to it.
+  `NeuromodSnn::capabilities` reports `backend_name: "neuromod::SpikingNetwork"`
+  with the same flags cortex-tensor's adapter publishes (caller RNG, plasticity,
+  neuromodulation; frozen evaluation absent). Linear RM-1421 produced no audit
+  findings — its only session died on a GitHub rate limit — so there was no
+  finding list to port ([#41](https://github.com/rmems/hybrid-fusion/issues/41)).
+- **BREAKING**: `PlanError` gains `UnsupportedBackend`, `IncompatibleCapability`,
+  `UnsupportedFeature`, and `SemanticMismatch` (exhaustive enum; downstream
+  `match` arms must be updated) ([#41](https://github.com/rmems/hybrid-fusion/issues/41)).
+- `SpikingNetwork::reset` provides the polymorphic operation promised by the
+  reset capability. Its default returns an unsupported-operation error;
+  `SimpleSnn` and `NeuromodSnn` override it and advertise reset support.
 - `smoke/cortex-neuromod`: a separately resolved harness (not a workspace
   member, `publish = false`) that runs one real cortex-tensor
   `ReferenceExecutor` embedding stage, projected with
