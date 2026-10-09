@@ -125,6 +125,16 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Fixed
 
+- **BREAKING**: `routing::softmax` now returns `Result<Vec<f32>>` and has a
+  documented non-finite policy. It no longer returns a uniform distribution for
+  non-finite input. A single `+Inf` score gives a one-hot result, several `+Inf`
+  scores split the mass equally among only those indices, and any `NaN` returns
+  `HybridError::InvalidConfig`. All `-Inf` scores still give a uniform result,
+  which is the limit for equal scores. Previously `softmax([+Inf, 0, 0])` and
+  `softmax([NaN, 1])` both returned a uniform distribution.
+  `route_synthetic` and `SyntheticExpertRouter::route` reject `NaN` gate scores
+  (from a `NaN` embedding element, or `+Inf` and `-Inf` in one chunk) instead of
+  routing uniformly (Linear [RM-1442](https://linear.app/rpd-34/issue/RM-1442)).
 - Large-width `NeuromodSnn` construction no longer implicitly allocates one
   fully connected LIF neuron per input channel (Linear
   [RM-1939](https://linear.app/rpd-34/issue/RM-1939)).

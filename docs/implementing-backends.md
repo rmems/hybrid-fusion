@@ -1124,7 +1124,7 @@ Always available (no feature flag) for [`ExpertRouter`](../src/traits.rs) backen
 | Helper | Role |
 |--------|------|
 | `synthetic_gate_scores` | partition embedding → per-expert scores (full coverage) |
-| `softmax` | normalize scores (sum ≈ 1) |
+| `softmax` | normalize scores (sum ≈ 1); `NaN` → `Err`, `+Inf` → mass split across `+Inf` indices only, all `-Inf` → uniform |
 | `top_k_indices` | select experts (NaNs sort last) |
 | `routing_entropy` | Shannon entropy normalized to `[0, 1]` (`f64` accumulate) |
 | `route_synthetic` | all of the above in one call (caps `num_experts`) |
