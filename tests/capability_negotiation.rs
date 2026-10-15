@@ -14,6 +14,9 @@
 // - a named fallback is ignored when the preferred backend was not offered;
 // - an empty backend identity is selected;
 // - two requirements for one stage select different backends;
+// - an unknown feature name matches a report that does not list it;
+// - Forbid substitutes a backend named with fallback_to;
+// - AllowNamed falls through to some other offer when the named fallback is absent;
 // - matching stimulus width hides a different output population;
 // - a unique domain-matching backend's dtype error is reported as "no backend".
 // - requirements contradict the compiled stage's fixed port contract;
@@ -1129,6 +1132,251 @@ fn fallback_that_also_misses_the_sequence_window_is_not_semantic() {
     match err {
         PlanError::IncompatibleCapability { field, .. } => assert_eq!(field, "max_sequence"),
         other => panic!("sequence miss was reported as a semantic mismatch: {other:?}"),
+    }
+}
+
+#[test]
+fn empty_backend_identity_is_rejected_before_selection() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 2);
+    let plan = graph.compile().unwrap();
+    let requirement = requirement_ann(stage, 4, 2);
+    let named = BackendCapabilities::ann("named")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(8)
+        .with_features([RequiredFeature::new("reference-embedding")]);
+
+    // The empty offer satisfies the requirement. Selecting it, or skipping
+    // the identity check and succeeding, would hide an unnameable backend.
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(BackendId::new(""), named.clone())
+        .negotiate(&plan, std::slice::from_ref(&requirement))
+        .expect_err("empty offer must be rejected before selection");
+    assert_non_empty_identity(&err);
+
+    // A compatible named offer exists. An empty preferred id must not be
+    // ignored in favor of that offer or of the named fallback.
+    let err = CapabilityNegotiation::new(FallbackPolicy::AllowNamed)
+        .offer(BackendId::new("named"), named.clone())
+        .prefer(stage, BackendId::new(""))
+        .fallback_to(stage, BackendId::new("named"))
+        .negotiate(&plan, std::slice::from_ref(&requirement))
+        .expect_err("empty preferred identity must be rejected before selection");
+    assert_non_empty_identity(&err);
+
+    // Preferred fails the dtype check. An empty fallback name must not be
+    // skipped so that `other` is selected.
+    let err = CapabilityNegotiation::new(FallbackPolicy::AllowNamed)
+        .offer(
+            BackendId::new("preferred"),
+            BackendCapabilities::ann("preferred").with_dtypes([Dtype::F16]),
+        )
+        .offer(BackendId::new("other"), named)
+        .prefer(stage, BackendId::new("preferred"))
+        .fallback_to(stage, BackendId::new(""))
+        .negotiate(&plan, &[requirement])
+        .expect_err("empty fallback identity must be rejected before selection");
+    assert_non_empty_identity(&err);
+}
+
+fn assert_non_empty_identity(err: &PlanError) {
+    match err {
+        PlanError::InvalidParameters(reason) => {
+            assert!(
+                reason.contains("non-empty"),
+                "empty identity was not the rejection reason: {reason}"
+            );
+        }
+        other => panic!("empty identity produced {other:?}"),
+    }
+}
+
+#[test]
+fn identical_duplicate_stage_requirements_are_rejected() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 2);
+    let plan = graph.compile().unwrap();
+    let requirement = requirement_ann(stage, 4, 2);
+    let caps = BackendCapabilities::ann("ann")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(8)
+        .with_features([RequiredFeature::new("reference-embedding")]);
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(BackendId::new("ann"), caps)
+        .negotiate(&plan, &[requirement.clone(), requirement])
+        .expect_err("two requirements for one stage must not select a backend");
+    match err {
+        PlanError::InvalidParameters(reason) => {
+            assert!(
+                reason.contains("more than one requirement"),
+                "duplicate stage was not named: {reason}"
+            );
+        }
+        other => panic!("duplicate requirements produced {other:?}"),
+    }
+}
+
+#[test]
+fn malformed_fallback_preference_is_rejected_before_requirement_evaluation() {
+    let mut graph = StageGraph::new();
+    let required = ann_stage(&mut graph, "tower", 4, 2);
+    let unused = graph.add_stage(
+        "unused-policy-target",
+        StageKind::DenseMlp,
+        PortSpec::f32_exact(&[2, 4]),
+        PortSpec::f32_exact(&[4]),
+    );
+    graph.connect(required, unused);
+    let plan = graph.compile().expect("connected plan");
+
+    // The required stage's only offer fails its dtype check. Evaluating that
+    // requirement would return IncompatibleCapability. A fallback named on a
+    // different stage, without prefer(), must be rejected first.
+    let err = CapabilityNegotiation::new(FallbackPolicy::AllowNamed)
+        .offer(
+            BackendId::new("ann"),
+            BackendCapabilities::ann("ann").with_dtypes([Dtype::F16]),
+        )
+        .fallback_to(unused, BackendId::new("ann"))
+        .negotiate(&plan, &[requirement_ann(required, 4, 2)])
+        .expect_err("fallback without prefer must be rejected before selection");
+    match err {
+        PlanError::InvalidParameters(reason) => {
+            assert!(
+                reason.contains("without prefer"),
+                "malformed fallback was not the rejection reason: {reason}"
+            );
+        }
+        other => panic!("requirement was evaluated before the malformed preference: {other:?}"),
+    }
+}
+
+#[test]
+fn unknown_feature_name_matches_no_report_that_omits_it() {
+    let mut graph = StageGraph::new();
+    let stage = snn_stage(&mut graph, "spikes", 4);
+    let plan = graph.compile().unwrap();
+    let unknown = RequiredFeature::new("not-a-real-feature");
+    let differently_cased = RequiredFeature::new("Not-A-Real-Feature");
+    let base = BackendCapabilities::snn("snn")
+        .with_dtypes([Dtype::F32])
+        .with_channels(4)
+        .with_reset(true)
+        .with_stateful(true)
+        .with_features([RequiredFeature::new("step")]);
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(BackendId::new("snn"), base.clone())
+        .negotiate(
+            &plan,
+            &[requirement_snn(stage, 4).with_feature(unknown.clone())],
+        )
+        .expect_err("a report that omits an unknown feature must not match it");
+    match err {
+        PlanError::UnsupportedFeature { feature, .. } => {
+            assert_eq!(feature.as_str(), "not-a-real-feature");
+        }
+        other => panic!("unknown feature was accepted or mis-classified: {other:?}"),
+    }
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("snn"),
+            base.clone()
+                .with_features([RequiredFeature::new("step"), differently_cased]),
+        )
+        .negotiate(
+            &plan,
+            &[requirement_snn(stage, 4).with_feature(unknown.clone())],
+        )
+        .expect_err("feature names are exact, including case");
+    assert!(
+        matches!(
+            err,
+            PlanError::UnsupportedFeature { ref feature, .. } if feature.as_str() == "not-a-real-feature"
+        ),
+        "case-differing feature was treated as a match: {err:?}"
+    );
+
+    let report = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(
+            BackendId::new("snn"),
+            base.with_features([RequiredFeature::new("step"), unknown]),
+        )
+        .negotiate(
+            &plan,
+            &[requirement_snn(stage, 4).with_feature(RequiredFeature::new("not-a-real-feature"))],
+        )
+        .expect("the same unknown name listed on the report matches");
+    assert_eq!(
+        report.selection(stage),
+        Some(&NegotiationOutcome::Selected(BackendId::new("snn")))
+    );
+}
+
+#[test]
+fn forbid_policy_never_substitutes_a_named_fallback() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 2);
+    let plan = graph.compile().unwrap();
+    let preferred = BackendCapabilities::ann("preferred")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(8);
+    let fallback = BackendCapabilities::ann("fallback")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(8)
+        .with_features([RequiredFeature::new("reference-embedding")]);
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
+        .offer(BackendId::new("preferred"), preferred)
+        .offer(BackendId::new("fallback"), fallback)
+        .prefer(stage, BackendId::new("preferred"))
+        .fallback_to(stage, BackendId::new("fallback"))
+        .negotiate(&plan, &[requirement_ann(stage, 4, 2)])
+        .expect_err("Forbid must not select the named fallback");
+    match err {
+        PlanError::IncompatibleCapability { field, .. } => assert_eq!(field, "hidden_dim"),
+        other => panic!("Forbid substituted or fell through: {other:?}"),
+    }
+}
+
+#[test]
+fn allow_named_absent_fallback_does_not_fall_through() {
+    let mut graph = StageGraph::new();
+    let stage = ann_stage(&mut graph, "tower", 4, 2);
+    let plan = graph.compile().unwrap();
+    let preferred = BackendCapabilities::ann("preferred").with_dtypes([Dtype::F16]);
+    let other = BackendCapabilities::ann("other")
+        .with_dtypes([Dtype::F32])
+        .with_hidden_dim(4)
+        .with_max_sequence(8)
+        .with_features([RequiredFeature::new("reference-embedding")]);
+
+    let err = CapabilityNegotiation::new(FallbackPolicy::AllowNamed)
+        .offer(BackendId::new("preferred"), preferred)
+        .offer(BackendId::new("other"), other)
+        .prefer(stage, BackendId::new("preferred"))
+        .fallback_to(stage, BackendId::new("missing"))
+        .negotiate(&plan, &[requirement_ann(stage, 4, 2)])
+        .expect_err("an absent named fallback must not select another offer");
+    match err {
+        PlanError::UnsupportedBackend {
+            stage: got,
+            domain,
+            reason,
+        } => {
+            assert_eq!(got, stage);
+            assert_eq!(domain, ExecutionDomain::Ann);
+            assert!(
+                reason.contains("named fallback 'missing' was not offered"),
+                "absent fallback was not named: {reason}"
+            );
+        }
+        other => panic!("absent fallback fell through: {other:?}"),
     }
 }
 
