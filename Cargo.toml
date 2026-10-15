@@ -2,14 +2,34 @@
 name = "hybrid-fusion"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.98.1"
+# Development toolchain and MSRV are the same pin. Keep this equal to
+# `rust-toolchain.toml` `channel`, `smoke/cortex-neuromod` `rust-version`,
+# the CI MSRV job, and `.agents/setup`. The CI validate job stays on the
+# `stable` channel.
+rust-version = "1.99.0"
 description = "Backend-agnostic pure-Rust orchestrator for hybrid transformer <-> spiking neural network stacks. Trait-based, zero external math dependencies."
 repository = "https://github.com/rmems/hybrid-fusion"
 license = "MIT OR Apache-2.0"
 keywords = ["neuromorphic", "snn", "llm", "transformer", "hybrid"]
 categories = ["science", "algorithms"]
 readme = "README.md"
-exclude = ["docs/"]
+# crates.io surface: licenses, README, changelog, user docs, sources,
+# examples, and tests. Drop agent/CI/dev-only paths and the unpublished
+# smoke harness (it pins cortex-tensor by git and must not be packaged).
+# `docs/superpowers/` is agent planning history; `docs/implementing-backends.md`
+# and `docs/extraction-map.md` stay. `rust-toolchain.toml` stays in git so
+# local builds use the pinned toolchain; MSRV for dependents is `rust-version`.
+exclude = [
+    "/.agents/",
+    "/.coderabbit.yaml",
+    "/.github/",
+    "/.gitignore",
+    "/AGENTS.md",
+    "/REVIEW.md",
+    "/docs/superpowers/",
+    "/rust-toolchain.toml",
+    "/smoke/",
+]
 
 [lib]
 name = "hybrid_fusion"

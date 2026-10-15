@@ -110,11 +110,17 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - `NeuromodSnn::reset` also restores initial LIF thresholds (RM-1940).
   Upstream reset preserves reward-retuned thresholds; restoring only weights
   could change borderline fired IDs after reset/reseed versus a fresh run.
-- Declared MSRV `rust-version = "1.98.1"` (required by neuromod 0.7). Cargo has
-  no per-feature MSRV, so this applies to **all** builds, including the default
-  dependency-light build, not only when the `neuromod` feature is enabled. The
-  `neuromod` dependency and its transitive `rand` still stay out of the default
-  build ([#44](https://github.com/rmems/hybrid-fusion/issues/44)).
+- Declared MSRV `rust-version = "1.99.0"`, matching `rust-toolchain.toml`,
+  the smoke harness, and the CI MSRV job (Linear RM-2050). neuromod 0.7
+  originally required 1.98.1; Cargo has no per-feature MSRV, so the floor
+  applies to **all** builds, including the default dependency-light build.
+  The `neuromod` dependency and its transitive `rand` still stay out of the
+  default build ([#44](https://github.com/rmems/hybrid-fusion/issues/44)).
+- Package `exclude` now drops agent, CI, and review-only paths
+  (`.agents/`, `.github/`, `.coderabbit.yaml`, `AGENTS.md`, `REVIEW.md`,
+  `rust-toolchain.toml`, `docs/superpowers/`, `smoke/`) and keeps
+  `docs/implementing-backends.md` and `docs/extraction-map.md` in the
+  published crate.
 - Demoted `SimpleSnn` (under the `backends` feature) to a reference/mock-only
   backend. Its behavior, code, and tests are unchanged; the documentation now
   states it is a deterministic mock for tests and examples, not a neuron-dynamics

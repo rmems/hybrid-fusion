@@ -1,0 +1,6 @@
+# Development toolchain and MSRV are the same pin. Keep `channel` equal to
+# Cargo.toml `rust-version`, smoke/cortex-neuromod `rust-version`, the CI
+# MSRV job, and `.agents/setup`. The CI validate job stays on `stable`.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
