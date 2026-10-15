@@ -16,6 +16,10 @@ jobs:
   validate:
     name: Build & Test
     runs-on: ubuntu-latest
+    # rust-toolchain.toml overrides `rustup default`. This job must keep
+    # floating stable; the MSRV job keeps the file's pin.
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
