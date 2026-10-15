@@ -30,9 +30,10 @@
 //!   F32 only. Cortex's dtype set is F32, F16, and BF16.
 //! - This report does not mirror `AnnCapabilities::supported_tags`. Those tags
 //!   are stage kinds (Embedding, Attention, LayerNorm, RmsNorm, DenseMlp,
-//!   GatedMlp, MoeRouter, MoeExpert, Add, Readout, Custom). Stage-kind
-//!   coverage stays on the compiled plan. Translating a live cortex
-//!   `AnnExecutor` into this report is RM-1831.
+//!   GatedMlp, MoeRouter, MoeExpert, Add, Readout, Custom). The compiled plan
+//!   records each stage's kind. Negotiation does not ask a backend whether it
+//!   can execute that kind. Translating a live cortex `AnnExecutor` into this
+//!   report is RM-1831.
 //! - `stateful` has the same meaning as `AnnCapabilities::stateful`: execute /
 //!   step mutates backend state across calls. Cortex's reference executor
 //!   reports `stateful: false` and `backend_name` `"reference"`.
