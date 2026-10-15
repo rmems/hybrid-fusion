@@ -19,22 +19,34 @@
 //! never produced findings. Its only agent session died on a GitHub rate limit
 //! on 2026-09-15 and was not relaunched (Linear comment, 2026-09-18). There is
 //! therefore no audit finding list to port. The contract here is the one #41
-//! asked for, aligned with the capability reports cortex-tensor already
-//! publishes (`SnnCapabilities` / `AnnCapabilities` in `rmems/cortex-tensor`
-//! `src/snn/mod.rs` and `src/stage.rs`):
+//! asked for, checked against the capability reports cortex-tensor publishes
+//! (`SnnCapabilities` in `src/snn/mod.rs`, `AnnCapabilities` in `src/stage.rs`):
 //!
-//! - `backend_name` is a static identity string, matching
-//!   `"neuromod::SpikingNetwork"` on the SNN side.
-//! - Supported dtypes and stage features are explicit sets, matching
-//!   `supported_dtypes` / `supported_tags`.
-//! - `stateful` matches `AnnCapabilities.stateful`.
-//! - Reset, caller-controlled RNG, plasticity, neuromodulation, and frozen
-//!   evaluation are optional features, matching the boolean flags on
-//!   `SnnCapabilities` (`caller_rng`, `plasticity`, `neuromodulation`,
-//!   `frozen_evaluation`) rather than a second parallel vocabulary.
-//! - Device reporting is intentionally a hint, not a selector: cortex-tensor
-//!   omits a device field pending separate work, and this crate does not
-//!   manage devices either.
+//! - `backend_name` is a static identity string. Cortex's neuromod adapter
+//!   (`NeuromodNetwork`) reports `"neuromod::SpikingNetwork"`. This crate's
+//!   neuromod adapter uses that same string.
+//! - `dtypes` is an explicit set, corresponding to
+//!   `AnnCapabilities::supported_dtypes`. The reference executor advertises
+//!   F32 only. Cortex's dtype set is F32, F16, and BF16.
+//! - This report does not mirror `AnnCapabilities::supported_tags`. Those tags
+//!   are stage kinds (Embedding, Attention, LayerNorm, RmsNorm, DenseMlp,
+//!   GatedMlp, MoeRouter, MoeExpert, Add, Readout, Custom). Stage-kind
+//!   coverage stays on the compiled plan. Translating a live cortex
+//!   `AnnExecutor` into this report is RM-1831.
+//! - `stateful` has the same meaning as `AnnCapabilities::stateful`: execute /
+//!   step mutates backend state across calls. Cortex's reference executor
+//!   reports `stateful: false` and `backend_name` `"reference"`.
+//! - `caller_rng`, `plasticity`, `neuromodulation`, and `frozen_evaluation`
+//!   are the boolean flags on `SnnCapabilities`. Cortex's neuromod adapter
+//!   reports the first three true and `frozen_evaluation` false. This crate
+//!   spells the three true flags as [`RequiredFeature`] names and leaves
+//!   `frozen_evaluation` absent. `reset` is not one of those flags: cortex
+//!   requires `SnnBackend::reset` on every backend, while this crate keeps
+//!   reset optional because the trait default returns an unsupported-operation
+//!   error.
+//! - Device reporting is a hint, not a selector. Neither `AnnCapabilities` nor
+//!   `SnnCapabilities` has a device field, and this crate does not manage
+//!   devices either.
 //!
 //! Translating a live cortex `AnnExecutor` into this report is RM-1831, not
 //! this issue.
