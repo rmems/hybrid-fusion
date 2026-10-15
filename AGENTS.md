@@ -1,6 +1,6 @@
 # AGENTS.md — hybrid-fusion
 
-**Version:** 0.3.0 (last updated 2026-09-22)
+**Version:** 0.3.0 (last updated 2026-10-15)
 
 Context file for AI coding agents working in this repository.
 
@@ -42,13 +42,14 @@ implementations live here.
 - Projector logic (dimensionality reduction from transformer hidden space to SNN input channels)
 - Configuration and output types (`HybridConfig`, `TransformerConfig`, `HybridOutput`)
 - Reverse-path host `ReverseHybridPath` (activity → embedding → ExpertRouter)
+- Neutral planning topology (`AnnTopology`, `SnnTopology`, `HybridTopology`) and execution plans compiled from it
 
 ### This crate does not own
 
 | Concern | Owned by |
 |---|---|
 | Tensor / transformer math | `cortex-tensor` |
-| GGUF / Safetensors model parsing | `engram-parser` |
+| GGUF / Safetensors parsing, mmap, layout discovery, tensor roles, and topology discovery | `engram-parser` (sole checkpoint-format owner) |
 | SNN neuron dynamics (leaky integrate-and-fire (LIF), Izhikevich) | `neuromod` |
 | SNN runtime / scheduling | `brainstem-daemon` |
 | Neuromodulator mapping / critic signals | `limbic-critic` |
@@ -65,10 +66,11 @@ Core traits / types on the pluggable surface:
 
 - **`Transformer`** — produces hidden-state tensors from token IDs. Implementations live in downstream crates (e.g. `cortex-tensor`).
 - **`SpikingNetwork`** — steps the SNN forward given stimuli + neuromodulator state, returns fired neuron indices. Implementations live in `neuromod` / `brainstem-daemon`.
-- **`GgufLoader`** / **`SafetensorsLoader`** — checkpoint layout contracts (GGUF + Safetensors). Implementations live in `engram-parser`.
+- **`AnnTopology`** / **`SnnTopology`** / **`HybridTopology`** / **`TopologySource`** — format-neutral planning input. ANN dimensions may come from a `TopologySource`. SNN dimensions are caller-supplied. This crate does not open checkpoint files.
+- **`GgufLoader`** / **`SafetensorsLoader`** — deprecated compatibility shims. Checkpoint parsing, mmap, layout discovery, tensor roles, and topology discovery belong to `engram-parser`. Do not add a new loader abstraction here. Migration: [docs/implementing-backends.md](docs/implementing-backends.md#migrating-off-format-specific-loaders).
 - **`ExpertRouter`** + **`SpikeActivity`** — reverse-path MoE routing contract (embedding → expert weights / selection). Pure math lives in `src/routing.rs`; checkpoint backends stay outside this crate.
 
-`HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits; `GgufLoader` / `SafetensorsLoader` / `ExpertRouter` are consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above.
+`HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits. Planning consumes `HybridTopology` and does not require a GGUF or Safetensors loader. `ExpertRouter` is consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above.
 
 `ReverseHybridPath<R: ExpertRouter>` is the dual reverse-path host (SNN activity →
 project → MoE); do not fold it into `HybridNetwork` generics.
@@ -79,7 +81,7 @@ project → MoE); do not fold it into `HybridNetwork` generics.
 |---|---|
 | `neuromod` | SNN neuron dynamics (LIF, Izhikevich models) |
 | `cortex-tensor` | Tensor math and transformer inference |
-| `engram-parser` | GGUF and Safetensors file parsing and model layout extraction |
+| `engram-parser` | Sole checkpoint-format owner: GGUF and Safetensors parsing, mmap, layout discovery, tensor roles, and topology discovery |
 | `brainstem-daemon` | SNN runtime scheduling and execution |
 | `limbic-critic` | Neuromodulator-to-critic signal mapping |
 | `axon-encoder` | Sensory input encoding |

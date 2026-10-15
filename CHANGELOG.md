@@ -10,6 +10,22 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- Format-neutral planning topology: `AnnTopology`, `SnnTopology`,
+  `HybridTopology`, and `TopologySource`, plus
+  `HybridExecutionPlan::from_topology` and `from_reverse_topology`. Planning
+  reads hidden width, maximum sequence length, SNN input channels, and SNN
+  output population. It has no checkpoint-format dependency. Programmatic and
+  mock topology need no checkpoint file and no engram-parser crate.
+  `TopologySource` is the integration point for a future engram-parser
+  topology adapter. `AnnTopology.architecture` is descriptive and does not
+  change the compiled plan
+  ([#42](https://github.com/rmems/hybrid-fusion/issues/42)).
+- **BREAKING**: `PlanError` gains `InvalidTopology { field, reason }`
+  (exhaustive enum; downstream `match` arms must be updated). `field` is a
+  stable discriminator (`hidden_dim`, `max_seq_len`, `input_channels`,
+  `output_population`), matched the same way as `IncompatibleCapability.field`.
+  `HybridError::ExecutionPlan` carries the variant
+  ([#42](https://github.com/rmems/hybrid-fusion/issues/42)).
 - `BackendCapabilities` plus `CapabilityNegotiation`: ANN and SNN traits expose
   a side-effect-free capability report, and a compiled `HybridExecutionPlan`
   can be checked against offered backends before execution. Unsupported
@@ -92,6 +108,20 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   expose them without changing numerical execution (RM-1804, #40).
 - **BREAKING**: `HybridError` gains `ExecutionPlan(#[from] PlanError)`
   (exhaustive enum; downstream `match` arms must be updated) (RM-1804, #40).
+
+### Deprecated
+
+- `GgufLoader`, `GgufLayout`, `SafetensorsLoader`, and `SafetensorsLayout` are
+  deprecated since 0.4.0. Signatures, public fields, `SafetensorsLayout::new`,
+  ordered `entries_with_role`, deserialization count normalization, and serde
+  wire behavior are unchanged. Parse checkpoints with engram-parser. Pass
+  `AnnTopology` or `HybridTopology` into planning. SNN topology stays
+  caller-supplied. Removal is a later minor release, no earlier than the
+  release after engram-parser publishes its topology API. See
+  [Migrating off format-specific loaders](docs/implementing-backends.md#migrating-off-format-specific-loaders).
+  `TensorRole`, `TensorManifestEntry`, and `Dtype` stay as legacy inventory
+  helpers and are not deprecated
+  ([#42](https://github.com/rmems/hybrid-fusion/issues/42)).
 
 ### Changed
 

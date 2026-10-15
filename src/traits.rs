@@ -118,10 +118,30 @@ impl Default for NeuroModulators {
     }
 }
 
+/// Deprecated compatibility shim for a GGUF checkpoint layout.
+///
+/// Parsing, mmap, and layout discovery belong to `engram-parser`. Planning
+/// input is [`AnnTopology`](crate::AnnTopology) or
+/// [`HybridTopology`](crate::HybridTopology). See the migration guide in
+/// `docs/implementing-backends.md`.
+#[deprecated(
+    since = "0.4.0",
+    note = "parse checkpoints with engram-parser; plan from AnnTopology or HybridTopology"
+)]
+#[allow(deprecated)]
 pub trait GgufLoader {
     fn load(&self, path: &str) -> Result<GgufLayout>;
 }
 
+/// Deprecated compatibility shim for a GGUF header summary.
+///
+/// Parsing belongs to `engram-parser`. Planning input is
+/// [`AnnTopology`](crate::AnnTopology) or [`HybridTopology`](crate::HybridTopology).
+#[deprecated(
+    since = "0.4.0",
+    note = "parse checkpoints with engram-parser; plan from AnnTopology or HybridTopology"
+)]
+#[allow(deprecated)]
 pub struct GgufLayout {
     pub architecture: String,
     pub tensor_count: usize,
@@ -129,10 +149,11 @@ pub struct GgufLayout {
 
 /// Safetensors / Hugging Face shard-index onboarding contract.
 ///
-/// Extension point for checkpoint inventory — **not** called by
-/// [`HybridNetwork::forward`](crate::HybridNetwork::forward). Concrete header
-/// parse, mmap, and payload extract live in `engram-parser` (off-by-default
-/// `safetensors` feature). This crate owns the layout types only.
+/// **Deprecated.** Extension point kept as a compatibility shim — **not**
+/// called by [`HybridNetwork::forward`](crate::HybridNetwork::forward).
+/// Concrete header parse, mmap, layout discovery, and payload extract belong
+/// to `engram-parser`. Planning input is [`AnnTopology`](crate::AnnTopology)
+/// or [`HybridTopology`](crate::HybridTopology).
 ///
 /// Symmetric to [`GgufLoader`]: one method, path in, layout out. Reuse
 /// [`HybridError::ModelLoad`](crate::HybridError::ModelLoad),
@@ -140,6 +161,11 @@ pub struct GgufLayout {
 /// [`MissingTensor`](crate::HybridError::MissingTensor), and
 /// [`SafetensorsParse`](crate::HybridError::SafetensorsParse) — do not add a
 /// second competing Safetensors symbol.
+#[deprecated(
+    since = "0.4.0",
+    note = "parse checkpoints with engram-parser; plan from AnnTopology or HybridTopology"
+)]
+#[allow(deprecated)]
 pub trait SafetensorsLoader {
     /// Inventory a Safetensors file or Hugging Face shard index at `path`.
     ///
@@ -161,10 +187,17 @@ pub trait SafetensorsLoader {
 
 /// Header-only Safetensors inventory (name, dtype, shape, shard refs, roles).
 ///
-/// Richer than [`GgufLayout`] so MoE candidate discovery can stay
-/// format-agnostic at the orchestration layer. `tensor_count` equals
-/// `tensors.len()` after [`SafetensorsLayout::new`] and after deserialization
-/// (a mismatched `tensor_count` in JSON is recomputed from `tensors`).
+/// **Deprecated** compatibility shim. Richer than [`GgufLayout`] so existing
+/// manifests keep their shape. `tensor_count` equals `tensors.len()` after
+/// [`SafetensorsLayout::new`] and after deserialization (a mismatched
+/// `tensor_count` in JSON is recomputed from `tensors`). Checkpoint opening
+/// belongs to `engram-parser`; planning input is
+/// [`HybridTopology`](crate::HybridTopology).
+#[deprecated(
+    since = "0.4.0",
+    note = "parse checkpoints with engram-parser; plan from AnnTopology or HybridTopology"
+)]
+#[allow(deprecated)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "SafetensorsLayoutDe")]
 pub struct SafetensorsLayout {
@@ -176,6 +209,7 @@ pub struct SafetensorsLayout {
     pub tensors: Vec<TensorManifestEntry>,
 }
 
+#[allow(deprecated)]
 impl SafetensorsLayout {
     /// Build a layout and set [`tensor_count`](Self::tensor_count) from the
     /// manifest length.
@@ -208,6 +242,7 @@ struct SafetensorsLayoutDe {
     tensors: Vec<TensorManifestEntry>,
 }
 
+#[allow(deprecated)]
 impl From<SafetensorsLayoutDe> for SafetensorsLayout {
     fn from(raw: SafetensorsLayoutDe) -> Self {
         Self::new(raw.architecture, raw.tensors)
@@ -334,6 +369,7 @@ pub trait ExpertRouter {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::error::HybridError;

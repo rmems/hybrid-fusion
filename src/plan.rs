@@ -16,8 +16,10 @@
 //! Capability negotiation lives in [`crate::capabilities`]: a compiled plan is
 //! the structural input, and [`crate::CapabilityNegotiation`] checks offered
 //! [`crate::BackendCapabilities`] against per-stage requirements before any
-//! backend runs. This module still does not model devices, checkpoint parsing,
-//! neuron dynamics, or model-family policy.
+//! backend runs. Format-neutral dimensions enter through
+//! [`crate::HybridTopology`]. This module still does not model devices,
+//! checkpoint parsing, neuron dynamics, or model-family policy, and a compiled
+//! plan is a description: it is not connected to host execution.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -25,6 +27,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::topology::{AnnTopology, HybridTopology, SnnTopology};
 use crate::types::{Dtype, HybridConfig, ProjectionMode};
 
 // ── Identifiers ─────────────────────────────────────────────────────────────
@@ -442,6 +445,23 @@ pub enum PlanError {
     /// (e.g. zero-valued dimensions).
     #[error("invalid plan parameters: {0}")]
     InvalidParameters(String),
+
+    /// Topology input is absent or not a positive dimension.
+    ///
+    /// `field` is a stable discriminator
+    /// ([`crate::AnnTopology::FIELD_HIDDEN_DIM`],
+    /// [`crate::AnnTopology::FIELD_MAX_SEQ_LEN`],
+    /// [`crate::SnnTopology::FIELD_INPUT_CHANNELS`],
+    /// [`crate::SnnTopology::FIELD_OUTPUT_POPULATION`]),
+    /// not a display sentence. Match `field` rather than the Display text, the
+    /// same convention as [`Self::IncompatibleCapability`]'s `field`.
+    #[error("invalid topology field '{field}': {reason}")]
+    InvalidTopology {
+        /// Stable field name. Match this, not the Display text.
+        field: &'static str,
+        /// Why the field cannot be used for planning.
+        reason: String,
+    },
 
     /// No offered backend can run `stage` in `domain`.
     ///
@@ -993,9 +1013,83 @@ impl HybridExecutionPlan {
     ///
     /// This is a **description** of the current semantics, not a replacement:
     /// numerical execution still lives in `HybridNetwork::forward`. Stage
-    /// contracts are derived from `config` (`transformer.dim`,
-    /// `snn_input_channels`, `snn_lif_neurons`). For an injected backend use
+    /// contracts come from `topology` (hidden width, sequence window, SNN
+    /// input channels, SNN output population). `architecture` is not copied
+    /// into the plan. For an injected backend use
     /// `HybridNetwork::execution_plan`, which reads its actual output population.
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError::InvalidTopology`] when any topology dimension is `0`,
+    /// including a value mutated after [`HybridTopology::new`].
+    pub fn from_topology(topology: &HybridTopology) -> std::result::Result<Self, PlanError> {
+        let topology = HybridTopology::new(topology.ann.clone(), topology.snn.clone())?;
+        let hidden_dim = topology.ann.hidden_dim;
+        let max_seq_len = topology.ann.max_seq_len;
+        let input_channels = topology.snn.input_channels;
+        let output_population = topology.snn.output_population;
+
+        let mut g = StageGraph::new();
+        let ann = g.add_stage(
+            "ann.transformer",
+            StageKind::Transformer,
+            // token_ids: [seq] of u32
+            PortSpec {
+                dtype: Some(Dtype::U32),
+                dims: vec![DimSpec::Symbolic("seq".into())],
+            },
+            // hidden states: the Transformer contract accepts two f32
+            // layouts — canonical rank-2 [seq, dim] and pre-pooled rank-1
+            // [dim] — so the port keeps rank unconstrained and records the
+            // accepted layouts in attrs instead of asserting [seq, dim].
+            PortSpec::f32(vec![]),
+        );
+        g.set_attr(ann, "role", "transformer.hidden_states");
+        g.set_attr(ann, "accepted_layouts", "[dim] | [seq, dim]");
+        g.set_attr(ann, "last_axis", hidden_dim.to_string());
+        g.set_attr(ann, "max_sequence", max_seq_len.to_string());
+
+        let adapt = g.add_stage(
+            "adapt.project_stimuli",
+            StageKind::Adaptation,
+            // mirrors the transformer's accepted hidden-state layouts
+            PortSpec::f32(vec![]),
+            // bounded stimuli in [-1, 1] via projector tanh
+            PortSpec::f32_exact(&[input_channels]),
+        );
+        g.set_attr(adapt, "role", "projector::embed_to_stimuli_with_width");
+        g.set_attr(adapt, "hidden_dim", hidden_dim.to_string());
+        g.set_attr(adapt, "output_bounds", "[-1,1]");
+
+        let snn = g.add_stage(
+            "snn.step",
+            StageKind::SpikingBlock,
+            PortSpec::f32_exact(&[input_channels]),
+            // fired neuron indices: Vec<usize> — pointer-width dependent, so
+            // no concrete dtype is claimed.
+            PortSpec::any(),
+        );
+        g.set_attr(snn, "role", "spiking_network.step");
+        g.set_attr(snn, "output_contract", "fired_neurons: Vec<usize>");
+        g.set_attr(snn, "num_neurons", output_population.to_string());
+        g.set_attr(snn, "fired_id_domain", "0..num_neurons");
+        // step also consumes caller-supplied NeuroModulators alongside the
+        // stimulus tensor (see HybridNetwork::forward signature).
+        g.set_attr(snn, "aux_inputs", "NeuroModulators");
+
+        g.connect(ann, adapt);
+        g.connect(adapt, snn);
+        g.compile()
+    }
+
+    /// Plan describing the existing [`crate::HybridNetwork`] forward flow,
+    /// derived from the four dimensions [`from_topology`](Self::from_topology)
+    /// reads.
+    ///
+    /// This is a **description** of the current semantics, not a replacement:
+    /// numerical execution still lives in `HybridNetwork::forward`. For an
+    /// injected backend use `HybridNetwork::execution_plan`, which reads its
+    /// actual output population.
     ///
     /// # Errors
     ///
@@ -1017,61 +1111,32 @@ impl HybridExecutionPlan {
                 config.snn_lif_neurons
             )));
         }
-        let mut g = StageGraph::new();
-        let ann = g.add_stage(
-            "ann.transformer",
-            StageKind::Transformer,
-            // token_ids: [seq] of u32
-            PortSpec {
-                dtype: Some(Dtype::U32),
-                dims: vec![DimSpec::Symbolic("seq".into())],
-            },
-            // hidden states: the Transformer contract accepts two f32
-            // layouts — canonical rank-2 [seq, dim] and pre-pooled rank-1
-            // [dim] — so the port keeps rank unconstrained and records the
-            // accepted layouts in attrs instead of asserting [seq, dim].
-            PortSpec::f32(vec![]),
-        );
-        g.set_attr(ann, "role", "transformer.hidden_states");
-        g.set_attr(ann, "accepted_layouts", "[dim] | [seq, dim]");
-        g.set_attr(ann, "last_axis", config.transformer.dim.to_string());
-        g.set_attr(
-            ann,
-            "max_sequence",
-            config.transformer.max_seq_len.to_string(),
-        );
+        let topology = HybridTopology::new(
+            AnnTopology::new(config.transformer.dim, config.transformer.max_seq_len, None)?,
+            SnnTopology::new(config.snn_input_channels, config.snn_lif_neurons)?,
+        )?;
+        Self::from_topology(&topology)
+    }
 
-        let adapt = g.add_stage(
-            "adapt.project_stimuli",
-            StageKind::Adaptation,
-            // mirrors the transformer's accepted hidden-state layouts
-            PortSpec::f32(vec![]),
-            // bounded stimuli in [-1, 1] via projector tanh
-            PortSpec::f32_exact(&[config.snn_input_channels]),
-        );
-        g.set_attr(adapt, "role", "projector::embed_to_stimuli_with_width");
-        g.set_attr(adapt, "hidden_dim", config.transformer.dim.to_string());
-        g.set_attr(adapt, "output_bounds", "[-1,1]");
-
-        let snn = g.add_stage(
-            "snn.step",
-            StageKind::SpikingBlock,
-            PortSpec::f32_exact(&[config.snn_input_channels]),
-            // fired neuron indices: Vec<usize> — pointer-width dependent, so
-            // no concrete dtype is claimed.
-            PortSpec::any(),
-        );
-        g.set_attr(snn, "role", "spiking_network.step");
-        g.set_attr(snn, "output_contract", "fired_neurons: Vec<usize>");
-        g.set_attr(snn, "num_neurons", config.snn_lif_neurons.to_string());
-        g.set_attr(snn, "fired_id_domain", "0..num_neurons");
-        // step also consumes caller-supplied NeuroModulators alongside the
-        // stimulus tensor (see HybridNetwork::forward signature).
-        g.set_attr(snn, "aux_inputs", "NeuroModulators");
-
-        g.connect(ann, adapt);
-        g.connect(adapt, snn);
-        g.compile()
+    /// Reverse-path plan from neutral topology.
+    ///
+    /// `hidden_dim` is the embedding width and `output_population` is the
+    /// neuron population. SNN input channels and the architecture label are
+    /// not copied into the plan. Delegates to [`from_reverse_path`](Self::from_reverse_path).
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError::InvalidTopology`] when any topology dimension is `0`.
+    pub fn from_reverse_topology(
+        topology: &HybridTopology,
+        mode: ProjectionMode,
+    ) -> std::result::Result<Self, PlanError> {
+        let topology = HybridTopology::new(topology.ann.clone(), topology.snn.clone())?;
+        Self::from_reverse_path(
+            mode,
+            topology.snn.output_population,
+            topology.ann.hidden_dim,
+        )
     }
 
     /// Plan describing the existing [`crate::ReverseHybridPath`] flow:

@@ -20,7 +20,10 @@ Copy-paste this into every PR review:
 
 - [ ] No concrete `cortex-tensor`, `neuromod`, or backend-specific types in public API
 - [ ] Pluggable surface stays trait/type contracts: `Transformer`, `SpikingNetwork`,
-      `GgufLoader`, `SafetensorsLoader`, `ExpertRouter`, `SpikeActivity` (plus config/output types)
+      `ExpertRouter`, `SpikeActivity`, and neutral planning topology
+      (`HybridTopology`, `TopologySource`). `GgufLoader` / `SafetensorsLoader`
+      are deprecated compatibility shims; do not add a new loader abstraction
+      (plus config/output types)
 - [ ] No new `use` statements pulling in concrete backend crates
 - [ ] Public types are generic over trait bounds, not pinned to implementations
 - [ ] Reverse-path MoE: pure routing math / types here; mmap loaders and gate matmul

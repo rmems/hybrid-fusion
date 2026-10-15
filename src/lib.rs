@@ -13,6 +13,7 @@ pub mod reverse;
 pub mod routing;
 pub mod telemetry;
 pub mod tensor;
+pub mod topology;
 pub mod traits;
 pub mod types;
 mod validate;
@@ -34,10 +35,12 @@ pub use routing::{
     top_k_indices,
 };
 pub use tensor::Tensor;
+pub use topology::{AnnTopology, HybridTopology, SnnTopology, TopologySource};
 pub use traits::{
-    ExpertRouteOutput, ExpertRouter, GgufLayout, GgufLoader, NeuroModulators, SafetensorsLayout,
-    SafetensorsLoader, SpikeActivity, SpikingNetwork, Transformer,
+    ExpertRouteOutput, ExpertRouter, NeuroModulators, SpikeActivity, SpikingNetwork, Transformer,
 };
+#[allow(deprecated)]
+pub use traits::{GgufLayout, GgufLoader, SafetensorsLayout, SafetensorsLoader};
 pub use types::{
     Dtype, HybridConfig, HybridOutput, ProjectionMode, TensorManifestEntry, TensorRole,
     TransformerConfig,
