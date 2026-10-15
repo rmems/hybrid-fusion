@@ -194,10 +194,34 @@ fn mock_source_missing_value_does_not_infer_a_plan() {
 fn reverse_topology_matches_reverse_path() {
     let topology = sample_topology();
     let from_topology =
-        HybridExecutionPlan::from_reverse_topology(&topology, ProjectionMode::RateSum).unwrap();
+        HybridExecutionPlan::from_reverse_topology(&topology, ProjectionMode::RateSum, 128)
+            .unwrap();
     let from_path =
         HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 11, 128).unwrap();
     assert_eq!(from_topology, from_path);
+}
+
+#[test]
+fn reverse_embedding_width_is_independent_of_ann_hidden_width() {
+    let topology = sample_topology();
+    assert_eq!(topology.ann.hidden_dim, 128);
+    let plan =
+        HybridExecutionPlan::from_reverse_topology(&topology, ProjectionMode::RateSum, 48).unwrap();
+    let project = plan.stage_by_name("adapt.project_activity").unwrap();
+    assert_eq!(project.output, PortSpec::f32_exact(&[48]));
+    let router = plan.stage_by_name("moe.router").unwrap();
+    assert_eq!(router.input, PortSpec::f32_exact(&[48]));
+    assert_eq!(
+        plan.stage_by_name("snn.activity")
+            .unwrap()
+            .attrs
+            .get("n_neurons")
+            .map(String::as_str),
+        Some("11")
+    );
+    let followed_ann_width =
+        HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 11, 128).unwrap();
+    assert_ne!(plan, followed_ann_width);
 }
 
 #[test]

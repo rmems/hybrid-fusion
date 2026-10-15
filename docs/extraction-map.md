@@ -61,9 +61,10 @@ SpikeActivity → ProjectionMode → ExpertRouter (MoE)
 
 Checkpoint inventory for MoE onboarding stays **format-agnostic** at the
 orchestration layer. The v0.3 loader contracts (`GgufLoader`,
-`SafetensorsLoader` / `SafetensorsLayout` / `TensorRole`,
+`SafetensorsLoader` / `SafetensorsLayout`,
 [#27](https://github.com/rmems/hybrid-fusion/issues/27) — landed) are now
-deprecated compatibility shims. Planning consumes `HybridTopology`.
+deprecated compatibility shims. `TensorRole` is a legacy inventory helper and
+is not deprecated. Planning consumes `HybridTopology`.
 engram-parser is the sole checkpoint-format owner.
 
 ---
@@ -97,7 +98,7 @@ inventory talk to layout types, not payload parsers.
 | Source module | Local path | Target hybrid-fusion type/trait | Owner crate | Issue | Notes |
 |---------------|------------|----------------------------------|-------------|-------|-------|
 | GGUF layout façade | hybrid-fusion `GgufLoader` / `GgufLayout` (deprecated); corinth-canal `src/moe/gguf/` | do not extend the loader; planning uses `HybridTopology` | **engram-parser** (parse/mmap/dequant/topology) | existing | Concrete GGUF stays out of this crate. Shim remains until removal. |
-| Safetensors header inspect / manifest | corinth-canal `src/moe/safetensors.rs`, `moe/safetensors/discovery.rs` | **`SafetensorsLoader` + `SafetensorsLayout` / `TensorManifestEntry`** landed for [#27](https://github.com/rmems/hybrid-fusion/issues/27) and are now deprecated shims | **engram-parser** (parse/mmap/layout/topology) | [#27](https://github.com/rmems/hybrid-fusion/issues/27) (landed), [#42](https://github.com/rmems/hybrid-fusion/issues/42) | Superseded (RM-1806 / #42): do not add a `CheckpointLoader` wrapper or any new loader abstraction. Checkpoint opening and inventory belong to engram-parser's `Checkpoint` API. Planning input is `HybridTopology`. |
+| Safetensors header inspect / manifest | corinth-canal `src/moe/safetensors.rs`, `moe/safetensors/discovery.rs` | **`SafetensorsLoader` + `SafetensorsLayout`** landed for [#27](https://github.com/rmems/hybrid-fusion/issues/27) and are now deprecated shims. `TensorManifestEntry` remains a non-deprecated legacy inventory helper | **engram-parser** (parse/mmap/layout/topology) | [#27](https://github.com/rmems/hybrid-fusion/issues/27) (landed), [#42](https://github.com/rmems/hybrid-fusion/issues/42) | Superseded (RM-1806 / #42): do not add a `CheckpointLoader` wrapper or any new loader abstraction. Checkpoint opening and inventory belong to engram-parser's `Checkpoint` API. Planning input is `HybridTopology`. |
 | MoE router/expert candidates | corinth-canal safetensors discovery | `TensorRole` + `SafetensorsLayout::entries_with_role` kept as legacy inventory | **engram-parser** for discovery; hybrid-fusion keeps the name-only helper | [#27](https://github.com/rmems/hybrid-fusion/issues/27) (landed) | Name-only classifier (`TensorRole::from_name`); shape is not consulted. Topology and role discovery move to engram-parser [#88](https://github.com/rmems/engram-parser/issues/88). |
 | GGUF checkpoint façade | corinth-canal `src/moe/checkpoint.rs`, `gguf/*` | not promoted into hybrid-fusion body | **engram-parser** | — | Research status: **reference** |
 

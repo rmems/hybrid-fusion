@@ -14,7 +14,8 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   `HybridTopology`, and `TopologySource`, plus
   `HybridExecutionPlan::from_topology` and `from_reverse_topology`. Planning
   reads hidden width, maximum sequence length, SNN input channels, and SNN
-  output population. It has no checkpoint-format dependency. Programmatic and
+  output population. `from_reverse_topology` takes the router embedding width
+  separately from ANN hidden width. It has no checkpoint-format dependency. Programmatic and
   mock topology need no checkpoint file and no engram-parser crate.
   `TopologySource` is the integration point for a future engram-parser
   topology adapter. `AnnTopology.architecture` is descriptive and does not

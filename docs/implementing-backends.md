@@ -656,7 +656,7 @@ callable so existing backends keep compiling. They are not the planning input.
 | --- | --- |
 | Opening a GGUF or Safetensors file, including mmap and header inventory | engram-parser `Checkpoint` API. This crate does not open checkpoint files. |
 | `GgufLayout` / `SafetensorsLayout` as a description of the file | Inventory stays in engram-parser. Do not feed a layout type to `HybridExecutionPlan`. |
-| Widths used to compile a forward or reverse plan | `AnnTopology`, built by the caller or returned by a `TopologySource`. Combine it with a caller-supplied `SnnTopology` into `HybridTopology`, then call `HybridExecutionPlan::from_topology` or `from_reverse_topology`. |
+| Widths used to compile a forward or reverse plan | `AnnTopology`, built by the caller or returned by a `TopologySource`. Combine it with a caller-supplied `SnnTopology` into `HybridTopology`, then call `HybridExecutionPlan::from_topology`. `from_reverse_topology` takes the router embedding width as its own argument; that width is independent of ANN hidden width. |
 | SNN input channels and output population | Explicit `SnnTopology`. Checkpoint metadata never supplies these values, and output population is not derived from input width. |
 
 `TopologySource` is the integration point for an engram-derived ANN topology.

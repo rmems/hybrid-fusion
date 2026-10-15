@@ -1120,23 +1120,25 @@ impl HybridExecutionPlan {
 
     /// Reverse-path plan from neutral topology.
     ///
-    /// `hidden_dim` is the embedding width and `output_population` is the
-    /// neuron population. SNN input channels and the architecture label are
-    /// not copied into the plan. Delegates to [`from_reverse_path`](Self::from_reverse_path).
+    /// `output_population` is the neuron population. `embed_dim` is the router
+    /// embedding width and is independent of [`AnnTopology::hidden_dim`]: a
+    /// router may project into a width other than the ANN hidden size.
+    /// [`ReverseHybridPath::new`](crate::ReverseHybridPath::new) takes the same
+    /// independent width. SNN input channels, ANN hidden width, and the
+    /// architecture label are not copied into the projection ports. Delegates
+    /// to [`from_reverse_path`](Self::from_reverse_path).
     ///
     /// # Errors
     ///
     /// [`PlanError::InvalidTopology`] when any topology dimension is `0`.
+    /// [`PlanError::InvalidParameters`] when `embed_dim` is `0`.
     pub fn from_reverse_topology(
         topology: &HybridTopology,
         mode: ProjectionMode,
+        embed_dim: usize,
     ) -> std::result::Result<Self, PlanError> {
         let topology = HybridTopology::new(topology.ann.clone(), topology.snn.clone())?;
-        Self::from_reverse_path(
-            mode,
-            topology.snn.output_population,
-            topology.ann.hidden_dim,
-        )
+        Self::from_reverse_path(mode, topology.snn.output_population, embed_dim)
     }
 
     /// Plan describing the existing [`crate::ReverseHybridPath`] flow:
