@@ -1370,10 +1370,12 @@ mod tests {
         let mods = NeuroModulators::default();
         let mut twin = NeuromodSnn::with_seed(N, 3, SEED).unwrap();
         let from_reported = snn.step(&stimulus, &mods).unwrap();
-        let from_twin = twin.step(&stimulus, &mods).unwrap();
+        twin.step(&stimulus, &mods).unwrap();
+        // Fired indices can match after a saturated stimulus even when the
+        // Bernoulli stream has advanced. The encoding is the draw itself.
         assert_eq!(
-            from_reported, from_twin,
-            "capabilities() must not consume the caller-controlled RNG"
+            snn.inner.input_spike_times, twin.inner.input_spike_times,
+            "capabilities() must not consume Bernoulli draws"
         );
         assert!(
             from_reported.iter().all(|id| *id < 3),
