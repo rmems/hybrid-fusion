@@ -73,4 +73,13 @@ mod tests {
         assert_eq!(out.selected_experts.len(), 2);
         assert!(out.routing_entropy.is_some());
     }
+
+    #[test]
+    fn synthetic_router_rejects_nan_embedding() {
+        let mut r = SyntheticExpertRouter::new(4, 2).unwrap();
+        assert!(matches!(
+            r.route(&[1.0, f32::NAN, 0.0, 2.0]),
+            Err(crate::HybridError::InvalidConfig(_))
+        ));
+    }
 }

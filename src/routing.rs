@@ -52,15 +52,51 @@ pub fn synthetic_gate_scores(num_experts: usize, embedding: &[f32]) -> Vec<f32> 
 
 /// Numerically stable softmax over scores (sums to ~1 when non-empty).
 ///
-/// Non-finite or non-positive sum falls back to a uniform distribution.
-pub fn softmax(scores: &[f32]) -> Vec<f32> {
+/// # Non-finite policy
+///
+/// Each case takes the limit of softmax for the scores it is given. No case
+/// falls back to a uniform distribution to hide a bad score.
+///
+/// - **Any `NaN`** → `Err(InvalidConfig)` naming the first `NaN` index, even if
+///   other scores are `±Inf`. A `NaN` score has no defined weight.
+/// - **One or more `+Inf`** → each `+Inf` index gets `1 / k` of the mass
+///   (`k` = number of `+Inf` scores) and every other index gets exactly `0.0`.
+///   A single `+Inf` gives a one-hot result.
+/// - **All `-Inf`** → uniform `1 / n`. All scores are equal, so this is the
+///   limit of `softmax([c; n])` as `c → -∞`. Its normalized entropy is `1.0`,
+///   so callers that need to detect "no expert scored" should check the scores.
+/// - **Some `-Inf` with a finite max** → `-Inf` indices get exactly `0.0`.
+/// - Empty input → `Ok(vec![])`.
+///
+/// Large finite scores (e.g. `1e30`) take the normal max-subtracted path.
+///
+/// # Errors
+///
+/// [`HybridError::InvalidConfig`] if any score is `NaN`.
+pub fn softmax(scores: &[f32]) -> Result<Vec<f32>> {
+    if let Some(index) = scores.iter().position(|s| s.is_nan()) {
+        return Err(HybridError::InvalidConfig(format!(
+            "softmax: score[{index}] is NaN (of {} scores); NaN scores are rejected, not \
+             sanitized",
+            scores.len()
+        )));
+    }
     if scores.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    if !max_score.is_finite() {
-        let u = 1.0 / scores.len() as f32;
-        return vec![u; scores.len()];
+    if max_score == f32::INFINITY {
+        let k = scores.iter().filter(|&&s| s == f32::INFINITY).count();
+        let share = (1.0 / k as f64) as f32;
+        return Ok(scores
+            .iter()
+            .map(|&s| if s == f32::INFINITY { share } else { 0.0 })
+            .collect());
+    }
+    if max_score == f32::NEG_INFINITY {
+        // NaN is excluded above, so every score is -Inf.
+        let u = (1.0 / scores.len() as f64) as f32;
+        return Ok(vec![u; scores.len()]);
     }
     let exp_scores: Vec<f32> = scores
         .iter()
@@ -75,15 +111,15 @@ pub fn softmax(scores: &[f32]) -> Vec<f32> {
     // tolerance can tell that apart from a genuinely unnormalized distribution.
     // In f64 the denominator is exact to ~n * 2^-53, leaving one f32 rounding
     // per weight -- a bound independent of `n`.
+    //
+    // With a finite max, the max term is exp(0) = 1 and every term lies in
+    // [0, 1], so 1 <= sum_exp <= n. No fallback is needed.
     let sum_exp: f64 = exp_scores.iter().map(|&v| f64::from(v)).sum();
-    if sum_exp <= 0.0 || !sum_exp.is_finite() {
-        let u = 1.0 / scores.len() as f32;
-        return vec![u; scores.len()];
-    }
-    exp_scores
+    debug_assert!(sum_exp >= 1.0 && sum_exp.is_finite());
+    Ok(exp_scores
         .into_iter()
         .map(|v| (f64::from(v) / sum_exp) as f32)
-        .collect()
+        .collect())
 }
 
 /// Indices of the `top_k` largest weights (descending). NaN weights sort last.
@@ -138,6 +174,12 @@ pub fn routing_entropy(weights: &[f32]) -> f32 {
 /// - Empty embedding
 /// - `num_experts == 0` or `top_k == 0`
 /// - `num_experts > MAX_REASONABLE_EXPERTS`
+/// - Any gate score is `NaN`. This happens when the embedding contains `NaN`,
+///   or when `+Inf` and `-Inf` fall in the same expert's chunk.
+///
+/// Gate scores follow the [`softmax`] non-finite policy. An expert whose chunk
+/// sums to `+Inf` (an `Inf` element, or finite overflow) takes all the weight,
+/// split equally with any other `+Inf` experts.
 pub fn route_synthetic(
     embedding: &[f32],
     num_experts: usize,
@@ -164,7 +206,13 @@ pub fn route_synthetic(
         ));
     }
     let scores = synthetic_gate_scores(num_experts, embedding);
-    let weights = softmax(&scores);
+    if let Some(expert) = scores.iter().position(|s| s.is_nan()) {
+        return Err(HybridError::InvalidConfig(format!(
+            "route_synthetic: gate score for expert {expert} is NaN (embedding contains NaN, \
+             or +Inf and -Inf in the same chunk)"
+        )));
+    }
+    let weights = softmax(&scores)?;
     let selected = top_k_indices(&weights, top_k.min(num_experts));
     let entropy = routing_entropy(&weights);
     Ok((weights, selected, entropy))
@@ -176,7 +224,7 @@ mod tests {
 
     #[test]
     fn softmax_sums_to_one() {
-        let w = softmax(&[1.0, 2.0, 3.0]);
+        let w = softmax(&[1.0, 2.0, 3.0]).unwrap();
         assert_eq!(w.len(), 3);
         assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-5);
         assert!(w[2] > w[1] && w[1] > w[0]);
@@ -200,7 +248,11 @@ mod tests {
             for s in scores.iter_mut().take(hi) {
                 *s = 0.0;
             }
-            let sum: f64 = softmax(&scores).iter().map(|&w| f64::from(w)).sum();
+            let sum: f64 = softmax(&scores)
+                .unwrap()
+                .iter()
+                .map(|&w| f64::from(w))
+                .sum();
             assert!(
                 (sum - 1.0).abs() <= 2.0 * U,
                 "n={n}: f64-re-accumulated softmax sum {sum} drifts {:e} (> 2u)",
@@ -210,10 +262,66 @@ mod tests {
     }
 
     #[test]
-    fn softmax_empty_and_uniform_fallback() {
-        assert!(softmax(&[]).is_empty());
-        let w = softmax(&[f32::NAN, f32::NAN]);
-        assert!((w.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+    fn softmax_empty_is_empty() {
+        assert!(softmax(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn softmax_single_pos_inf_is_one_hot_on_that_index() {
+        assert_eq!(
+            softmax(&[f32::INFINITY, 0.0, 0.0]).unwrap(),
+            vec![1.0, 0.0, 0.0]
+        );
+        // Not at index 0, alongside a larger finite score and a -Inf.
+        assert_eq!(
+            softmax(&[1e30, -3.0, f32::INFINITY, f32::NEG_INFINITY]).unwrap(),
+            vec![0.0, 0.0, 1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn softmax_multiple_pos_inf_split_mass_only_among_them() {
+        let w = softmax(&[f32::INFINITY, 5.0, f32::INFINITY, 0.0, f32::INFINITY]).unwrap();
+        let third = (1.0f64 / 3.0) as f32;
+        assert_eq!(w, vec![third, 0.0, third, 0.0, third]);
+        let sum: f64 = w.iter().map(|&v| f64::from(v)).sum();
+        assert!((sum - 1.0).abs() <= crate::WEIGHT_SUM_TOLERANCE);
+    }
+
+    #[test]
+    fn softmax_rejects_any_nan() {
+        for scores in [
+            vec![f32::NAN, 1.0],
+            vec![1.0, 2.0, f32::NAN],
+            vec![f32::NAN, f32::NAN],
+            // NaN must not be masked by the +Inf or all--Inf branches.
+            vec![f32::INFINITY, f32::NAN],
+            vec![f32::NEG_INFINITY, f32::NAN],
+        ] {
+            assert!(
+                matches!(softmax(&scores), Err(HybridError::InvalidConfig(_))),
+                "{scores:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn softmax_all_neg_inf_is_uniform() {
+        assert_eq!(softmax(&[f32::NEG_INFINITY; 4]).unwrap(), vec![0.25; 4]);
+    }
+
+    #[test]
+    fn softmax_partial_neg_inf_gets_exact_zero() {
+        let w = softmax(&[f32::NEG_INFINITY, 0.0, 0.0]).unwrap();
+        assert_eq!(w, vec![0.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn softmax_large_finite_is_one_hot_and_normalized() {
+        let w = softmax(&[0.0, 1e30, -1e30]).unwrap();
+        assert_eq!(w, vec![0.0, 1.0, 0.0]);
+        let sum: f64 = w.iter().map(|&v| f64::from(v)).sum();
+        assert!((sum - 1.0).abs() <= crate::WEIGHT_SUM_TOLERANCE);
     }
 
     #[test]
@@ -277,5 +385,28 @@ mod tests {
         assert!(route_synthetic(&[], 2, 1).is_err());
         assert!(route_synthetic(&[1.0], 0, 1).is_err());
         assert!(route_synthetic(&[1.0], MAX_REASONABLE_EXPERTS + 1, 1).is_err());
+    }
+
+    #[test]
+    fn route_synthetic_rejects_nan_gate_scores() {
+        // NaN element in expert 1's chunk.
+        assert!(matches!(
+            route_synthetic(&[1.0, 0.0, f32::NAN, 0.0], 2, 1),
+            Err(HybridError::InvalidConfig(_))
+        ));
+        // +Inf and -Inf in the same chunk sum to NaN.
+        assert!(matches!(
+            route_synthetic(&[f32::INFINITY, f32::NEG_INFINITY, 1.0, 2.0], 2, 1),
+            Err(HybridError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn route_synthetic_pos_inf_chunk_takes_all_weight() {
+        // Expert 2 sees +Inf; expert 0 has the largest finite score.
+        let (w, sel, h) = route_synthetic(&[9.0, 0.0, f32::INFINITY, 0.0], 4, 2).unwrap();
+        assert_eq!(w, vec![0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(sel[0], 2);
+        assert_eq!(h, 0.0);
     }
 }
