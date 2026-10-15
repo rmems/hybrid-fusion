@@ -2,7 +2,7 @@
 name = "hybrid-fusion-cortex-neuromod-smoke"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.98.1"
+rust-version = "1.99.0"
 publish = false
 description = "Fixed-seed smoke harness: one cortex-tensor embedding stage into NeuromodSnn (issue #45)."
 license = "MIT OR Apache-2.0"

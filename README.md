@@ -191,11 +191,12 @@ Fixture, also documented at the top of the test module:
 - A second network with the same seed, and `reset()` plus `reseed(0x45_5EE5)`,
   must emit the same per-step fired indices. A different seed may differ.
 
-The crate's MSRV is `rust-version = 1.98.1` for **all** builds, default and
-feature-enabled alike. Cargo applies `rust-version` package-wide and has no
-per-feature MSRV, so the bump (required by neuromod 0.7) applies even to the
-default, dependency-light build. The `neuromod` dependency (and its transitive
-`rand`) stays out of the default build; only the toolchain floor is shared.
+The crate's MSRV is `rust-version = 1.99.0` for **all** builds, default and
+feature-enabled alike. `rust-toolchain.toml` pins the same release for local
+development. Cargo applies `rust-version` package-wide and has no per-feature
+MSRV, so the floor applies even to the default, dependency-light build. The
+`neuromod` dependency (and its transitive `rand`) stays out of the default
+build; only the toolchain floor is shared.
 
 ### Neuromodulator mapping
 

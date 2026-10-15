@@ -21,6 +21,10 @@ jobs:
         with:
           persist-credentials: false
 
+      # Floating stable channel. On 2026-10-15 that channel is 1.99.0, the
+      # same release the MSRV job pins. This job keeps tracking newer stable
+      # clippy and test breakage (including the sentry feature) before the
+      # floor in rust-toolchain.toml moves.
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537
         with:
@@ -55,17 +59,17 @@ jobs:
         run: cargo test --locked
 
   msrv:
-    name: MSRV (1.98.1)
+    name: MSRV (1.99.0)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           persist-credentials: false
 
-      - name: Install Rust 1.98.1
+      - name: Install Rust 1.99.0
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
 
       - name: Cache cargo registry
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830

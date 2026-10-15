@@ -12,7 +12,7 @@ reviews:
   - '!**/target/**'
   path_instructions:
   - path: '**/*.rs'
-    instructions: 'Rust edition 2024; no `rust-version`; CI uses stable. Edition 2024 is intentional (REVIEW.md). Do not suggest downgrading the edition or using std/language APIs newer than the pinned toolchain/MSRV. CI gate: `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-features`. Flag anything that would fail `cargo fmt --check` or clippy `-D warnings`. Optional features `sentry` and `backends` must stay behind cfg gates. Zero-extent tensor axes are a bug, and `tanh` is the boundary enforcer (see REVIEW.md).'
+    instructions: 'Rust edition 2024; MSRV `rust-version` is 1.99.0 and must match `rust-toolchain.toml`, the smoke harness, and the CI MSRV job. The CI validate job tracks the stable channel. Edition 2024 is intentional (REVIEW.md). Do not suggest downgrading the edition or using std/language APIs newer than the pinned toolchain/MSRV. CI gate: `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-features`. Flag anything that would fail `cargo fmt --check` or clippy `-D warnings`. Optional features `sentry` and `backends` must stay behind cfg gates. Zero-extent tensor axes are a bug, and `tanh` is the boundary enforcer (see REVIEW.md).'
   - path: '**/Cargo.toml'
     instructions: Cargo manifest. Call out new dependencies and feature changes, and keep `rust-version` / `edition` consistent with CI.
   - path: .github/workflows/**
