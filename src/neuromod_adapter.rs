@@ -465,6 +465,13 @@ impl SpikingNetwork for NeuromodSnn {
     /// neuromodulation on, frozen evaluation off, caller-controlled RNG on),
     /// translated into [`BackendCapabilities`] rather than a second vocabulary.
     ///
+    /// `caller_rng` is the owned generator passed to `step_with_rng`. Callers
+    /// set that generator with [`Self::with_seed`] and [`Self::reseed`]; `step`
+    /// does not take a separate RNG argument. Every `step` uses neuromod's
+    /// learning path. neuromod 0.7 also offers `step_frozen_with_rng`, which
+    /// keeps weights and eligibility unchanged. This adapter does not call it,
+    /// so `frozen_evaluation` stays absent.
+    ///
     /// Does not step the network or touch the owned RNG.
     fn capabilities(&self) -> crate::BackendCapabilities {
         use crate::capabilities::RequiredFeature;
@@ -1298,6 +1305,169 @@ mod tests {
             replayed, reference,
             "reset (with weight restore) + reseed must replay from the original \
              seeded connectivity, matching a fresh adapter"
+        );
+    }
+
+    fn lif_weights(snn: &NeuromodSnn) -> Vec<Vec<f32>> {
+        snn.inner
+            .neurons
+            .iter()
+            .map(|neuron| neuron.weights.clone())
+            .collect()
+    }
+
+    fn advertised(caps: &crate::BackendCapabilities, name: &str) -> bool {
+        caps.features.iter().any(|feature| feature.as_str() == name)
+    }
+
+    #[test]
+    fn capability_report_matches_step_reset_and_learning() {
+        let mut snn = NeuromodSnn::with_seed(N, 3, SEED).unwrap();
+        let caps = snn.capabilities();
+        assert_eq!(caps.backend_name, "neuromod::SpikingNetwork");
+        assert_eq!(
+            caps.dtypes.iter().copied().collect::<Vec<_>>(),
+            vec![crate::Dtype::F32]
+        );
+        assert_eq!(caps.channels, Some(N));
+        assert_eq!(caps.num_neurons, Some(3));
+        assert_eq!(caps.num_neurons, Some(snn.num_neurons()));
+        assert_eq!(caps.max_sequence, Some(1));
+        assert!(caps.stateful);
+        assert!(caps.reset);
+        assert!(!caps.streaming);
+        assert_eq!(caps.max_batch, None);
+        assert_eq!(caps.hidden_dim, None);
+        assert_eq!(caps.device, crate::DeviceHint::Host);
+        assert!(advertised(&caps, "step"));
+        assert!(advertised(&caps, "caller_rng"));
+        assert!(advertised(&caps, "plasticity"));
+        assert!(advertised(&caps, "neuromodulation"));
+        assert!(
+            !advertised(&caps, "frozen_evaluation"),
+            "step always learns; the frozen engine path is not exposed"
+        );
+
+        let before_weights = lif_weights(&snn);
+        let _ = snn.capabilities();
+        assert_eq!(
+            lif_weights(&snn),
+            before_weights,
+            "capabilities() must not mutate weights"
+        );
+
+        let mismatch = snn.step(&[0.4, 0.4], &NeuroModulators::default());
+        assert!(matches!(
+            mismatch,
+            Err(HybridError::InputLengthMismatch {
+                expected: N,
+                got: 2
+            })
+        ));
+        assert_eq!(lif_weights(&snn), before_weights);
+
+        let stimulus = [0.45, 0.6, 0.35, 0.5];
+        let mods = NeuroModulators::default();
+        let mut twin = NeuromodSnn::with_seed(N, 3, SEED).unwrap();
+        let from_reported = snn.step(&stimulus, &mods).unwrap();
+        twin.step(&stimulus, &mods).unwrap();
+        // Fired indices can match after a saturated stimulus even when the
+        // Bernoulli stream has advanced. The encoding is the draw itself.
+        assert_eq!(
+            snn.inner.input_spike_times, twin.inner.input_spike_times,
+            "capabilities() must not consume Bernoulli draws"
+        );
+        assert!(
+            from_reported.iter().all(|id| *id < 3),
+            "fired ids must stay inside the advertised population"
+        );
+        assert_eq!(
+            snn.inner.global_step, 1,
+            "stateful report requires a step to advance the tick counter"
+        );
+
+        <NeuromodSnn as SpikingNetwork>::reset(&mut snn).unwrap();
+        assert_eq!(snn.inner.global_step, 0);
+        assert_eq!(
+            lif_weights(&snn),
+            before_weights,
+            "advertised reset must restore construction-time weights"
+        );
+    }
+
+    #[test]
+    fn advertised_caller_rng_drives_input_encoding() {
+        let caps = NeuromodSnn::with_seed(N, N, SEED).unwrap().capabilities();
+        assert!(advertised(&caps, "caller_rng"));
+
+        // Bernoulli input encoding draws one uniform per channel. A saturated
+        // stimulus fires every LIF neuron either way, so the encoding itself
+        // is the observable the caller-controlled generator owns.
+        const WIDTH: usize = 32;
+        let stimulus = vec![0.5_f32; WIDTH];
+        let mods = NeuroModulators::default();
+        let encoding = |seed: u64| {
+            let mut snn = NeuromodSnn::with_seed(WIDTH, 2, seed).unwrap();
+            snn.step(&stimulus, &mods).unwrap();
+            snn.inner.input_spike_times.clone()
+        };
+        assert_ne!(
+            encoding(SEED),
+            encoding(SEED ^ 0x00FF),
+            "caller-controlled seeds must change Bernoulli input encoding"
+        );
+
+        let mut continued = NeuromodSnn::with_seed(WIDTH, 2, SEED).unwrap();
+        continued.step(&stimulus, &mods).unwrap();
+        let first = continued.inner.input_spike_times.clone();
+        continued.reset();
+        continued.step(&stimulus, &mods).unwrap();
+        let without_reseed = continued.inner.input_spike_times.clone();
+
+        let mut replay = NeuromodSnn::with_seed(WIDTH, 2, SEED).unwrap();
+        replay.step(&stimulus, &mods).unwrap();
+        replay.reset();
+        replay.reseed(SEED);
+        replay.step(&stimulus, &mods).unwrap();
+        assert_eq!(replay.inner.input_spike_times, first);
+        assert_ne!(
+            without_reseed, first,
+            "reset must not reseed; reseed is the caller RNG control"
+        );
+    }
+
+    #[test]
+    fn advertised_plasticity_and_neuromodulation_change_weights() {
+        let caps = NeuromodSnn::with_seed(N, N, PLASTICITY_SEED)
+            .unwrap()
+            .capabilities();
+        assert!(advertised(&caps, "plasticity"));
+        assert!(advertised(&caps, "neuromodulation"));
+        assert!(!advertised(&caps, "frozen_evaluation"));
+
+        let learned = |mods: NeuroModulators| {
+            let mut snn = NeuromodSnn::with_seed(N, N, PLASTICITY_SEED).unwrap();
+            let before = lif_weights(&snn);
+            for stimulus in &strong_block() {
+                snn.step(stimulus, &mods).unwrap();
+            }
+            let after = lif_weights(&snn);
+            assert_ne!(
+                before, after,
+                "normal step must retain plasticity; frozen_evaluation is not in the report"
+            );
+            after
+        };
+
+        let rewarded = learned(reward_mods());
+        let unrewarded = learned(NeuroModulators {
+            dopamine: 0.0,
+            aux_dopamine: 0.0,
+            ..Default::default()
+        });
+        assert_ne!(
+            rewarded, unrewarded,
+            "advertised neuromodulation must change learning when reward changes"
         );
     }
 

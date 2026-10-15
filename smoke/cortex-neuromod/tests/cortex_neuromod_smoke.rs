@@ -31,7 +31,10 @@
 use cortex_tensor::stage::{ReferenceStageParams, StageInput, StageSource};
 use cortex_tensor::{AnnExecutor, AnnStage, ReferenceExecutor, StageId, StageKind, Tensor};
 use hybrid_fusion::projector::embed_to_stimuli_with_width;
-use hybrid_fusion::{NeuroModulators, NeuromodSnn, SpikingNetwork, Tensor as HybridTensor};
+use hybrid_fusion::{
+    BackendCapabilities, DeviceHint, Dtype, HybridError, NeuroModulators, NeuromodSnn,
+    SpikingNetwork, Tensor as HybridTensor,
+};
 
 const DIM: usize = 4;
 const CHANNELS: usize = 4;
@@ -174,6 +177,58 @@ fn same_seed_reproduces_fired_indices_including_after_reset() {
         replay, a,
         "reset + same seed did not reproduce the first run"
     );
+}
+
+#[test]
+fn neuromod_report_matches_the_smoke_fixture() {
+    // The harness has no separate capabilities() adapter. It drives
+    // NeuromodSnn, whose report must describe this fixture. ReferenceExecutor
+    // capabilities stay in cortex-tensor (RM-1831).
+    let stimulus = project(&hidden_state(&token_table(), &position_table()));
+    let mut snn = NeuromodSnn::with_seed(CHANNELS, CHANNELS, SEED).expect("network");
+    let caps: BackendCapabilities = snn.capabilities();
+    assert_eq!(caps.backend_name, "neuromod::SpikingNetwork");
+    assert_eq!(
+        caps.dtypes.iter().copied().collect::<Vec<_>>(),
+        vec![Dtype::F32]
+    );
+    assert_eq!(caps.channels, Some(stimulus.len()));
+    assert_eq!(caps.channels, Some(CHANNELS));
+    assert_eq!(caps.num_neurons, Some(snn.num_neurons()));
+    assert_eq!(caps.max_sequence, Some(1));
+    assert!(caps.stateful);
+    assert!(caps.reset);
+    assert!(!caps.streaming);
+    assert_eq!(caps.max_batch, None);
+    assert_eq!(caps.device, DeviceHint::Host);
+    let features: Vec<&str> = caps
+        .features
+        .iter()
+        .map(|feature| feature.as_str())
+        .collect();
+    for required in ["step", "caller_rng", "plasticity", "neuromodulation"] {
+        assert!(
+            features.contains(&required),
+            "missing {required}: {features:?}"
+        );
+    }
+    assert!(!features.contains(&"frozen_evaluation"));
+
+    let err = snn
+        .step(&[0.2; CHANNELS - 1], &NeuroModulators::default())
+        .expect_err("advertised width is exact");
+    assert!(matches!(
+        err,
+        HybridError::InputLengthMismatch {
+            expected: CHANNELS,
+            got: 3
+        }
+    ));
+    let fired = snn
+        .step(&stimulus, &NeuroModulators::default())
+        .expect("one advertised f32 window");
+    assert!(fired.iter().all(|idx| *idx < CHANNELS));
+    <NeuromodSnn as SpikingNetwork>::reset(&mut snn).expect("advertised reset is implemented");
 }
 
 #[test]

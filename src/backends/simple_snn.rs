@@ -20,6 +20,20 @@
 //!    cortisol (inhibitory gain).
 //! 3. If potential exceeds `threshold`, record the neuron as fired and reset
 //!    its potential.
+//!
+//! # Capability report
+//!
+//! [`SpikingNetwork::capabilities`] advertises `f32`, the stimulus width, an
+//! equal output population, a one-step window, cross-call membrane state,
+//! `reset`, and `step`. It does not advertise `caller_rng`, `plasticity`, or
+//! `frozen_evaluation`: there is no RNG, no synaptic learning, and no held-out
+//! step.
+//!
+//! Intentional deviation: the gain heuristic above reads dopamine, cortisol,
+//! acetylcholine, and tempo, but the report does **not** advertise
+//! `neuromodulation`. That heuristic is not the neuromod feature set
+//! (`NeuromodSnn` folds reward into R-STDP; this mock does not), so negotiation
+//! must not treat the two reports as substitutes.
 
 use crate::error::{HybridError, Result};
 use crate::traits::{NeuroModulators, SpikingNetwork};
@@ -108,7 +122,8 @@ impl SpikingNetwork for SimpleSnn {
     fn capabilities(&self) -> crate::BackendCapabilities {
         // Membrane potentials persist across steps. The trait default leaves
         // `stateful` false so a stimuli-only backend is not treated as
-        // recurrent.
+        // recurrent. The modulator gain heuristic is intentionally omitted;
+        // see the module docs.
         use crate::capabilities::RequiredFeature;
         crate::BackendCapabilities::snn(std::any::type_name::<Self>())
             .with_dtypes([crate::Dtype::F32])
@@ -216,6 +231,103 @@ mod tests {
         let fired = snn.step(&[0.3], &neutral).unwrap();
         // 0.4 + 0.4 + 0.3 = 1.1 >= 1.0
         assert_eq!(fired, vec![0usize]);
+    }
+
+    struct NoReset;
+
+    impl SpikingNetwork for NoReset {
+        fn step(&mut self, _stimuli: &[f32], _modulators: &NeuroModulators) -> Result<Vec<usize>> {
+            Ok(Vec::new())
+        }
+
+        fn num_channels(&self) -> usize {
+            1
+        }
+    }
+
+    #[test]
+    fn trait_default_reset_errors_when_reset_is_not_advertised() {
+        let caps = NoReset.capabilities();
+        assert!(!caps.reset);
+        let err = <NoReset as SpikingNetwork>::reset(&mut NoReset).unwrap_err();
+        match err {
+            HybridError::SnnStep(message) => {
+                assert!(
+                    message.contains("not supported"),
+                    "default reset did not report itself unsupported: {message}"
+                );
+            }
+            other => panic!("expected unsupported reset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capability_report_matches_step_and_reset() {
+        let mut snn = SimpleSnn::with_params(4, 1.0, 0.0);
+        let caps = snn.capabilities();
+        assert_eq!(caps.backend_name, std::any::type_name::<SimpleSnn>());
+        assert_eq!(
+            caps.dtypes.iter().copied().collect::<Vec<_>>(),
+            vec![crate::Dtype::F32]
+        );
+        assert_eq!(caps.channels, Some(4));
+        assert_eq!(caps.num_neurons, Some(snn.num_neurons()));
+        assert_eq!(caps.num_neurons, Some(4));
+        assert_eq!(caps.max_sequence, Some(1));
+        assert!(caps.stateful);
+        assert!(caps.reset);
+        assert!(!caps.streaming);
+        assert_eq!(caps.max_batch, None);
+        assert_eq!(caps.hidden_dim, None);
+        assert_eq!(caps.device, crate::DeviceHint::Host);
+        let features: Vec<&str> = caps.features.iter().map(|f| f.as_str()).collect();
+        assert_eq!(
+            features,
+            ["step"],
+            "mock must not advertise caller_rng, plasticity, neuromodulation, or frozen_evaluation"
+        );
+
+        let short = snn.step(&[0.2, 0.2], &NeuroModulators::default());
+        assert!(matches!(
+            short,
+            Err(HybridError::InputLengthMismatch {
+                expected: 4,
+                got: 2
+            })
+        ));
+        assert_eq!(
+            snn.membrane_potentials,
+            vec![0.0; 4],
+            "a rejected width must not change advertised state"
+        );
+
+        let neutral = NeuroModulators {
+            dopamine: 0.0,
+            cortisol: 0.0,
+            acetylcholine: 0.0,
+            tempo: 1.0,
+            aux_dopamine: 0.0,
+        };
+        let first = snn.step(&[0.4; 4], &neutral).unwrap();
+        assert!(first.is_empty());
+        assert!(
+            snn.membrane_potentials.iter().all(|v| *v > 0.0),
+            "stateful report requires membrane to survive a subthreshold step"
+        );
+        let second = snn.step(&[0.7; 4], &neutral).unwrap();
+        assert!(
+            second.iter().all(|id| *id < caps.num_neurons.unwrap()),
+            "fired ids must stay inside the advertised population"
+        );
+        assert_eq!(second, vec![0, 1, 2, 3]);
+
+        <SimpleSnn as SpikingNetwork>::reset(&mut snn).unwrap();
+        assert_eq!(snn.membrane_potentials, vec![0.0; 4]);
+        let after_reset = snn.step(&[0.4; 4], &neutral).unwrap();
+        assert!(
+            after_reset.is_empty(),
+            "advertised reset must restore pre-step dynamics"
+        );
     }
 
     #[test]
