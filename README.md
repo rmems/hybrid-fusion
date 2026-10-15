@@ -42,13 +42,19 @@ This crate **owns**:
   against checkpoint weights.
 - Reverse-path orchestration (`ReverseHybridPath`): SNN activity → embedding → MoE route
   ([#23](https://github.com/rmems/hybrid-fusion/issues/23)).
+- Neutral planning topology (`AnnTopology`, `SnnTopology`, `HybridTopology`) and
+  `HybridExecutionPlan` compiled from it. ANN dimensions may come from a
+  `TopologySource`. SNN dimensions are caller-supplied.
 
 This crate **does not own**:
 
 - Tensor / transformer math -> [`cortex-tensor`](https://github.com/rmems/cortex-tensor)
   (including real-weight gate matmul once backends land).
-- GGUF / Safetensors parse, mmap, and layout discovery ->
-  [`engram-parser`](https://github.com/rmems/engram-parser).
+- GGUF / Safetensors parsing, mmap, layout discovery, tensor-role
+  classification, and model-topology discovery ->
+  [`engram-parser`](https://github.com/rmems/engram-parser), the sole
+  checkpoint-format owner. Migration:
+  [Migrating off format-specific loaders](docs/implementing-backends.md#migrating-off-format-specific-loaders).
 - Neuron dynamics and SNN integration internals ->
   [`neuromod`](https://github.com/Limen-Neural/neuromod)
   (still under Limen-Neural until that crate returns to `rmems`).
@@ -134,7 +140,9 @@ assert_eq!(out.embedding.len(), 128);
 | `SpikeActivity` | Pure spike/membrane bag for reverse-path projection. |
 | `ProjectionMode` + `project_spike_activity` | SNN activity → dense embedding for MoE (pure modes). |
 | `routing` helpers | Always-on pure MoE math (gates, softmax, top-k, entropy). |
-| `GgufLoader` / `SafetensorsLoader` | Dual checkpoint **layout** contracts (parse/mmap → `engram-parser`). |
+| `AnnTopology` / `SnnTopology` / `HybridTopology` | Format-neutral planning input. No checkpoint file and no format loader required. |
+| `TopologySource` | Adapter hook that yields `AnnTopology`. This crate does not open files. |
+| `GgufLoader` / `SafetensorsLoader` | **Deprecated** compatibility shims. Parsing belongs to `engram-parser`. See the [migration guide](docs/implementing-backends.md#migrating-off-format-specific-loaders). |
 | `SyntheticExpertRouter` / `StubExpertRouter` | File-free `ExpertRouter` impls (**requires `backends` feature**). |
 | `NeuromodSnn` | Real SNN backend adapter over `neuromod` 0.7 (LIF/Izhikevich) implementing `SpikingNetwork` (**requires `neuromod` feature**). `SimpleSnn` under `backends` is a reference/mock only. |
 | `NeuroModulators` | Neuromodulator struct passed to SNN steps. |

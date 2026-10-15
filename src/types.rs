@@ -68,6 +68,11 @@ pub enum Dtype {
 
 /// MoE-oriented role of a named checkpoint tensor.
 ///
+/// Legacy inventory helper. Topology and tensor-role discovery move to
+/// engram-parser ([#88](https://github.com/rmems/engram-parser/issues/88)).
+/// This enum stays so existing manifests keep a stable role spelling; it is
+/// not the planning input ([`crate::HybridTopology`] is).
+///
 /// Heuristic classification for ExpertRouter / dry-run planner / routing-math
 /// consumers. Name-only — no file I/O, no family adapters, no payload inspect.
 /// [`Other`](Self::Other) is the safe default when a name does not match.
@@ -89,7 +94,10 @@ pub enum TensorRole {
 }
 
 impl TensorRole {
-    /// Infer a role from a checkpoint tensor **name**. Name heuristics only;
+    /// Infer a role from a checkpoint tensor **name**.
+    ///
+    /// Legacy name-only classifier. Topology and role discovery move to
+    /// engram-parser ([#88](https://github.com/rmems/engram-parser/issues/88)).
     /// `shape` is not consulted (reserved for parser-side validation).
     ///
     /// Matching is case-insensitive and uses `.`-separated path components, so
@@ -163,6 +171,10 @@ fn is_norm_component(parts: &[&str]) -> bool {
 }
 
 /// One named tensor in a Safetensors (or HF-sharded) inventory.
+///
+/// Legacy inventory helper. Topology and role discovery move to engram-parser
+/// ([#88](https://github.com/rmems/engram-parser/issues/88)). This record stays
+/// available for existing manifests; it is not a planning input.
 ///
 /// Layout metadata only — no payload bytes. `shape` uses the same `Vec<usize>`
 /// convention as [`crate::Tensor::shape`].

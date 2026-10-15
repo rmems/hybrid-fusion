@@ -45,7 +45,7 @@ token_ids → Transformer::hidden_states → projector (pool/resize/tanh)
 | Transformer hidden states | `Transformer` trait | `cortex-tensor` |
 | SNN step + channel width | `SpikingNetwork` trait | `neuromod` / `brainstem-daemon` |
 | Hidden → stimuli | `projector::embed_to_stimuli_with_width` | this crate (pure) |
-| GGUF layout contract | `GgufLoader` / `GgufLayout` | concrete loaders → `engram-parser` |
+| GGUF layout contract | `GgufLoader` / `GgufLayout` (deprecated shims) | sole format owner: `engram-parser` |
 | Orchestrator | `HybridNetwork<T, S>` | this crate |
 | Config / output | `HybridConfig`, `TransformerConfig`, `HybridOutput` | this crate |
 | Optional error reporting | `sentry` feature + `telemetry` | optional; apps init DSN |
@@ -60,9 +60,12 @@ SpikeActivity → ProjectionMode → ExpertRouter (MoE)
 ```
 
 Checkpoint inventory for MoE onboarding stays **format-agnostic** at the
-orchestration layer: GGUF (`GgufLoader`) **and** Safetensors
-(`SafetensorsLoader` / `SafetensorsLayout` / `TensorRole`,
-[#27](https://github.com/rmems/hybrid-fusion/issues/27) — landed).
+orchestration layer. The v0.3 loader contracts (`GgufLoader`,
+`SafetensorsLoader` / `SafetensorsLayout`,
+[#27](https://github.com/rmems/hybrid-fusion/issues/27) — landed) are now
+deprecated compatibility shims. `TensorRole` is a legacy inventory helper and
+is not deprecated. Planning consumes `HybridTopology`.
+engram-parser is the sole checkpoint-format owner.
 
 ---
 
@@ -94,9 +97,9 @@ inventory talk to layout types, not payload parsers.
 
 | Source module | Local path | Target hybrid-fusion type/trait | Owner crate | Issue | Notes |
 |---------------|------------|----------------------------------|-------------|-------|-------|
-| GGUF layout façade | hybrid-fusion `GgufLoader` / `GgufLayout`; corinth-canal `src/moe/gguf/` | keep/extend layout trait; no mmap here | **hybrid-fusion** (trait); **engram-parser** (parse/mmap/dequant) | existing | Concrete GGUF stays out of this crate |
-| Safetensors header inspect / manifest | corinth-canal `src/moe/safetensors.rs`, `moe/safetensors/discovery.rs` | **`SafetensorsLoader` + `SafetensorsLayout` / `TensorManifestEntry`** (name, dtype, shape, shard refs, labels) — public contract for [#27](https://github.com/rmems/hybrid-fusion/issues/27), symmetric to existing `GgufLoader` | **hybrid-fusion** (trait); **engram-parser** (parse/mmap I/O) | [#27](https://github.com/rmems/hybrid-fusion/issues/27) (landed) | Optional later: a thin `CheckpointLoader` wrapper over GGUF+ST for format-agnostic callers; **not** a second ST symbol. Do not introduce a competing Safetensors trait. |
-| MoE router/expert candidates | corinth-canal safetensors discovery | `TensorRole` + `SafetensorsLayout::entries_with_role` for #22 / #24 / #26 | **hybrid-fusion** | [#27](https://github.com/rmems/hybrid-fusion/issues/27) (landed) | Name + shape heuristics only at trait layer (`TensorRole::from_name`) |
+| GGUF layout façade | hybrid-fusion `GgufLoader` / `GgufLayout` (deprecated); corinth-canal `src/moe/gguf/` | do not extend the loader; planning uses `HybridTopology` | **engram-parser** (parse/mmap/dequant/topology) | existing | Concrete GGUF stays out of this crate. Shim remains until removal. |
+| Safetensors header inspect / manifest | corinth-canal `src/moe/safetensors.rs`, `moe/safetensors/discovery.rs` | **`SafetensorsLoader` + `SafetensorsLayout`** landed for [#27](https://github.com/rmems/hybrid-fusion/issues/27) and are now deprecated shims. `TensorManifestEntry` remains a non-deprecated legacy inventory helper | **engram-parser** (parse/mmap/layout/topology) | [#27](https://github.com/rmems/hybrid-fusion/issues/27) (landed), [#42](https://github.com/rmems/hybrid-fusion/issues/42) | Superseded (RM-1806 / #42): do not add a `CheckpointLoader` wrapper or any new loader abstraction. Checkpoint opening and inventory belong to engram-parser's `Checkpoint` API. Planning input is `HybridTopology`. |
+| MoE router/expert candidates | corinth-canal safetensors discovery | `TensorRole` + `SafetensorsLayout::entries_with_role` kept as legacy inventory | **engram-parser** for discovery; hybrid-fusion keeps the name-only helper | [#27](https://github.com/rmems/hybrid-fusion/issues/27) (landed) | Name-only classifier (`TensorRole::from_name`); shape is not consulted. Topology and role discovery move to engram-parser [#88](https://github.com/rmems/engram-parser/issues/88). |
 | GGUF checkpoint façade | corinth-canal `src/moe/checkpoint.rs`, `gguf/*` | not promoted into hybrid-fusion body | **engram-parser** | — | Research status: **reference** |
 
 ### D. Precision tiers + dry-run planner (grok-ozempic)
@@ -142,9 +145,9 @@ Do **not** copy these into `hybrid-fusion` as implementation work:
 
 | Crate | Responsibility relative to this map |
 |-------|-------------------------------------|
-| **hybrid-fusion** | Orchestration traits/types; pure projector + pure MoE math (no checkpoint matmul); dual checkpoint **contracts** (`GgufLoader`, `SafetensorsLoader` — both landed) |
+| **hybrid-fusion** | Orchestration, neutral planning topology (`HybridTopology`), and execution plans. Deprecated loader shims remain temporarily. No new checkpoint-format abstraction. |
 | **cortex-tensor** | Transformer / tensor math backends implementing `Transformer`; real-weight gate matmul |
-| **engram-parser** | Concrete GGUF + Safetensors parse, mmap, layout discovery implementing loader traits |
+| **engram-parser** | Sole checkpoint-format owner: GGUF and Safetensors parsing, mmap, layout discovery, tensor roles, and topology discovery |
 | **neuromod** | Neuron dynamics implementing `SpikingNetwork` |
 | **brainstem-daemon** | SNN runtime scheduling |
 | **limbic-critic** | Neuromodulator → critic signal mapping |
@@ -186,7 +189,7 @@ Issue `#9` (optional Sentry) is **outside** this epic and is already implemented
 
 ## Related docs
 
-- [Implementing a Backend](implementing-backends.md) — how to implement `Transformer` / `SpikingNetwork` / `GgufLoader` / `SafetensorsLoader` today
+- [Implementing a Backend](implementing-backends.md) — `Transformer` / `SpikingNetwork`, plus the [loader migration](implementing-backends.md#migrating-off-format-specific-loaders)
 - [AGENTS.md](../AGENTS.md) — crate boundaries for coding agents
 - Epic: [#20](https://github.com/rmems/hybrid-fusion/issues/20)
 - Milestone: [v0.3 — LLM/SNN architecture contracts](https://github.com/rmems/hybrid-fusion/milestone/2)

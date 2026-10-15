@@ -1,8 +1,10 @@
 # Implementing a Backend
 
 `hybrid-fusion` is backend-agnostic: it defines the `Transformer`, `SpikingNetwork`,
-`GgufLoader`, `SafetensorsLoader`, `ExpertRouter`, `SpikeActivity`, and
-`NeuroModulators` contracts but ships no concrete math. This guide explains every
+`ExpertRouter`, `SpikeActivity`, and `NeuroModulators` contracts but ships no
+concrete math. `GgufLoader` and `SafetensorsLoader` remain as deprecated
+compatibility shims; checkpoint formats belong to `engram-parser`. Planning
+input is [`HybridTopology`](../src/topology.rs). This guide explains every
 trait method, how data flows through `HybridNetwork::try_new` /
 `HybridNetwork::forward`, and provides a
 minimal compilable example you can adapt for your own backend.
@@ -16,8 +18,9 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 1. [Transformer trait](#1-transformer-trait)
 2. [SpikingNetwork trait](#2-spikingnetwork-trait)
 3. [NeuroModulators](#3-neuromodulators)
-4. [GgufLoader / GgufLayout](#4-ggufloader--gguflayout)
-5. [SafetensorsLoader / SafetensorsLayout](#5-safetensorsloader--safetensorslayout)
+4. [GgufLoader / GgufLayout (legacy)](#4-ggufloader--gguflayout)
+5. [SafetensorsLoader / SafetensorsLayout (legacy)](#5-safetensorsloader--safetensorslayout)
+   - [Migrating off format-specific loaders](#migrating-off-format-specific-loaders)
 6. [How construction and the forward pipeline work](#6-how-construction-and-the-forward-pipeline-work)
 7. [Tensor shape conventions](#7-tensor-shape-conventions)
 8. [Minimal working example](#8-minimal-working-example)
@@ -438,6 +441,10 @@ appears in any public signature.
 
 ## 4. GgufLoader / GgufLayout
 
+**Legacy.** `GgufLoader` and `GgufLayout` are deprecated since 0.4.0. Behavior
+is unchanged. Do not implement a new GGUF parser against these types. See
+[Migrating off format-specific loaders](#migrating-off-format-specific-loaders).
+
 ```rust
 pub trait GgufLoader {
     fn load(&self, path: &str) -> Result<GgufLayout>;
@@ -502,6 +509,12 @@ assert_eq!(layout.architecture, "my-arch");
 ---
 
 ## 5. SafetensorsLoader / SafetensorsLayout
+
+**Legacy.** `SafetensorsLoader` and `SafetensorsLayout` are deprecated since
+0.4.0. Behavior is unchanged, including `SafetensorsLayout::new`, ordered
+`entries_with_role`, and `tensor_count` normalization on deserialization. Do
+not implement a new Safetensors parser against these types. See
+[Migrating off format-specific loaders](#migrating-off-format-specific-loaders).
 
 ```rust
 pub trait SafetensorsLoader {
@@ -625,6 +638,40 @@ Downstream:
 
 `Dtype` is the Safetensors header vocabulary (`F32`, `BF16`, `BOOL`, `U16`,
 `F8_E4M3`, `C64`, …), not a precision-planning policy.
+
+`TensorRole::from_name` and `TensorManifestEntry` are legacy inventory
+helpers. They are not deprecated in this release. Topology and role discovery
+move to engram-parser
+([#88](https://github.com/rmems/engram-parser/issues/88)). The classifier is
+name-only: tensor shape is not consulted.
+
+---
+
+## Migrating off format-specific loaders
+
+`GgufLoader`, `GgufLayout`, `SafetensorsLoader`, and `SafetensorsLayout` stay
+callable so existing backends keep compiling. They are not the planning input.
+
+| Today | Replacement |
+| --- | --- |
+| Opening a GGUF or Safetensors file, including mmap and header inventory | engram-parser `Checkpoint` API. This crate does not open checkpoint files. |
+| `GgufLayout` / `SafetensorsLayout` as a description of the file | Inventory stays in engram-parser. Do not feed a layout type to `HybridExecutionPlan`. |
+| Widths used to compile a forward or reverse plan | `AnnTopology`, built by the caller or returned by a `TopologySource`. Combine it with a caller-supplied `SnnTopology` into `HybridTopology`, then call `HybridExecutionPlan::from_topology`. `from_reverse_topology` takes the router embedding width as its own argument; that width is independent of ANN hidden width. |
+| SNN input channels and output population | Explicit `SnnTopology`. Checkpoint metadata never supplies these values, and output population is not derived from input width. |
+
+`TopologySource` is the integration point for an engram-derived ANN topology.
+This crate does not depend on engram-parser. A feature-gated adapter lands
+only after engram-parser publishes its topology API and a dependency exception
+is recorded.
+
+`TensorRole`, `TensorManifestEntry`, and `Dtype` remain as legacy inventory
+types. Role spellings are unchanged. Discovery of roles and model topology
+moves to engram-parser #88.
+
+### Removal
+
+A later minor release removes the four compatibility shims. Removal is no
+earlier than the release after engram-parser publishes its topology API.
 
 ---
 
@@ -1079,10 +1126,11 @@ normalized distribution (e.g. via `softmax`), not raw gate scores.
 gate distribution and selects `0..top_k`.
 
 **Out of scope for this crate:** Safetensors **parsing / mmap / payload extract**
-(and GGUF parse/mmap) stay in `engram-parser`. Family adapters and real gate
-matmul stay in sibling crates. The **trait/layout contract**
-(`SafetensorsLoader`, `SafetensorsLayout`, `TensorRole`) now lives here,
-symmetric to `GgufLoader`.
+(and GGUF parse/mmap), layout discovery, tensor-role discovery, and model
+topology belong to `engram-parser`, the sole checkpoint-format owner. Family
+adapters and real gate matmul stay in sibling crates. The deprecated
+`SafetensorsLoader` / `SafetensorsLayout` shims (and `GgufLoader`) remain only
+for migration. `TensorRole` is a legacy name-only inventory helper.
 
 `HybridNetwork::forward` (ANN → SNN) always leaves MoE fields as `None`.
 For the reverse path, use [`ReverseHybridPath`](../src/reverse.rs):
