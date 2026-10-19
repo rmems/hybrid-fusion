@@ -68,7 +68,7 @@ Two other dtype sets exist and are not the same as the above:
 | cortex softmax | Any NaN in row: whole row NaN | One `+Inf`: one-hot. k>1 `+Inf`: `1/k` split. All `-Inf`: uniform `1/n` | `ct:src/tensor/finite.rs:16-27` |
 | cortex LayerNorm / RMSNorm | Non-finite in a row: that output row all NaN. `eps` non-finite or `<= 0`: `InvalidEpsilon` error | same | `finite.rs:31-43`, `116-123` |
 | cortex L2 normalize | Any non-finite: fill with NaN | same | `finite.rs:45-52` |
-| cortex activations (relu, gelu, silu, fast sigmoid) | NaN in, NaN out | `+Inf`: `+Inf` (sigmoid `1`); `-Inf`: `0` (sigmoid `-1`) | `finite.rs:54-66`; merged in cortex PR #124 (`bbb8c95`) |
+| cortex activations (relu, gelu, silu, fast sigmoid) | NaN in, NaN out | `+Inf`: `+Inf` (sigmoid `1`); `-Inf`: `0` (sigmoid `-1`) | `finite.rs:54-66`; merged in cortex PR #124 (`bbb8c95`). Read from source at `a0fd18e`; not exercised by the hf smoke harness, which pins pre-#124 `5cbee81` (gap 12) |
 | cortex `sum` / `mean` / `max_val` | Any NaN: NaN (`max_val` ranks with an explicit NaN check, not `f32::max`) | `+Inf` and `-Inf` together: NaN for sum/mean; one signed infinity: that infinity | `finite.rs:68-87` |
 | hf forward path (embedding, stimuli) | Rejected: `HybridError::NonFinite { stage, index }` before `SpikingNetwork::step` | Rejected, same error | `hf:src/validate.rs:51-56`; `hf:src/hybrid.rs:157`, `160` |
 | hf hidden state, MoE gate weights, modulators, routing scores | Rejected (NaN routing score: `InvalidConfig`; non-finite or negative expert weight: `InvalidConfig`; non-finite dopamine: `SnnStep`) | `routing.rs`: `+-Inf` scores are allowed, NaN is not | `hf:src/validate.rs:203-231` (tests); `hf:src/routing.rs:60-77`; `hf:src/reverse.rs:174-182`; `hf:src/neuromod_adapter.rs:371-396` |
@@ -92,7 +92,7 @@ The issue specifies a `#[non_exhaustive]` enum, a required field on telemetry re
 
 | Concern | Owner | Notes |
 |---------|-------|-------|
-| GGUF / Safetensors parsing, tensor inventory, dim normalization, packed to `f32` decode (Q8_0, Q5_K, Q6_K, IQ3_M) | engram-parser | `ct:src/moe/checkpoint.rs:3-13` states cortex does not parse and defers decode to engram |
+| GGUF / Safetensors parsing, tensor inventory, dim normalization, packed to `f32` decode (Q8_0, Q5_K, Q6_K; IQ3_M only as engram's internal 111-byte block, which cortex does not bind — see §2) | engram-parser | `ct:src/moe/checkpoint.rs:3-13` states cortex does not parse and defers decode to engram |
 | Tensor math, reference ANN execution, softmax / norm / activation finite policy, `f32` storage | cortex-tensor | `ct:src/tensor/finite.rs:1-14` |
 | Orchestration, stage-graph and port contracts, capability negotiation, ANN/SNN boundary validation, hybrid result types | hybrid-fusion | `hf:src/plan.rs`, `hf:src/capabilities.rs`, `hf:src/hybrid.rs` |
 | Result track vocabulary | hybrid-fusion (planned) | #62 |
