@@ -80,10 +80,12 @@ pub trait SpikingNetwork {
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>;
 
     /// Held-out tick: no plasticity-controlled state (weights, eligibility,
-    /// thresholds) may change. Default delegates to `step`; a backend that
-    /// does so MUST NOT advertise the `frozen_evaluation` feature.
-    fn step_frozen(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>> {
-        self.step(stimuli, modulators)
+    /// thresholds) may change. The default fails closed, matching `reset`:
+    /// a backend that does not override it cannot be evaluated frozen, so a
+    /// held-out tick can never silently run the learning path (the #92 bug).
+    /// A backend that overrides it MUST advertise `frozen_evaluation`.
+    fn step_frozen(&mut self, _stimuli: &[f32], _modulators: &NeuroModulators) -> Result<Vec<usize>> {
+        Err(HybridError::SnnStep("frozen evaluation is not supported".into()))
     }
 
     fn num_channels(&self) -> usize;
@@ -131,6 +133,8 @@ impl<..> SpikingExpertRouter<..> {
     pub fn new(router: R, snn: S, encoder: E, decoder: D) -> Result<Self>; // rejects num_neurons < num_experts
     pub fn with_spike_boost(self, boost: f32) -> Result<Self>;             // finite, >= 0
     pub fn forward(&mut self, embedding: &[f32], m: &NeuroModulators) -> Result<SpikingRouteOutput>;
+    /// Fails before any `step` call unless `capabilities()` includes
+    /// `frozen_evaluation`; never falls back to the learning path.
     pub fn forward_frozen(&mut self, embedding: &[f32], m: &NeuroModulators) -> Result<SpikingRouteOutput>;
     pub fn reset(&mut self) -> Result<()>;  // encoder.reset(); snn.reset()
 }
@@ -307,9 +311,20 @@ Versions: hybrid-fusion is `0.3.0` (unreleased v0.3.0 track, `CHANGELOG.md`);
 cortex-tensor is `0.1.0`. Both are pre-1.0, so minor bumps carry breaking changes;
 commit subjects use `!` per both AGENTS.md files.
 
-1. **hybrid-fusion, additive (0.3.x, no `!`).** Land `SpikeEncoder`,
+1. **hybrid-fusion, inside the unreleased 0.3.0 track (breaking, `!`).** This step
+   is not additive: `HybridError` and `ForwardValueStage` are exhaustive enums
+   (`src/error.rs`) and gain variants, `PortSpec` (`src/plan.rs:164-170`, all-`pub`
+   fields) gains `encoding`/`decoding`, which breaks struct literals
+   (`#[serde(default)]` only protects deserialization), and `HybridNetwork::forward`
+   changes its out-of-range error from `SnnStep(text)` to `SnnSpikeOutOfRange` and
+   newly rejects duplicate spikes. Because 0.3.0 is still unreleased
+   (`Cargo.toml` `0.3.0`, CHANGELOG "Unreleased — v0.3.0 track"), it lands there and
+   each item is listed under that release's BREAKING notes, following the existing
+   `PlanError` precedent. Adding `#[non_exhaustive]` to `HybridError`,
+   `ForwardValueStage` and `PortSpec` in the same release is recommended, so later
+   additions are non-breaking. Land `SpikeEncoder`,
    `SpikeDecoder`, `RateEncoder`, `SpikeCountDecoder`, `SpikingNetwork::step_frozen`
-   (defaulted), the new `HybridError` variants, `SpikingExpertRouter`, and the
+   (default fails closed), the new `HybridError` variants, `SpikingExpertRouter`, and the
    ported `src/snn/tests.rs` cases. Port #130 into `SpikingExpertRouter` and #131
    into `NeuromodSnn` in the same series. **Gate:** `SpikingExpertRouter` does not
    ship until open question 8.1 (logits vs normalized weights) is resolved; the
