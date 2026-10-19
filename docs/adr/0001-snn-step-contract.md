@@ -180,7 +180,7 @@ tick. That includes the embedding and the modulators (finite checks) and the
 frozen-evaluation capability, all validated *before* `encode` runs, so a stateful
 encoder never advances for a tick the backend then rejects. The backend may still
 reject inside `step`; in that case the encoder has advanced and `reset()` is the
-recovery path. Errors after `step` have consumed a tick; `reset()` restores a clean epoch.
+recovery path. Errors after `step` have consumed a tick; `reset()` is the recovery path on backends that support it (the trait default returns an error). Whether that epoch is reproducible for a stochastic backend depends on open question 8.3.
 
 ### 2.3 Mapping: every cortex-tensor `snn` item → new home
 
@@ -313,7 +313,7 @@ contract hook for multi-tick encodings; every encoder in this ADR reports `1`.
 | #130 / #93 (3) | post-step validation: out-of-range spike → `SnnSpikeOutOfRange`, duplicate → `SnnDuplicateSpike`, wrong-length readout → `SnnReadoutLength`, negative/Inf readout → `SnnInvalidReadout` | `HybridError` variants per §2.2; wrong-length readout reuses the existing `InputLengthMismatch` (no new `SnnReadoutLength` variant). `HybridNetwork::forward` (`hybrid.rs:173`) switches from `SnnStep(text)` to `SnnSpikeOutOfRange` and gains the duplicate check |
 | #131 / #91 | require one LIF per channel (Izhikevich bank auxiliary); `new` seeds identity wiring (neuron *i* ← channel *i* at max weight); `from_network` rejects a LIF neuron with no drivable weight | `NeuromodSnn` already separates `num_neurons` from `num_channels` and counts only LIF neurons (`neuromod_adapter.rs:454-456`). Port: (a) a drivable-weight check in `from_network` (currently `pub(crate)`, `:297`), (b) a new constructor `NeuromodSnn::identity_wired(channels, seed)` for the expert-*i*-at-neuron-*i* router case, since `with_seed`'s hashed dense weights (`:125-141`) do not give channel isolation. #131's "each channel driven alone spikes only its own neuron" test ports against that constructor |
 | #131 / #92 (frozen) | `step_frozen` → `neuromod::SpikingNetwork::step_frozen`; `frozen_evaluation: true` | `NeuromodSnn::step_frozen` → `step_frozen_with_rng(.., &mut self.rng)`; advertise `RequiredFeature::new("frozen_evaluation")`. The bit-for-bit "weights, eligibility, thresholds, decay, modulators, STDP config unchanged" test ports as-is |
-| #131 / #92 (RNG) | `with_seed` / `set_seed(Option)` / `seed()`; `caller_rng` true only while a seed is installed; `reset` reseeds | `NeuromodSnn` always owns a seeded RNG (`:173, :304`), so `caller_rng` is already truthful. `reset` semantics differ: hybrid-fusion restores weights and does **not** reseed (`:327-351`); cortex #131 reseeds and does **not** restore weights. Keep hybrid-fusion's (replay from original connectivity is the stronger guarantee) and port the mixed `step`/`step_frozen` replay test. See open question 8.3 |
+| #131 / #92 (RNG) | `with_seed` / `set_seed(Option)` / `seed()`; `caller_rng` true only while a seed is installed; `reset` reseeds | `NeuromodSnn` always owns a seeded RNG (`:173, :304`), so `caller_rng` is already truthful. `reset` semantics differ: hybrid-fusion restores weights and does **not** reseed (`:327-351`); cortex #131 reseeds and does **not** restore weights. Neither gives deterministic replay through the trait on its own: hybrid-fusion's existing replay tests call the inherent `reseed(seed)` after `reset()` (`:1094-1095`, `:1122-1123`), and `reseed` is not on `SpikingNetwork`. The ported #131 mixed `step`/`step_frozen` replay test therefore needs an explicit `reseed` on the concrete type, which does not exercise `SpikingExpertRouter::reset`. Trait-level `reset` guarantees are decided in open question 8.3 |
 
 Nothing from #130/#131 lands in cortex-tensor after the move.
 
@@ -400,10 +400,19 @@ Until step 1 lands, #130 and #131 stay on hold as issue #61 already states.
    not depend on hybrid-fusion (`adapter.rs:118-120` says so explicitly), and
    hybrid-fusion must not depend on cortex-tensor. Candidates: the
    `smoke/cortex-neuromod` crate, or a tiny glue crate. Undecided.
-3. **`reset` semantics for `NeuromodSnn`.** hybrid-fusion restores initial
-   weights/thresholds and keeps the RNG stream; cortex #131 reseeds and keeps
-   learned weights. This ADR keeps hybrid-fusion's behaviour; whether a
-   `reset_and_reseed` convenience is wanted is open.
+3. **What trait-level `reset` guarantees (blocks a replay guarantee for
+   `SpikingExpertRouter`).** hybrid-fusion restores initial weights/thresholds
+   and keeps the RNG stream; cortex #131 reseeds and keeps learned weights.
+   Neither alone makes a stochastic backend replay deterministically through
+   `S: SpikingNetwork`. Options:
+   (a) `reset` restores weights/thresholds **and** reseeds to the construction
+   seed; `reseed` stays for callers who want a new stream. Replay then works
+   through the trait and `SpikingExpertRouter::reset`.
+   (b) Keep the current split, and document that `SpikingExpertRouter::reset`
+   does not give deterministic replay; expose reseeding through the host (for
+   example `snn_mut()`).
+   Until this is decided, ported replay tests call `reseed` explicitly on the
+   concrete type.
 4. **`AxonEncoder`.** Dropping it from cortex leaves no `axon-encoder` adapter
    anywhere in the three repos. Re-homing it in hybrid-fusion needs a second
    dependency exception (a #44-style issue) or a home in `axon-encoder` itself,
