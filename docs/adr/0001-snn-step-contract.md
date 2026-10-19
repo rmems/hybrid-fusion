@@ -136,7 +136,7 @@ impl<..> SpikingExpertRouter<..> {
     /// Fails before any `step` call unless `capabilities()` includes
     /// `frozen_evaluation`; never falls back to the learning path.
     pub fn forward_frozen(&mut self, embedding: &[f32], m: &NeuroModulators) -> Result<SpikingRouteOutput>;
-    pub fn reset(&mut self) -> Result<()>;  // encoder.reset(); snn.reset()
+    pub fn reset(&mut self) -> Result<()>;  // snn.reset()?; then encoder.reset() — encoder only resets if the SNN did
 }
 pub struct SpikingRouteOutput {
     pub route: ExpertRouteOutput,   // normalized weights + selection, same invariants as ExpertRouter
@@ -146,6 +146,14 @@ pub struct SpikingRouteOutput {
     pub track: ResultTrack,         // always Hybrid, see §5
 }
 ```
+
+**Neuron → expert mapping.** Readout index `i` is expert `i` for
+`i < num_experts`. Neurons `num_experts..num_neurons` are excluded from the
+spike boost and from `hidden_gain`, and they do not affect routing. They still
+appear in `fired_neurons` and are still validated (out-of-range and duplicate
+checks cover the whole population). Expert isolation is a wiring property of the
+backend, not something the host can check: it holds only for an identity-wired
+backend (`NeuromodSnn::identity_wired`, §6), not for dense hashed weights.
 
 `SpikingExpertRouter` is a host like `ReverseHybridPath`, not a `HybridNetwork`
 generic (AGENTS.md: do not fold reverse-path hosts into `HybridNetwork`).
@@ -168,7 +176,11 @@ so the ported tests keep their assertions):
 
 Ordering rule (kept from cortex `mod.rs:213-239`): everything that can be checked
 *before* `step` is checked before `step`, so a rejected forward never consumes a
-tick. Errors after `step` have consumed a tick; `reset()` restores a clean epoch.
+tick. That includes the embedding and the modulators (finite checks) and the
+frozen-evaluation capability, all validated *before* `encode` runs, so a stateful
+encoder never advances for a tick the backend then rejects. The backend may still
+reject inside `step`; in that case the encoder has advanced and `reset()` is the
+recovery path. Errors after `step` have consumed a tick; `reset()` restores a clean epoch.
 
 ### 2.3 Mapping: every cortex-tensor `snn` item → new home
 
