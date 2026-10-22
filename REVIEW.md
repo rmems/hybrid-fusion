@@ -19,11 +19,15 @@ Copy-paste this into every PR review:
 ### Trait boundaries
 
 - [ ] No concrete `cortex-tensor`, `neuromod`, or backend-specific types in public API
-- [ ] Pluggable surface stays trait/type contracts: `Transformer`, `SpikingNetwork`,
-      `ExpertRouter`, `SpikeActivity`, and neutral planning topology
+- [ ] Pluggable surface stays trait/type contracts: `Transformer`, `SpikingNetwork`
+      (incl. `step_frozen`), `SpikeEncoder` / `SpikeDecoder`, `ExpertRouter`
+      (incl. `gate_logits`), `SpikeActivity`, the `SpikingExpertRouter` host,
+      and neutral planning topology
       (`HybridTopology`, `TopologySource`). `GgufLoader` / `SafetensorsLoader`
       are deprecated compatibility shims; do not add a new loader abstraction
       (plus config/output types)
+- [ ] The single ANN↔SNN step contract lives here and only here (issue #61);
+      cortex-tensor keeps no spiking types
 - [ ] No new `use` statements pulling in concrete backend crates
 - [ ] Public types are generic over trait bounds, not pinned to implementations
 - [ ] Reverse-path MoE: pure routing math / types here; mmap loaders and gate matmul
@@ -32,7 +36,9 @@ Copy-paste this into every PR review:
 
 ### Invariants
 
-- [ ] Stimuli values are always in `[-1, 1]` (enforced by `tanh` in projector)
+- [ ] Stimuli values are always in `[-1, 1]` (enforced by `tanh` in projector;
+      the `SpikingExpertRouter` path feeds encoder-encoded gate logits instead,
+      and the backend's own preflight rejects what it cannot integrate)
 - [ ] Tensor dimension extents are always > 0 (reject any axis of length 0; rank-0 scalars are allowed)
 - [ ] `token_ids` is never empty (validated in `HybridNetwork::forward`)
 - [ ] `token_ids.len()` never exceeds `transformer.max_seq_len()`

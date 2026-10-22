@@ -75,6 +75,18 @@ impl ExpertRouter for StubExpertRouter {
             routing_entropy: Some(entropy),
         })
     }
+
+    /// Equal logits for every expert: their softmax is exactly the uniform
+    /// distribution `route` returns, and `top_k_indices` breaks the tie by
+    /// expert ID, so both methods agree on the selection.
+    fn gate_logits(&mut self, embedding: &[f32]) -> Result<Vec<f32>> {
+        if embedding.is_empty() {
+            return Err(HybridError::InvalidConfig(
+                "StubExpertRouter::gate_logits: embedding must be non-empty".into(),
+            ));
+        }
+        Ok(vec![0.0; self.num_experts])
+    }
 }
 
 #[cfg(test)]

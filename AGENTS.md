@@ -1,6 +1,6 @@
 # AGENTS.md — hybrid-fusion
 
-**Version:** 0.3.0 (last updated 2026-10-15)
+**Version:** 0.3.0 (last updated 2026-10-22)
 
 Context file for AI coding agents working in this repository.
 
@@ -36,6 +36,13 @@ implementations live here.
 
 ### This crate owns
 
+- The **single ANN↔SNN step contract** (issue #61 / RM-2205): the
+  `SpikingNetwork` step traits plus the `SpikeEncoder` / `SpikeDecoder`
+  boundary adapters in `src/encoding.rs`. cortex-tensor keeps no spiking
+  types (removal: rmems/cortex-tensor#137); its `SnnBackend` / `SnnEncoder` /
+  `SnnDecoder` surface was folded into this crate.
+- Spiking MoE routing host `SpikingExpertRouter` (gate logits → encode → step
+  → decode → boosted top-k) in `src/spiking_router.rs`
 - Orchestration of hybrid artificial neural network (ANN) → SNN forward-pass paths
 - Transformer hidden-state pooling / resizing into bounded SNN stimuli
 - The public `HybridNetwork<T, S>` API and its error boundaries
@@ -65,10 +72,12 @@ All normal backend interaction flows through the trait contracts in `src/traits.
 Core traits / types on the pluggable surface:
 
 - **`Transformer`** — produces hidden-state tensors from token IDs. Implementations live in downstream crates (e.g. `cortex-tensor`).
-- **`SpikingNetwork`** — steps the SNN forward given stimuli + neuromodulator state, returns fired neuron indices. Implementations live in `neuromod` / `brainstem-daemon`.
+- **`SpikingNetwork`** — the single ANN↔SNN step contract (issue #61): `step` (learning tick) and `step_frozen` (held-out tick; default fails closed) advance the SNN given stimuli + neuromodulator state and return fired neuron indices in `0..num_neurons()`. Implementations live in `neuromod` (via the `NeuromodSnn` adapter) / `brainstem-daemon`. Hosts validate fired-ID bounds and at-most-once per tick.
+- **`SpikeEncoder` / `SpikeDecoder`** — ANN↔SNN boundary adapters (`src/encoding.rs`, ported from cortex-tensor): ANN signal → stimuli and fired IDs → readouts, with declared `SpikeEncoding` / `SpikeDecoding` metadata mirrored onto `PortSpec`.
+- **`SpikingExpertRouter`** — hybrid spiking MoE routing host (`src/spiking_router.rs`, ported from cortex-tensor's `SpikingMoeRouter` with the #93 fixes): gate logits → encode → step → decode → additive spike boost → top-k. A host like `ReverseHybridPath`, not a `HybridNetwork` generic.
+- **`ExpertRouter`** + **`SpikeActivity`** — reverse-path MoE routing contract (embedding → expert weights / selection). `gate_logits` exposes the pre-softmax scores the spike boost needs (default fails closed). Pure math lives in `src/routing.rs`; checkpoint backends stay outside this crate.
 - **`AnnTopology`** / **`SnnTopology`** / **`HybridTopology`** / **`TopologySource`** — format-neutral planning input. ANN dimensions may come from a `TopologySource`. SNN dimensions are caller-supplied. This crate does not open checkpoint files.
 - **`GgufLoader`** / **`SafetensorsLoader`** — deprecated compatibility shims. Checkpoint parsing, mmap, layout discovery, tensor roles, and topology discovery belong to `engram-parser`. Do not add a new loader abstraction here. Migration: [docs/implementing-backends.md](docs/implementing-backends.md#migrating-off-format-specific-loaders).
-- **`ExpertRouter`** + **`SpikeActivity`** — reverse-path MoE routing contract (embedding → expert weights / selection). Pure math lives in `src/routing.rs`; checkpoint backends stay outside this crate.
 
 `HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits. Planning consumes `HybridTopology` and does not require a GGUF or Safetensors loader. `ExpertRouter` is consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above.
 

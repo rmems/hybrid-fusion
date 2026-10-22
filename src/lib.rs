@@ -3,6 +3,7 @@
 #[cfg(feature = "backends")]
 pub mod backends;
 pub mod capabilities;
+pub mod encoding;
 pub mod error;
 pub mod hybrid;
 #[cfg(feature = "neuromod")]
@@ -11,6 +12,7 @@ pub mod plan;
 pub mod projector;
 pub mod reverse;
 pub mod routing;
+pub mod spiking_router;
 pub mod telemetry;
 pub mod tensor;
 pub mod topology;
@@ -21,6 +23,10 @@ mod validate;
 pub use capabilities::{
     BackendCapabilities, BackendId, CapabilityNegotiation, DeviceHint, FallbackPolicy,
     NegotiationOutcome, NegotiationReport, RequiredFeature, StageRequirement,
+};
+pub use encoding::{
+    RateEncoder, SpikeCountDecoder, SpikeDecoder, SpikeDecoding, SpikeDecodingKind, SpikeEncoder,
+    SpikeEncoding, SpikeEncodingKind,
 };
 pub use error::{ForwardValueStage, HybridError, Result};
 pub use hybrid::HybridNetwork;
@@ -34,6 +40,7 @@ pub use routing::{
     MAX_REASONABLE_EXPERTS, route_synthetic, routing_entropy, softmax, synthetic_gate_scores,
     top_k_indices,
 };
+pub use spiking_router::{DEFAULT_SPIKE_BOOST, SpikingExpertRouter, SpikingRouteOutput};
 pub use tensor::Tensor;
 pub use topology::{AnnTopology, HybridTopology, SnnTopology, TopologySource};
 pub use traits::{

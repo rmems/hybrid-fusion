@@ -352,6 +352,8 @@ fn embedding_requirement_uses_activation_not_token_id_dtype() {
         PortSpec {
             dtype: Some(Dtype::U32),
             dims: vec![DimSpec::Symbolic("seq".into())],
+            encoding: None,
+            decoding: None,
         },
         PortSpec::f32_exact(&[4]),
     );
@@ -644,6 +646,8 @@ fn dtype_conversion_requires_backend_support_for_both_ports() {
         PortSpec {
             dtype: Some(Dtype::F16),
             dims: vec![DimSpec::Fixed(4)],
+            encoding: None,
+            decoding: None,
         },
         PortSpec::f32_exact(&[4]),
     );
