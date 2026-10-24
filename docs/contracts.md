@@ -6,9 +6,9 @@ Citations are `repo:path:line` at these commits. Re-verify against the pins befo
 
 | Alias | Repo | Commit |
 |-------|------|--------|
-| `ep` | rmems/engram-parser | `dbc46cf` |
-| `ct` | rmems/cortex-tensor | `a0fd18e` |
-| `hf` | rmems/hybrid-fusion | `506ff5b` |
+| `ep` | rmems/engram-parser | `f02c935` (crates.io 0.3.0; `.cargo_vcs_info.json`) |
+| `ct` | rmems/cortex-tensor | `1ca9230` (`main`) |
+| `hf` | rmems/hybrid-fusion | `506ff5b` (`src/` and `smoke/` on this branch match this commit) |
 
 ## 1. Shape order
 
@@ -16,10 +16,10 @@ Rank-2 `[vocab, hidden]` example. Row-major everywhere except the raw GGUF direc
 
 | Layer | Order | Evidence |
 |-------|-------|----------|
-| GGUF `ne[]` / `Tensor::dims` | Innermost-first (`dims[0]` is the contiguous row width) | `ep:src/gguf/tensor.rs:465-466`; block check on `dims[0]` at `tensor.rs:369-390`; `dequant.rs:40` |
-| engram `TensorInfo.shape` | Outermost-first. GGUF dims are reversed on the way in; `native_dims()` recovers the on-disk order | `ep:src/checkpoint/types.rs:100-111`, `123-128`, `141-146`; applied at `ep:src/checkpoint/gguf.rs:193`; Safetensors is already outermost-first (`types.rs:94-95`) |
+| GGUF `ne[]` / `Tensor::dims` | Innermost-first (`dims[0]` is the contiguous row width) | `ep:src/gguf/tensor.rs:465-466`; block size `quant_block_size` at `tensor.rs:315-319`; innermost-dim check `ep:src/gguf/layout.rs:369-380`; `dequant.rs:40` |
+| engram `TensorInfo.shape` | Outermost-first. GGUF dims are reversed on the way in; `native_dims()` recovers the on-disk order | `ep:src/checkpoint/types.rs:100-111`, `123-128`, `141-146`; applied at `ep:src/checkpoint/gguf.rs:190`; Safetensors is already outermost-first (`types.rs:94-95`) |
 | engram dequant inputs | Back to innermost-first: `dequantize_*` take GGUF-order `dims` | `ep:src/gguf/dequant.rs:40-41`, `94` |
-| cortex binding | Outermost-first, taken verbatim from `info.shape.dims()`. Token embedding is `dims[0]=vocab`, `dims[1]=hidden` | `ct:src/moe/checkpoint.rs:63-68`, `165-171`, `309-317`; test `tensor_inventory_uses_outermost_first_shapes` at `:511-524` |
+| cortex binding | Outermost-first, taken verbatim from `info.shape.dims()`. Token embedding is `dims[0]=vocab`, `dims[1]=hidden` | `ct:src/moe/checkpoint.rs:63-68`, `165-171`, `322-329`; test `tensor_inventory_uses_outermost_first_shapes` at `:550-563` |
 | cortex `Tensor` | Row-major, `data[i * ncols + j]` | `ct:src/tensor/mod.rs:12-22`, `64-67` |
 | hf `Tensor` | Row-major `Vec<f32>` plus `shape`; every dim must be `> 0` | `hf:src/tensor.rs:5-28` |
 | hf hidden state | `[seq, dim]` (rank 2) or `[dim]` (rank 1) | `hf:src/validate.rs:43-47`, `66-75` |
@@ -32,31 +32,31 @@ Net: engram, cortex, and hf agree on outermost-first row-major. The only innermo
 
 Three separate enums, no conversion code between them. hf has no engram dependency (`hf:src/topology.rs:186-188`) and no `From`/`TryFrom` exists. This table is a reading of the names, not an implemented mapping.
 
-| engram `TensorDType` (`ep:src/checkpoint/types.rs:169-213`) | cortex `TensorKind` / binding (`ct:src/moe/checkpoint.rs:72-80`, `294-307`) | hf `types::Dtype` (`hf:src/types.rs:37-67`) |
+| engram `TensorDType` (`ep:src/checkpoint/types.rs:169-213`) | cortex `TensorKind` / binding (`ct:src/moe/checkpoint.rs:72-80`, `307-319`) | hf `types::Dtype` (`hf:src/types.rs:37-67`) |
 |---|---|---|
 | `F32` | `F32`; the only dtype the gate may have (`checkpoint.rs:147`) | `F32` |
-| `F16` | `F16`; token rows decoded via `f16_bits_to_f32` (`:207-215`) | `F16` |
-| `BF16` | `Other("BF16")`, rejected as unsupported (`:246`, `:305`) | `BF16` |
+| `F16` | `F16`; the token-row arm (`:210-216`) calls `decode_f16`, which maps each `u16` with `f16_bits_to_f32` (`:395-413`) | `F16` |
+| `BF16` | `Other("BF16")`, rejected as unsupported (`:247-249`, `:318`) | `BF16` |
 | `F64` | `Other("F64")`, rejected | `F64` |
 | `I64` `I32` `I16` `I8` `U64` `U32` `U16` `U8` | `Other(label)`, rejected | same names, all present |
 | `Bool` (`"BOOL"`) | `Other("BOOL")`, rejected | `Bool` |
 | `F8E4M3`, `F8E5M2` | `Other`, rejected | `F8E4M3`, `F8E5M2` |
 | `I4`, `U4` | `Other`, rejected | **unmapped** (no variant) |
-| `GgufPacked` Q8_0 | `Q8Block`, decoded via `dequantize_q8_0` (`:216-224`) | **unmapped** (packed GGML types have no hf variant) |
-| `GgufPacked` Q5_K / Q6_K | `Q5KBlock` / `Q6KBlock`, decoded (`:225-242`) | **unmapped** |
-| `GgufPacked` IQ3_S | `Iq3S`, explicit error (`:243-245`); engram does not decode it (`ep:src/gguf/dequant.rs:94-102`, `129`) | **unmapped** |
+| `GgufPacked` Q8_0 | `Q8Block`, decoded via `dequantize_q8_0` (`:217-225`) | **unmapped** (packed GGML types have no hf variant) |
+| `GgufPacked` Q5_K / Q6_K | `Q5KBlock` / `Q6KBlock`, decoded (`:226-243`) | **unmapped** |
+| `GgufPacked` IQ3_S | `Iq3S`, explicit error (`:244-246`); engram does not decode it (`ep:src/gguf/dequant.rs:94-102`, `129`) | **unmapped** |
 | `GgufPacked` IQ3_M (internal id `0x4949334D`, not GGUF wire 31) | `Other`; no `TensorKind` | **unmapped** |
 | `GgufPacked` all other (Q4_*, Q5_0/1, Q2_K, Q3_K, Q4_K, Q8_1, Q8_K, IQ*) | `Other`, rejected; engram fail-closes (`dequant.rs:104-`) | **unmapped** |
 | `Other("F8_E8M0")`, `Other("C64")` (not normalized, `types.rs:211`) | `Other`, rejected | `F8E8M0`, `C64` exist but engram never produces them as typed values |
 | (none) | (none) | `F4`, `F6E2M3`, `F6E3M2`, `F8E4M3Fnuz`, `F8E5M2Fnuz` have no engram counterpart |
 
-How GGUF dtypes reach engram: only scalars normalize (`F32 F16 BF16 F64 I8 I16 I32 I64`); every block layout becomes `GgufPacked { ggml_type }` (`ep:src/checkpoint/gguf.rs:201-213`). Safetensors labels: `ep:src/checkpoint/safetensors.rs:179-200`.
+How GGUF dtypes reach engram: only scalars normalize (`F32 F16 BF16 F64 I8 I16 I32 I64`); every block layout becomes `GgufPacked { ggml_type }` (`ep:src/checkpoint/gguf.rs:198-210`). Safetensors labels: `ep:src/checkpoint/safetensors.rs:176-197`.
 
 Two other dtype sets exist and are not the same as the above:
 
 | Set | Values | Evidence |
 |-----|--------|----------|
-| cortex stage `DType` | `F32`, `F16`, `BF16`; reference executor advertises `F32` only | `ct:src/stage.rs:56-85`, `1097` |
+| cortex stage `DType` | `F32`, `F16`, `BF16`; reference executor advertises `F32` only | `ct:src/stage.rs:56-85`, `1376` |
 | hf `BackendCapabilities.dtypes` | `BTreeSet<hf Dtype>`; negotiation compares by enum equality | `hf:src/capabilities.rs:28-30`, `152`, `927-931` |
 
 ## 3. Finite-value policy (NaN, +Inf, -Inf)
@@ -64,11 +64,11 @@ Two other dtype sets exist and are not the same as the above:
 | Crate / stage | NaN | +Inf / -Inf | Evidence |
 |---|---|---|---|
 | engram packed decode | Not inspected. Output is whatever the block bytes decode to | Not inspected. `f16_bits_to_f32` maps exp=31 to Inf/NaN bit patterns unchanged | `ep:src/gguf/tensor.rs:587-599`; no finite check in `ep:src/gguf/dequant.rs` |
-| cortex checkpoint bind (`decode_f32`, F16/quant rows) | Not inspected; copied via `from_le_bytes` | Not inspected | `ct:src/moe/checkpoint.rs:356-375`, `207-215` |
+| cortex checkpoint bind (`decode_f32`, F16/quant rows) | Not inspected; copied via `from_le_bytes` | Not inspected | `ct:src/moe/checkpoint.rs:369-388`, `210-216`, `395-413` |
 | cortex softmax | Any NaN in row: whole row NaN | One `+Inf`: one-hot. k>1 `+Inf`: `1/k` split. All `-Inf`: uniform `1/n` | `ct:src/tensor/finite.rs:16-27` |
 | cortex LayerNorm / RMSNorm | Non-finite in a row: that output row all NaN. `eps` non-finite or `<= 0`: `InvalidEpsilon` error | same | `finite.rs:31-43`, `116-123` |
 | cortex L2 normalize | Any non-finite: fill with NaN | same | `finite.rs:45-52` |
-| cortex activations (relu, gelu, silu, fast sigmoid) | NaN in, NaN out | `+Inf`: `+Inf` (sigmoid `1`); `-Inf`: `0` (sigmoid `-1`) | `finite.rs:54-66`; merged in cortex PR #124 (`bbb8c95`). Read from source at `a0fd18e`; not exercised by the hf smoke harness, which pins pre-#124 `5cbee81` (gap 12) |
+| cortex activations (relu, gelu, silu, fast sigmoid) | NaN in, NaN out | `+Inf`: `+Inf` (sigmoid `1`); `-Inf`: `0` (sigmoid `-1`) | `finite.rs:54-66`; merged in cortex PR #124 (`bbb8c95`). That module text is unchanged from `a0fd18e` through main `1ca9230`. Not exercised by the hf smoke harness, which pins pre-#124 `5cbee81` (gap 12) |
 | cortex `sum` / `mean` / `max_val` | Any NaN: NaN (`max_val` ranks with an explicit NaN check, not `f32::max`) | `+Inf` and `-Inf` together: NaN for sum/mean; one signed infinity: that infinity | `finite.rs:68-87` |
 | hf forward path (embedding, stimuli) | Rejected: `HybridError::NonFinite { stage, index }` before `SpikingNetwork::step` | Rejected, same error | `hf:src/validate.rs:51-56`; `hf:src/hybrid.rs:157`, `160` |
 | hf hidden state, MoE gate weights, modulators, routing scores | Rejected (NaN routing score: `InvalidConfig`; non-finite or negative expert weight: `InvalidConfig`; non-finite dopamine: `SnnStep`) | `routing.rs`: `+-Inf` scores are allowed, NaN is not | `hf:src/validate.rs:203-231` (tests); `hf:src/routing.rs:60-77`; `hf:src/reverse.rs:174-182`; `hf:src/neuromod_adapter.rs:371-396` |
@@ -109,6 +109,6 @@ The issue specifies a `#[non_exhaustive]` enum, a required field on telemetry re
 7. **JSON round-trip of non-finite values is lossy and one-way** (section 3): `null` on write, error on read, sign of Inf lost, `Option<f32>` fields silently become `None`. `HybridOutput.routing_entropy` is not validated before serialization.
 8. **Reverse-path embedding finiteness not traced.** `hf:src/reverse.rs:149` builds the embedding via `project_spike_activity`; only `hf:src/projector.rs:129` (potentials) was seen checking `is_finite`. Needs confirmation before claiming reverse outputs are always finite.
 9. **Opposite JSON policies for non-finite values.** cortex `Tensor` fails closed: serialization errors and deserialization rejects (`ct:src/tensor/mod.rs:82-87`, `108-110`). hf `Tensor` / `HybridOutput` write `null` and then cannot read it back (gap 7). A caller moving data between the crates as JSON gets an error on one side and silent lossy `null` on the other.
-10. **`PortSpec` axis order is undocumented.** It is positional, but nothing states outermost-first, and engram's innermost-first GGUF dims could be mistaken for a port shape. A stale comment at `ct:src/moe/checkpoint.rs:330` says "`dims` is innermost-first" next to a 1-D `[hidden]` call; that is correct for the dequant call but contradicts the module's outermost-first binding.
+10. **`PortSpec` axis order is undocumented.** It is positional, but nothing states outermost-first, and engram's innermost-first GGUF dims could be mistaken for a port shape. A stale comment at `ct:src/moe/checkpoint.rs:343` says "`dims` is innermost-first" next to a 1-D `[hidden]` call; that is correct for the dequant call but contradicts the module's outermost-first binding.
 11. **Result tracks absent** (section 4). `hf:src/telemetry.rs` is Sentry error capture only (`:1-35`); there is no telemetry record type for a track to attach to yet, which #62 assumes.
-12. **Version skew.** cortex binds published `engram-parser` 0.3.0 (`ct:Cargo.toml:61`); the local engram clone at `dbc46cf` also reports 0.3.0, but the match is by version number, not commit. The hf smoke harness pins cortex-tensor by git rev `5cbee81`, not `a0fd18e` (`hf:smoke/cortex-neuromod/Cargo.toml:26`), so it predates PR #124.
+12. **Version skew.** cortex-tensor `main` (`1ca9230`) depends on published `engram-parser` 0.3.0 (`ct:Cargo.toml:64`). That published crate's VCS commit is `f02c935`, not later engram commits that still advertise version 0.3.0. The hf smoke harness pins cortex-tensor by git rev `5cbee81`, not `main` (`hf:smoke/cortex-neuromod/Cargo.toml:26`). `5cbee81` is an ancestor of PR #124 (`bbb8c95`), so the harness does not exercise the activation finite policy in section 3.
