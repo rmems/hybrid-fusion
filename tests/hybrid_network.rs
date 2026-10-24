@@ -1018,7 +1018,15 @@ fn invalid_output_contract_does_not_advance_host_counter() {
                 Err(HybridError::InvalidConfig(_))
             ));
         } else {
-            assert!(matches!(err, HybridError::SnnStep(_)));
+            // Out-of-range and duplicate fired IDs are structured
+            // SnnSpikeOutOfRange / SnnDuplicateSpike errors (issue #61).
+            assert!(matches!(
+                err,
+                HybridError::SnnSpikeOutOfRange {
+                    neuron: 3,
+                    num_neurons: 3
+                }
+            ));
         }
     }
 }

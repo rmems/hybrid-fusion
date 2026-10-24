@@ -27,6 +27,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::encoding::{SpikeDecoding, SpikeEncoding};
 use crate::topology::{AnnTopology, HybridTopology, SnnTopology};
 use crate::types::{Dtype, HybridConfig, ProjectionMode};
 
@@ -161,12 +162,27 @@ pub enum DimSpec {
 ///
 /// `dtype: None` means "any dtype". `dims: []` means "rank unconstrained"
 /// (wildcard) — it does **not** mean a rank-0 scalar.
+///
+/// `encoding` / `decoding` declare the spike boundary contract on
+/// Adapter→SNN and SNN→Adapter edges (issue #61): they are `None` except on
+/// those edges, and are the plan-side mirror of
+/// [`SpikeEncoder::encoding`](crate::SpikeEncoder::encoding) /
+/// [`SpikeDecoder::decoding`](crate::SpikeDecoder::decoding).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortSpec {
     /// Element dtype, if constrained.
     pub dtype: Option<Dtype>,
     /// Per-axis contract; empty = rank unconstrained.
     pub dims: Vec<DimSpec>,
+    /// Declared ANN→SNN stimulus encoding; `Some` only on ports feeding a
+    /// spiking stage. Defaults absent so plans written before the field
+    /// existed deserialize unchanged.
+    #[serde(default)]
+    pub encoding: Option<SpikeEncoding>,
+    /// Declared SNN→ANN readout decoding; `Some` only on ports fed by a
+    /// spiking stage.
+    #[serde(default)]
+    pub decoding: Option<SpikeDecoding>,
 }
 
 impl PortSpec {
@@ -176,6 +192,8 @@ impl PortSpec {
         Self {
             dtype: None,
             dims: Vec::new(),
+            encoding: None,
+            decoding: None,
         }
     }
 
@@ -184,6 +202,8 @@ impl PortSpec {
         Self {
             dtype: Some(Dtype::F32),
             dims,
+            encoding: None,
+            decoding: None,
         }
     }
 
@@ -192,9 +212,28 @@ impl PortSpec {
         Self::f32(dims.iter().map(|&d| DimSpec::Fixed(d)).collect())
     }
 
+    /// Declare the ANN→SNN stimulus encoding on this port (issue #61).
+    pub fn with_encoding(mut self, encoding: SpikeEncoding) -> Self {
+        self.encoding = Some(encoding);
+        self
+    }
+
+    /// Declare the SNN→ANN readout decoding on this port (issue #61).
+    pub fn with_decoding(mut self, decoding: SpikeDecoding) -> Self {
+        self.decoding = Some(decoding);
+        self
+    }
+
     /// Test compatibility with a producer port under `bindings`, mutating
     /// `bindings` to record newly unified symbolic extents. Returns a
     /// human-readable reason on mismatch.
+    ///
+    /// Spike contracts: a consumer that declares an encoding/decoding must be
+    /// fed by a producer that declares the same scheme and step/window count
+    /// (issue #61) — "stimuli reach the SNN with no declared encoding" is a
+    /// plan error, and so is a `Rate`/`Latency` mismatch. A `range` mismatch
+    /// is **not** an error: the projector already bounds stimuli, and range
+    /// differences are a negotiation-report concern, not a structural break.
     fn compatible_with(
         producer: &PortSpec,
         consumer: &PortSpec,
@@ -215,6 +254,56 @@ impl PortSpec {
             }
             for (axis, (p, c)) in producer.dims.iter().zip(&consumer.dims).enumerate() {
                 unify_dim(p, c, bindings).map_err(|r| format!("axis {axis}: {r}"))?;
+            }
+        }
+        match (&producer.encoding, &consumer.encoding) {
+            (None, None) | (Some(_), None) => {}
+            (None, Some(c)) => {
+                return Err(format!(
+                    "consumer declares spike encoding {:?} with {} timestep(s) but the \
+                     producer declares none: stimuli would reach the SNN with no \
+                     declared encoding",
+                    c.kind, c.timesteps
+                ));
+            }
+            (Some(p), Some(c)) => {
+                if p.kind != c.kind {
+                    return Err(format!(
+                        "spike encoding mismatch: {:?} vs {:?}",
+                        p.kind, c.kind
+                    ));
+                }
+                if p.timesteps != c.timesteps {
+                    return Err(format!(
+                        "spike encoding timestep mismatch: {} vs {}",
+                        p.timesteps, c.timesteps
+                    ));
+                }
+            }
+        }
+        match (&producer.decoding, &consumer.decoding) {
+            (None, None) | (Some(_), None) => {}
+            (None, Some(c)) => {
+                return Err(format!(
+                    "consumer declares spike decoding {:?} over a {} tick window but \
+                     the producer declares none: readouts would leave the SNN with \
+                     no declared decoding",
+                    c.kind, c.window
+                ));
+            }
+            (Some(p), Some(c)) => {
+                if p.kind != c.kind {
+                    return Err(format!(
+                        "spike decoding mismatch: {:?} vs {:?}",
+                        p.kind, c.kind
+                    ));
+                }
+                if p.window != c.window {
+                    return Err(format!(
+                        "spike decoding window mismatch: {} vs {}",
+                        p.window, c.window
+                    ));
+                }
             }
         }
         Ok(())
@@ -1037,6 +1126,8 @@ impl HybridExecutionPlan {
             PortSpec {
                 dtype: Some(Dtype::U32),
                 dims: vec![DimSpec::Symbolic("seq".into())],
+                encoding: None,
+                decoding: None,
             },
             // hidden states: the Transformer contract accepts two f32
             // layouts — canonical rank-2 [seq, dim] and pre-pooled rank-1
@@ -1221,6 +1312,7 @@ impl HybridExecutionPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::SpikeEncodingKind;
 
     fn linear_graph() -> StageGraph {
         let mut g = StageGraph::new();
@@ -1751,5 +1843,160 @@ mod tests {
         let plan2 = HybridExecutionPlan::from_reverse_path(ProjectionMode::RateSum, 8, 16).unwrap();
         assert_eq!(a, plan2.describe());
         assert!(a.contains("edge Forward s0 -> s1"));
+    }
+
+    // ── Spike encoding/decoding port contracts (issue #61) ──────────────────
+
+    fn spike_graph(producer: PortSpec, consumer: PortSpec) -> StageGraph {
+        let mut g = StageGraph::new();
+        let src = g.add_stage("src", StageKind::Adaptation, PortSpec::any(), producer);
+        let snn = g.add_stage("snn", StageKind::SpikingBlock, consumer, PortSpec::any());
+        g.connect(src, snn);
+        g
+    }
+
+    #[test]
+    fn undeclared_producer_encoding_is_a_plan_error() {
+        // The SNN input port declares how stimuli reach it; the adaptation
+        // stage stays silent about encoding — "no declared encoding".
+        let g = spike_graph(
+            PortSpec::f32_exact(&[4]),
+            PortSpec::f32_exact(&[4]).with_encoding(SpikeEncoding::default()),
+        );
+        let err = g.compile().unwrap_err();
+        assert!(
+            matches!(err, PlanError::IncompatibleContract { .. }),
+            "{err:?}"
+        );
+        let reason = err.to_string();
+        assert!(
+            reason.contains("no declared encoding") || reason.contains("declares none"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn matching_declarations_compile_and_mismatches_do_not() {
+        // Matching declarations on both ends compile.
+        let g = spike_graph(
+            PortSpec::f32_exact(&[4]).with_encoding(SpikeEncoding::new(
+                SpikeEncodingKind::Rate,
+                1,
+                None,
+            )),
+            PortSpec::f32_exact(&[4]).with_encoding(SpikeEncoding::default()),
+        );
+        assert!(g.compile().is_ok());
+
+        // Kind mismatch is a plan error.
+        let g = spike_graph(
+            PortSpec::f32_exact(&[4]).with_encoding(SpikeEncoding::new(
+                SpikeEncodingKind::Latency,
+                1,
+                None,
+            )),
+            PortSpec::f32_exact(&[4]).with_encoding(SpikeEncoding::default()),
+        );
+        assert!(matches!(
+            g.compile().unwrap_err(),
+            PlanError::IncompatibleContract { .. }
+        ));
+
+        // Timestep mismatch is a plan error.
+        let g = spike_graph(
+            PortSpec::f32_exact(&[4]).with_encoding(SpikeEncoding::new(
+                SpikeEncodingKind::Rate,
+                2,
+                None,
+            )),
+            PortSpec::f32_exact(&[4]).with_encoding(SpikeEncoding::default()),
+        );
+        assert!(matches!(
+            g.compile().unwrap_err(),
+            PlanError::IncompatibleContract { .. }
+        ));
+
+        // Range mismatch is NOT an error: the projector already bounds
+        // stimuli; range differences belong to negotiation reporting.
+        let g = spike_graph(
+            PortSpec::f32_exact(&[4]).with_encoding(SpikeEncoding::new(
+                SpikeEncodingKind::Rate,
+                1,
+                Some((0.0, 1.0)),
+            )),
+            PortSpec::f32_exact(&[4]).with_encoding(SpikeEncoding::new(
+                SpikeEncodingKind::Rate,
+                1,
+                Some((-1.0, 1.0)),
+            )),
+        );
+        assert!(g.compile().is_ok());
+    }
+
+    #[test]
+    fn undeclared_producer_decoding_is_a_plan_error() {
+        // SNN output → readout stage: the consumer declares the decoding, the
+        // producer stays silent.
+        let mut g = StageGraph::new();
+        let snn = g.add_stage(
+            "snn",
+            StageKind::SpikingBlock,
+            PortSpec::any(),
+            PortSpec::f32_exact(&[4]),
+        );
+        let read = g.add_stage(
+            "read",
+            StageKind::Readout,
+            PortSpec::f32_exact(&[4]).with_decoding(SpikeDecoding::default()),
+            PortSpec::any(),
+        );
+        g.connect(snn, read);
+        let err = g.compile().unwrap_err();
+        assert!(
+            matches!(err, PlanError::IncompatibleContract { .. }),
+            "{err:?}"
+        );
+
+        // Declared on both ends with the same scheme and window: compiles.
+        let mut g = StageGraph::new();
+        let snn = g.add_stage(
+            "snn",
+            StageKind::SpikingBlock,
+            PortSpec::any(),
+            PortSpec::f32_exact(&[4]).with_decoding(SpikeDecoding::default()),
+        );
+        let read = g.add_stage(
+            "read",
+            StageKind::Readout,
+            PortSpec::f32_exact(&[4]).with_decoding(SpikeDecoding::default()),
+            PortSpec::any(),
+        );
+        g.connect(snn, read);
+        assert!(g.compile().is_ok());
+    }
+
+    #[test]
+    fn port_spec_spike_fields_default_for_legacy_plans() {
+        // Plans serialized before the encoding/decoding fields existed
+        // deserialize with them absent.
+        let json = r#"{
+            "dtype": "F32",
+            "dims": [{"Fixed": 4}]
+        }"#;
+        let spec: PortSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec, PortSpec::f32_exact(&[4]));
+        assert!(spec.encoding.is_none() && spec.decoding.is_none());
+
+        // Round-trip keeps them.
+        let spec = PortSpec::f32_exact(&[4])
+            .with_encoding(SpikeEncoding::default())
+            .with_decoding(SpikeDecoding::default());
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            json.contains("\"encoding\"") && json.contains("\"decoding\""),
+            "{json}"
+        );
+        let back: PortSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, spec);
     }
 }

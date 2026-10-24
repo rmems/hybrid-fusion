@@ -206,13 +206,18 @@ fn neuromod_report_matches_the_smoke_fixture() {
         .iter()
         .map(|feature| feature.as_str())
         .collect();
-    for required in ["step", "caller_rng", "plasticity", "neuromodulation"] {
+    for required in [
+        "step",
+        "caller_rng",
+        "plasticity",
+        "neuromodulation",
+        "frozen_evaluation",
+    ] {
         assert!(
             features.contains(&required),
             "missing {required}: {features:?}"
         );
     }
-    assert!(!features.contains(&"frozen_evaluation"));
 
     let err = snn
         .step(&[0.2; CHANNELS - 1], &NeuroModulators::default())

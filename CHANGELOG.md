@@ -10,6 +10,88 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- **Single ANN↔SNN step contract** ([#61](https://github.com/rmems/hybrid-fusion/issues/61),
+  Linear [RM-2205](https://linear.app/rpd-34/issue/RM-2205); design in ADR
+  0001, [PR #64](https://github.com/rmems/hybrid-fusion/pull/64)): hybrid-fusion
+  is now the one owner of the spiking step boundary. The cortex-tensor
+  `src/snn` trait surface (`SnnBackend`, `SnnEncoder`, `SnnDecoder`,
+  `SpikingMoeRouter`, `SnnCapabilities`, `SnnStepOutput`) is folded into this
+  crate and lives nowhere else (cortex-tensor removal tracked in
+  [rmems/cortex-tensor#137](https://github.com/rmems/cortex-tensor/issues/137));
+  the cortex-tensor fixes for
+  [#91](https://github.com/rmems/cortex-tensor/issues/91),
+  [#92](https://github.com/rmems/cortex-tensor/issues/92), and
+  [#93](https://github.com/rmems/cortex-tensor/issues/93) are ported with it so
+  they are fixed exactly once.
+  - New `encoding` module: `SpikeEncoder` / `SpikeDecoder` boundary traits with
+    declared `SpikeEncoding` / `SpikeDecoding` metadata, plus `RateEncoder`
+    and `SpikeCountDecoder` ported from cortex-tensor. `SpikeDecoder::decode`
+    is fallible and sized by `num_neurons` (the output population), not the
+    input channel count, and rejects out-of-range fired IDs instead of
+    dropping them.
+  - `SpikingNetwork::step_frozen` joins the step contract: a held-out tick
+    that must not change plasticity-controlled state. The default **fails
+    closed** (an unsupported-operation error, like the `reset` default), so a
+    backend that does not override it can never silently run the learning path
+    on a held-out call; overriders must advertise the `frozen_evaluation`
+    feature. Ports cortex-tensor issue
+    [#92](https://github.com/rmems/cortex-tensor/issues/92).
+  - New `spiking_router` module: `SpikingExpertRouter<R, S, E, D>` — the
+    spiking MoE routing host ported from cortex-tensor's `SpikingMoeRouter` —
+    composing `ExpertRouter` gate logits, a `SpikeEncoder`, a
+    `SpikingNetwork`, and a `SpikeDecoder` into gate → encode → step → decode
+    → boosted top-k. `SpikingRouteOutput` carries the boosted route, the
+    tick's fired IDs, the output population, and the bounded `hidden_gain`.
+    `forward_frozen` checks the backend's `frozen_evaluation` capability
+    before the encoder advances and never falls back to the learning path.
+    Ports the cortex-tensor issue
+    [#93](https://github.com/rmems/cortex-tensor/issues/93) fixes: additive
+    spike boost (`gate + spike_boost × activity`, saturating at `f32::MAX`,
+    `±Inf` gates keep their value; `with_spike_boost` validates finite ≥ 0),
+    bounded hidden gain (selected softmax mass weighted by activity
+    normalized to the tick peak; silent ticks keep the dense selected mass),
+    and host-side validation of backend spikes and decoder readouts — with
+    the ported tests.
+  - `ExpertRouter::gate_logits(embedding) -> Result<Vec<f32>>`: pre-softmax
+    logits, the scores `route` normalizes. The spike boost is defined on
+    logits, not normalized weights, so `SpikingExpertRouter` requires it; the
+    default fails closed and `StubExpertRouter` / `SyntheticExpertRouter`
+    override it with their exact scores.
+  - `NeuromodSnn::identity_wired(channels, seed)`: one LIF output neuron per
+    input channel wired to its own channel at the configured maximum weight —
+    the expert-*i*-at-neuron-*i* topology for `SpikingExpertRouter` — and
+    drivable-wiring validation in `NeuromodSnn::from_network` (a LIF neuron
+    with no strictly positive weight on an integrated channel, or a
+    non-finite one, is rejected at construction instead of staying silent
+    forever). Ports cortex-tensor issue
+    [#91](https://github.com/rmems/cortex-tensor/issues/91).
+  - `NeuromodSnn::step_frozen` routes through neuromod 0.7's
+    `step_frozen_with_rng` (weights, eligibility, thresholds/decay, and stored
+    modulators stay bit-for-bit unchanged; runtime state advances) and
+    `capabilities()` advertises `frozen_evaluation`. Ports cortex-tensor
+    issue [#92](https://github.com/rmems/cortex-tensor/issues/92).
+  - `PortSpec` gains `encoding` / `decoding` (`Option`, `#[serde(default)]` so
+    existing plans deserialize unchanged): the plan-side mirror of
+    `SpikeEncoder::encoding` / `SpikeDecoder::decoding`. An edge into a
+    consumer that declares an encoding/decoding must come from a producer
+    declaring the same scheme and timestep/window count; a range mismatch is
+    not an error (the projector already bounds stimuli).
+- **BREAKING**: `HybridError` gains `SnnSpikeOutOfRange { neuron, num_neurons }`,
+  `SnnDuplicateSpike { neuron }`, and `SnnInvalidReadout { index, value }`, and
+  `ForwardValueStage` gains `EncoderStimulus` and `DecoderReadout` (both
+  exhaustive enums; downstream `match` arms must be updated)
+  ([#61](https://github.com/rmems/hybrid-fusion/issues/61)).
+- **BREAKING**: `PortSpec` gains `encoding` / `decoding` fields (struct
+  literals must be updated; the `any` / `f32` / `f32_exact` constructors and
+  deserialization keep the old behavior)
+  ([#61](https://github.com/rmems/hybrid-fusion/issues/61)).
+- **BREAKING**: `HybridNetwork::forward` reports a fired ID outside the output
+  population as `HybridError::SnnSpikeOutOfRange` (was free-text
+  `HybridError::SnnStep`), and additionally rejects a backend reporting the
+  same neuron twice in one tick with `HybridError::SnnDuplicateSpike`. Spike
+  validation is host-side, so every `SpikingNetwork` is checked, not only the
+  spiking-router path ([#61](https://github.com/rmems/hybrid-fusion/issues/61),
+  cortex-tensor [#93](https://github.com/rmems/cortex-tensor/issues/93)).
 - Format-neutral planning topology: `AnnTopology`, `SnnTopology`,
   `HybridTopology`, and `TopologySource`, plus
   `HybridExecutionPlan::from_topology` and `from_reverse_topology`. Planning

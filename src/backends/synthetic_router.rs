@@ -5,7 +5,7 @@
 //! No model files: gate scores from embedding chunks, softmax, top-k selection.
 
 use crate::error::{HybridError, Result};
-use crate::routing::{MAX_REASONABLE_EXPERTS, route_synthetic};
+use crate::routing::{MAX_REASONABLE_EXPERTS, route_synthetic, synthetic_gate_scores};
 use crate::traits::{ExpertRouteOutput, ExpertRouter};
 
 /// MoE router driven by [`route_synthetic`] (corinth pure DenseSim spirit without weights).
@@ -57,6 +57,17 @@ impl ExpertRouter for SyntheticExpertRouter {
             selected_experts,
             routing_entropy: Some(entropy),
         })
+    }
+
+    /// The embedding-chunk sums `route` normalizes — the exact pre-softmax
+    /// scores of [`route_synthetic`].
+    fn gate_logits(&mut self, embedding: &[f32]) -> Result<Vec<f32>> {
+        if embedding.is_empty() {
+            return Err(HybridError::InvalidConfig(
+                "SyntheticExpertRouter::gate_logits: embedding must be non-empty".into(),
+            ));
+        }
+        Ok(synthetic_gate_scores(self.num_experts, embedding))
     }
 }
 

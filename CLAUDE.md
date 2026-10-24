@@ -13,7 +13,7 @@ Run from the repo root. "Verified" means it ran successfully in a fresh checkout
 | Command | Status |
 |---|---|
 | `cargo build --all-features` | verified |
-| `cargo test --all-features` | verified (185 unit tests plus integration tests, 0 failed) |
+| `cargo test --all-features` | verified (222 unit tests plus integration tests, 0 failed) |
 | `cargo test` | verified |
 | `cargo fmt --check` | verified |
 | `cargo clippy --all-targets --all-features -- -D warnings` | verified |
@@ -28,7 +28,7 @@ CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build
 
 ## Architecture map
 
-- `src/traits.rs`: pluggable surface (`Transformer`, `SpikingNetwork`, `ExpertRouter`, `SpikeActivity`, deprecated loader shims).
+- `src/traits.rs`: pluggable surface (`Transformer`, `SpikingNetwork` incl. `step_frozen`, `ExpertRouter` incl. `gate_logits`, `SpikeActivity`, deprecated loader shims). `src/encoding.rs`: ANN↔SNN boundary adapters (`SpikeEncoder`, `SpikeDecoder`, `RateEncoder`, `SpikeCountDecoder`). `src/spiking_router.rs`: `SpikingExpertRouter` hybrid MoE routing host (the cortex-tensor `SpikingMoeRouter` port, issue #61).
 - `src/hybrid.rs`: `HybridNetwork<T, S>` forward path. `src/projector.rs`: pool, resize, `tanh` into SNN stimuli.
 - `src/reverse.rs` + `src/routing.rs`: `ReverseHybridPath` (activity to embedding to MoE route) and pure routing math.
 - `src/topology.rs`, `src/plan.rs`, `src/capabilities.rs` + `src/capabilities/contract.rs`: neutral planning topology,

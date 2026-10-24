@@ -49,6 +49,12 @@ pub trait Transformer {
 
 /// Spiking backend: bounded stimuli → fired neuron indices.
 ///
+/// This is the **single ANN↔SNN step contract** for the stack (issue #61 /
+/// RM-2205): the cortex-tensor `SnnBackend` surface was folded into it and
+/// lives nowhere else. The boundary adapters are [`crate::SpikeEncoder`] (ANN
+/// signal → stimuli) and [`crate::SpikeDecoder`] (fired IDs → readout); the
+/// hybrid routing host composing all three is [`crate::SpikingExpertRouter`].
+///
 /// Input channels and output neurons are separate axes, stable over stepping.
 /// [`crate::HybridNetwork::forward`] rejects either axis being zero before
 /// projection or [`step`](Self::step), and checks returned fired-ID bounds.
@@ -57,6 +63,27 @@ pub trait SpikingNetwork {
     /// Return output neuron IDs in `0..num_neurons()`; do not reinterpret them
     /// as input-channel IDs or replicate spikes to fill an input-sized vector.
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>;
+
+    /// Held-out tick: like [`step`](Self::step), but no plasticity-controlled
+    /// state (weights, eligibility traces, thresholds) may change.
+    ///
+    /// The default **fails closed**, matching [`reset`](Self::reset): a backend
+    /// that does not override it cannot be evaluated frozen, so a held-out tick
+    /// can never silently run the learning path. A backend that overrides this
+    /// method MUST also advertise the `frozen_evaluation`
+    /// [`RequiredFeature`](crate::RequiredFeature) in
+    /// [`capabilities`](Self::capabilities); hosts such as
+    /// [`crate::SpikingExpertRouter::forward_frozen`] reject the call before
+    /// stepping when the feature is absent.
+    fn step_frozen(
+        &mut self,
+        _stimuli: &[f32],
+        _modulators: &NeuroModulators,
+    ) -> Result<Vec<usize>> {
+        Err(crate::HybridError::SnnStep(
+            "frozen evaluation is not supported by this backend".into(),
+        ))
+    }
 
     /// Stimulus input width, independent of output population.
     fn num_channels(&self) -> usize;
@@ -86,7 +113,9 @@ pub trait SpikingNetwork {
     /// advertise cross-call state, reset, caller-controlled RNG, or
     /// neuromodulation — those are opt-in overrides. A stateless `step` that
     /// depends only on the current stimuli must not be treated as recurrent.
-    /// Implementations must not call [`step`](Self::step).
+    /// Backends that override [`step_frozen`](Self::step_frozen) must add the
+    /// `frozen_evaluation` feature here. Implementations must not call
+    /// [`step`](Self::step).
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities::snn(std::any::type_name::<Self>())
             .with_dtypes([Dtype::F32])
@@ -366,6 +395,35 @@ pub trait ExpertRouter {
     ///
     /// Returns [`Err`] for empty embeddings or backend-specific validation failures.
     fn route(&mut self, embedding: &[f32]) -> Result<ExpertRouteOutput>;
+
+    /// Pre-softmax gate logits for `embedding`: the raw, unnormalized scores
+    /// whose softmax is [`ExpertRouteOutput::expert_weights`].
+    ///
+    /// The additive spike boost of [`crate::SpikingExpertRouter`] is defined on
+    /// gate **logits**, not on the normalized weights [`route`](Self::route)
+    /// returns (boosting a normalized weight cannot promote an expert
+    /// monotonically — issue #93). That host therefore calls this method and
+    /// re-normalizes with [`crate::routing::softmax`] itself.
+    ///
+    /// The default fails closed with [`crate::HybridError::InvalidConfig`] so a
+    /// backend that only produces normalized weights is never silently
+    /// misread: a router that cannot expose logits cannot be composed into
+    /// [`crate::SpikingExpertRouter`]. Routers whose logits exist (stub and
+    /// synthetic reference routers, checkpoint-backed gate matmuls) override
+    /// this with the exact scores [`route`](Self::route) normalizes.
+    ///
+    /// Contract for overrides: returns exactly [`num_experts`](Self::num_experts)
+    /// scores, rejects empty embeddings and backend-specific dimension
+    /// mismatches, and leaves router state unchanged for a rejected call.
+    /// `route` and this method must agree — same embedding, same scores.
+    fn gate_logits(&mut self, embedding: &[f32]) -> Result<Vec<f32>> {
+        let _ = embedding;
+        Err(crate::HybridError::InvalidConfig(
+            "this ExpertRouter does not expose pre-softmax gate logits; \
+             SpikingExpertRouter requires them to apply the spike boost"
+                .into(),
+        ))
+    }
 }
 
 #[cfg(test)]
