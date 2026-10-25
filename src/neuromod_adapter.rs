@@ -62,11 +62,13 @@
 //!
 //! # Seeded-replay contract
 //!
-//! [`NeuromodSnn`] owns a `neuromod::StdRng`. The [`SpikingNetwork::step`] path
-//! routes through `neuromod::SpikingNetwork::step_with_rng` using that owned
-//! generator, so the adapter is deterministic *by construction*: two
-//! [`NeuromodSnn::with_seed`] instances built with the same dimensions and seed,
-//! fed the same stimulus sequence, produce identical fired-index sequences. [`NeuromodSnn::reset`]
+//! [`NeuromodSnn`] owns a `neuromod::StdRng`. The [`SpikingNetwork::step`] and
+//! [`SpikingNetwork::step_frozen`] paths both route through `neuromod`'s
+//! `step_with_rng` / `step_frozen_with_rng` using that owned generator, so the
+//! adapter is deterministic *by construction*: two [`NeuromodSnn::with_seed`]
+//! instances built with the same dimensions and seed, fed the same stimulus
+//! sequence (mixing learning and held-out steps freely), produce identical
+//! fired-index sequences. [`NeuromodSnn::reset`]
 //! resets the neuron dynamics **and restores the constructor's initial
 //! seed-derived LIF weights and thresholds**, but does **not** reseed the RNG; use
 //! [`NeuromodSnn::reseed`] to restart the random stream explicitly. Because
@@ -77,6 +79,16 @@
 //! `reset(); reseed(seed)` sequence replays from the *original* connectivity and
 //! reproduces the original fired-index sequence. A caller who wants
 //! nondeterminism can [`reseed`](NeuromodSnn::reseed) from an entropy source.
+//!
+//! # Frozen evaluation (#92)
+//!
+//! [`SpikingNetwork::step_frozen`] maps onto `neuromod::SpikingNetwork::
+//! step_frozen_with_rng`: runtime state (membranes, spike timestamps,
+//! `global_step`) advances, but weights, eligibility traces, LIF
+//! thresholds/decay, and the stored modulators stay bit-for-bit unchanged.
+//! `capabilities()` therefore advertises `frozen_evaluation`; hosts such as
+//! [`crate::SpikingExpertRouter::forward_frozen`] check that feature before
+//! stepping so a held-out tick can never silently run the learning path.
 
 use core::mem::size_of;
 
@@ -286,7 +298,55 @@ impl NeuromodSnn {
                 *w = seeded_weight(seed, ni, c);
             }
         }
-        Ok(Self::from_network(inner, seed))
+        Self::from_network(inner, seed)
+    }
+
+    /// Build an identity-wired adapter: `num_channels` LIF output neurons over
+    /// `num_channels` stimulus channels, with neuron *i* connected to channel
+    /// *i* at the configured maximum synaptic weight and every other input
+    /// weight left at zero (#91).
+    ///
+    /// This is the constructor for the expert-*i*-at-neuron-*i* router case
+    /// ([`crate::SpikingExpertRouter`] with
+    /// `num_neurons == num_channels == num_experts`): driving channel *i*
+    /// alone spikes neuron *i* alone, so one expert maps to one channel with
+    /// no cross-talk. [`Self::with_seed`]'s hashed dense weights fire in
+    /// heterogeneous subsets but do **not** give that channel isolation.
+    ///
+    /// `neuromod::SpikingNetwork::with_dimensions` zero-initialises every LIF
+    /// weight and the engine's L1 renormalization leaves a blank neuron blank,
+    /// so an unseeded network can never spike or learn (#91); this
+    /// constructor, like [`Self::with_seed`], seeds strictly positive weights
+    /// before the first step.
+    ///
+    /// # Errors
+    ///
+    /// [`HybridError::InvalidConfig`] for a zero channel count or a matrix
+    /// payload above [`Self::MAX_MATRIX_BYTES`] (same budget as
+    /// [`Self::with_seed`], which this mirrors at `num_neurons == num_channels`).
+    pub fn identity_wired(num_channels: usize, seed: u64) -> Result<Self> {
+        if num_channels == 0 {
+            return Err(HybridError::InvalidConfig(
+                "NeuromodSnn::identity_wired requires num_channels > 0".into(),
+            ));
+        }
+        let matrix_bytes = Self::pre_inference_matrix_bytes(num_channels, num_channels);
+        if matrix_bytes > Self::MAX_MATRIX_BYTES {
+            return Err(HybridError::InvalidConfig(format!(
+                "NeuromodSnn matrix payload {matrix_bytes} exceeds limit {} bytes; \
+                 choose a smaller explicit output population or a different backend",
+                Self::MAX_MATRIX_BYTES
+            )));
+        }
+        let mut inner =
+            neuromod::SpikingNetwork::with_dimensions(num_channels, DEFAULT_NUM_IZH, num_channels);
+        let (_w_min, w_max) = inner.stdp_config.weight_bounds();
+        for (ni, neuron) in inner.neurons.iter_mut().enumerate() {
+            // `with_dimensions` sizes each LIF weight vector to the channel
+            // count, so index `ni` is always in range here.
+            neuron.weights[ni] = w_max;
+        }
+        Self::from_network(inner, seed)
     }
 
     /// Wrap a caller-constructed neuromod network with an RNG seeded from `seed`.
@@ -294,17 +354,56 @@ impl NeuromodSnn {
     /// Kept `pub(crate)` so no `neuromod` type leaks across the public boundary;
     /// used by tests that need a bespoke topology. Unlike [`Self::with_seed`],
     /// this does not enforce the matrix budget: the caller owns that allocation.
-    pub(crate) fn from_network(inner: neuromod::SpikingNetwork, seed: u64) -> Self {
+    ///
+    /// # Drivable-wiring validation (#91)
+    ///
+    /// Every LIF neuron must be able to spike, or its channel would carry an
+    /// expert that silently stays ANN-only. The engine integrates only
+    /// `weights[..weights.len().min(num_channels)]`, takes `|stimulus|` (so a
+    /// negative-only neuron receives non-positive current), and — because the
+    /// renormalization pass skips a blank neuron — cannot bootstrap a neuron
+    /// with no positive weight through STDP. A wrapped network is therefore
+    /// rejected when any LIF neuron has a non-finite weight on an integrated
+    /// channel or has no strictly positive weight in that range. A sparse
+    /// checkpoint is fine as long as one present weight can drive the neuron.
+    ///
+    /// # Errors
+    ///
+    /// [`HybridError::InvalidConfig`] naming the first offending neuron.
+    pub(crate) fn from_network(inner: neuromod::SpikingNetwork, seed: u64) -> Result<Self> {
+        let channels = inner.num_channels;
+        for (idx, neuron) in inner.neurons.iter().enumerate() {
+            // Only `weights[..num_channels]` is ever integrated; weights past
+            // it are ignored and channels past a short vector are skipped.
+            let in_range = &neuron.weights[..neuron.weights.len().min(channels)];
+            if let Some(ch) = in_range.iter().position(|w| !w.is_finite()) {
+                return Err(HybridError::InvalidConfig(format!(
+                    "neuromod SpikingNetwork LIF neuron {idx} has a non-finite weight on \
+                     channel {ch}; it would poison the membrane potential"
+                )));
+            }
+            // The engine integrates `|stimulus| * weight`, so only a strictly
+            // positive weight can ever drive the membrane toward threshold.
+            if !in_range.iter().any(|w| *w > 0.0) {
+                return Err(HybridError::InvalidConfig(format!(
+                    "neuromod SpikingNetwork LIF neuron {idx} has no positive weight on \
+                     channels 0..{} (of {channels}), so it can never spike; seed its \
+                     weights (e.g. via NeuromodSnn::with_seed or identity_wired) before \
+                     wrapping it",
+                    in_range.len()
+                )));
+            }
+        }
         // Snapshot the caller-provided network's current weights as the replay
         // baseline so `reset` restores exactly this starting connectivity.
         let initial_weights = inner.neurons.iter().map(|n| n.weights.clone()).collect();
         let initial_thresholds = inner.neurons.iter().map(|n| n.threshold).collect();
-        Self {
+        Ok(Self {
             inner,
             rng: StdRng::seed_from_u64(seed),
             initial_weights,
             initial_thresholds,
-        }
+        })
     }
 
     /// Reset the underlying neuron dynamics (membranes, spikes, counters) to
@@ -446,6 +545,18 @@ impl SpikingNetwork for NeuromodSnn {
             .map_err(map_step_error)
     }
 
+    /// Held-out step (#92): routes through neuromod 0.7's `step_frozen_with_rng`,
+    /// which runs the full runtime pipeline but leaves the plasticity-controlled
+    /// state (weights, eligibility traces, LIF thresholds/decay, stored
+    /// modulators) bit-for-bit unchanged, using the same owned seeded RNG as
+    /// [`step`](Self::step) so mixed learning/held-out sequences replay.
+    fn step_frozen(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>> {
+        let m = Self::to_neuromod_modulators(modulators)?;
+        self.inner
+            .step_frozen_with_rng(stimuli, &m, &mut self.rng)
+            .map_err(map_step_error)
+    }
+
     fn num_channels(&self) -> usize {
         // `num_channels` is a public field on neuromod::SpikingNetwork, not a method.
         self.inner.num_channels
@@ -460,17 +571,18 @@ impl SpikingNetwork for NeuromodSnn {
         Ok(())
     }
 
-    /// Same report cortex-tensor's neuromod adapter publishes
+    /// Same report cortex-tensor's neuromod adapter published
     /// (`backend_name: "neuromod::SpikingNetwork"`, plasticity and
-    /// neuromodulation on, frozen evaluation off, caller-controlled RNG on),
-    /// translated into [`BackendCapabilities`] rather than a second vocabulary.
+    /// neuromodulation on, caller-controlled RNG on), translated into
+    /// [`BackendCapabilities`] rather than a second vocabulary.
     ///
-    /// `caller_rng` is the owned generator passed to `step_with_rng`. Callers
-    /// set that generator with [`Self::with_seed`] and [`Self::reseed`]; `step`
-    /// does not take a separate RNG argument. Every `step` uses neuromod's
-    /// learning path. neuromod 0.7 also offers `step_frozen_with_rng`, which
-    /// keeps weights and eligibility unchanged. This adapter does not call it,
-    /// so `frozen_evaluation` stays absent.
+    /// `caller_rng` is the owned generator passed to `step_with_rng` /
+    /// `step_frozen_with_rng`. Callers set that generator with
+    /// [`Self::with_seed`] and [`Self::reseed`]; neither step method takes a
+    /// separate RNG argument. Every learning `step` uses neuromod's plasticity
+    /// path, and [`step_frozen`](Self::step_frozen) keeps weights and
+    /// eligibility unchanged, so both `plasticity` and `frozen_evaluation`
+    /// are advertised (#92).
     ///
     /// Does not step the network or touch the owned RNG.
     fn capabilities(&self) -> crate::BackendCapabilities {
@@ -484,6 +596,7 @@ impl SpikingNetwork for NeuromodSnn {
             .with_reset(true)
             .with_features([
                 RequiredFeature::new("step"),
+                RequiredFeature::new("frozen_evaluation"),
                 RequiredFeature::new("caller_rng"),
                 RequiredFeature::new("plasticity"),
                 RequiredFeature::new("neuromodulation"),
@@ -1105,8 +1218,14 @@ mod tests {
     #[test]
     fn reset_replays_after_modulators_retune_thresholds() {
         let mut inner = neuromod::SpikingNetwork::with_dimensions(12, 1, 9);
+        // Every LIF neuron needs a drivable (strictly positive) weight for
+        // `from_network` to accept it; keep them off channel 8 so the probe
+        // still drives only neuron 10.
+        for (i, neuron) in inner.neurons.iter_mut().enumerate() {
+            neuron.weights[i % 8] = 0.3;
+        }
         inner.neurons[10].weights[8] = 2.0;
-        let mut snn = NeuromodSnn::from_network(inner, SEED);
+        let mut snn = NeuromodSnn::from_network(inner, SEED).unwrap();
         let neutral = NeuroModulators {
             dopamine: 0.0,
             acetylcholine: 0.0,
@@ -1344,8 +1463,8 @@ mod tests {
         assert!(advertised(&caps, "plasticity"));
         assert!(advertised(&caps, "neuromodulation"));
         assert!(
-            !advertised(&caps, "frozen_evaluation"),
-            "step always learns; the frozen engine path is not exposed"
+            advertised(&caps, "frozen_evaluation"),
+            "step_frozen routes through neuromod's frozen path (#92)"
         );
 
         let before_weights = lif_weights(&snn);
@@ -1443,7 +1562,7 @@ mod tests {
             .capabilities();
         assert!(advertised(&caps, "plasticity"));
         assert!(advertised(&caps, "neuromodulation"));
-        assert!(!advertised(&caps, "frozen_evaluation"));
+        assert!(advertised(&caps, "frozen_evaluation"));
 
         let learned = |mods: NeuroModulators| {
             let mut snn = NeuromodSnn::with_seed(N, N, PLASTICITY_SEED).unwrap();
@@ -1484,5 +1603,372 @@ mod tests {
                 got: 3
             }
         ));
+    }
+
+    // ── Ports of cortex-tensor PR #131 (issues #91, #92) ───────────────────
+    // Relocated here with the adapter (RM-2205): the behaviours now live in
+    // the one neuromod adapter, and the tests came with the code.
+
+    const PORT_WIDTH: usize = 8;
+
+    fn spike_counts(snn: &mut NeuromodSnn, stimulus: &[f32], steps: usize) -> Vec<usize> {
+        let mut counts = vec![0usize; snn.num_neurons()];
+        for _ in 0..steps {
+            for idx in snn.step(stimulus, &NeuroModulators::default()).unwrap() {
+                counts[idx] += 1;
+            }
+        }
+        counts
+    }
+
+    /// Issue #91: `SpikingNetwork::with_dimensions` zero-initialises LIF
+    /// weights and neuromod's L1 renormalization keeps a blank neuron blank,
+    /// so an unseeded network never spikes. `identity_wired` must seed
+    /// weights so every channel can, and the identity wiring must isolate
+    /// channels so the expert-*i*-at-neuron-*i* router mapping holds.
+    #[test]
+    fn identity_wired_spikes_every_channel_and_isolates_channels() {
+        let mut net = NeuromodSnn::identity_wired(PORT_WIDTH, SEED).unwrap();
+        assert_eq!(net.num_channels(), PORT_WIDTH);
+        assert_eq!(net.num_neurons(), PORT_WIDTH);
+        let counts = spike_counts(&mut net, &[1.0; PORT_WIDTH], 200);
+        assert!(
+            counts.iter().all(|&c| c > 0),
+            "every channel must spike under strong stimulus: {counts:?}"
+        );
+
+        // Identity wiring: driving channel `i` alone spikes neuron `i` alone.
+        for ch in 0..PORT_WIDTH {
+            let mut net = NeuromodSnn::identity_wired(PORT_WIDTH, SEED).unwrap();
+            let mut stimulus = [0.0; PORT_WIDTH];
+            stimulus[ch] = 1.0;
+            let counts = spike_counts(&mut net, &stimulus, 50);
+            assert!(counts[ch] > 0, "channel {ch} silent: {counts:?}");
+            assert!(
+                counts.iter().enumerate().all(|(i, &c)| i == ch || c == 0),
+                "channel {ch} leaked: {counts:?}"
+            );
+        }
+
+        // Same budget rule as `with_seed`.
+        assert!(matches!(
+            NeuromodSnn::identity_wired(0, SEED),
+            Err(HybridError::InvalidConfig(_))
+        ));
+    }
+
+    /// Issue #91: a wrapped network whose LIF neurons can never spike is
+    /// rejected at construction, not after thousands of silent ticks.
+    #[test]
+    fn from_network_rejects_lif_neurons_that_can_never_spike() {
+        // Fully blank: nothing can ever fire.
+        let blank = neuromod::SpikingNetwork::with_dimensions(PORT_WIDTH, 0, PORT_WIDTH);
+        let err = NeuromodSnn::from_network(blank, SEED)
+            .err()
+            .expect("rejected");
+        assert!(matches!(err, HybridError::InvalidConfig(_)), "{err}");
+        assert!(err.to_string().contains("neuron 0"), "{err}");
+
+        // One blank neuron among wired ones.
+        let mut one_blank = neuromod::SpikingNetwork::with_dimensions(PORT_WIDTH, 0, PORT_WIDTH);
+        for (i, neuron) in one_blank.neurons.iter_mut().enumerate() {
+            if i != 3 {
+                neuron.weights[i] = 1.0;
+            }
+        }
+        let err = NeuromodSnn::from_network(one_blank, SEED)
+            .err()
+            .expect("rejected");
+        assert!(err.to_string().contains("neuron 3"), "{err}");
+
+        // Only `weights[..num_channels]` is ever integrated, so a neuron whose
+        // sole non-zero weight sits past the channel range is just as silent.
+        let mut out_of_range = neuromod::SpikingNetwork::with_dimensions(PORT_WIDTH, 0, PORT_WIDTH);
+        for (i, neuron) in out_of_range.neurons.iter_mut().enumerate() {
+            if i == 3 {
+                neuron.weights.push(1.0);
+            } else {
+                neuron.weights[i] = 1.0;
+            }
+        }
+        let err = NeuromodSnn::from_network(out_of_range, SEED)
+            .err()
+            .expect("rejected");
+        assert!(err.to_string().contains("neuron 3"), "{err}");
+
+        // neuromod integrates `|stimulus|`, so a negative-only neuron receives
+        // non-positive current and never reaches threshold either.
+        let mut negative = neuromod::SpikingNetwork::with_dimensions(PORT_WIDTH, 0, PORT_WIDTH);
+        for (i, neuron) in negative.neurons.iter_mut().enumerate() {
+            neuron.weights[i] = if i == 3 { -1.0 } else { 1.0 };
+        }
+        let err = NeuromodSnn::from_network(negative, SEED)
+            .err()
+            .expect("rejected");
+        assert!(err.to_string().contains("neuron 3"), "{err}");
+
+        // A non-finite in-range weight poisons the membrane potential.
+        let mut nan = neuromod::SpikingNetwork::with_dimensions(PORT_WIDTH, 0, PORT_WIDTH);
+        for (i, neuron) in nan.neurons.iter_mut().enumerate() {
+            neuron.weights[i] = 1.0;
+        }
+        nan.neurons[3].weights[5] = f32::NAN;
+        let err = NeuromodSnn::from_network(nan, SEED)
+            .err()
+            .expect("rejected");
+        assert!(err.to_string().contains("neuron 3"), "{err}");
+
+        // The engine skips channels past a short weight vector, so a sparse
+        // checkpoint is accepted when one present weight can drive the
+        // neuron...
+        let mut short = neuromod::SpikingNetwork::with_dimensions(PORT_WIDTH, 0, PORT_WIDTH);
+        for (i, neuron) in short.neurons.iter_mut().enumerate() {
+            neuron.weights[i] = 1.0;
+        }
+        short.neurons[3].weights.truncate(4);
+        let mut short = NeuromodSnn::from_network(short, SEED).expect("sparse but drivable");
+        let mut one_hot = [0.0; PORT_WIDTH];
+        one_hot[3] = 1.0;
+        assert!(spike_counts(&mut short, &one_hot, 50)[3] > 0);
+
+        // ...and rejected when none of the present weights is positive.
+        let mut short_blank = neuromod::SpikingNetwork::with_dimensions(PORT_WIDTH, 0, PORT_WIDTH);
+        for (i, neuron) in short_blank.neurons.iter_mut().enumerate() {
+            neuron.weights[i] = 1.0;
+        }
+        short_blank.neurons[3].weights = vec![0.0; 2];
+        let err = NeuromodSnn::from_network(short_blank, SEED)
+            .err()
+            .expect("rejected");
+        assert!(err.to_string().contains("neuron 3"), "{err}");
+        let mut empty = neuromod::SpikingNetwork::with_dimensions(PORT_WIDTH, 0, PORT_WIDTH);
+        for (i, neuron) in empty.neurons.iter_mut().enumerate() {
+            neuron.weights[i] = 1.0;
+        }
+        empty.neurons[3].weights.clear();
+        let err = NeuromodSnn::from_network(empty, SEED)
+            .err()
+            .expect("rejected");
+        assert!(err.to_string().contains("neuron 3"), "{err}");
+
+        // A fully wired network round-trips through `from_network`.
+        let wired = NeuromodSnn::identity_wired(PORT_WIDTH, SEED).unwrap();
+        let json = serde_json::to_string(&wired.inner).unwrap();
+        let restored: neuromod::SpikingNetwork = serde_json::from_str(&json).unwrap();
+        assert!(NeuromodSnn::from_network(restored, SEED).is_ok());
+    }
+
+    /// Learning state of every LIF neuron (weights, eligibility traces,
+    /// threshold and decay parameters) plus the stored modulators and R-STDP
+    /// config — what `step_frozen` must leave bit-for-bit intact. Runtime
+    /// state (membranes, spike timestamps, `global_step`) is allowed to
+    /// advance and is excluded.
+    fn neuromod_learning_state(snn: &NeuromodSnn) -> String {
+        let lif: Vec<_> = snn
+            .inner
+            .neurons
+            .iter()
+            .map(|n| {
+                (
+                    n.weights.clone(),
+                    n.eligibility.clone(),
+                    n.threshold.to_bits(),
+                    n.base_threshold.to_bits(),
+                    n.decay_rate.to_bits(),
+                )
+            })
+            .collect();
+        serde_json::to_string(&(lif, snn.inner.modulators, snn.inner.stdp_config)).unwrap()
+    }
+
+    /// Issue #92: `step_frozen` runs the held-out path — runtime state
+    /// advances, plasticity-controlled state does not move by a single bit.
+    #[test]
+    fn step_frozen_preserves_learning_state() {
+        let mut net = NeuromodSnn::identity_wired(PORT_WIDTH, SEED).unwrap();
+        // Warm up with rewarded learning steps so traces are non-trivial,
+        // then snapshot.
+        for _ in 0..5 {
+            net.step(&[1.0; PORT_WIDTH], &reward_mods()).unwrap();
+        }
+        let before = neuromod_learning_state(&net);
+        let step_before = net.inner.global_step;
+
+        let fired = net.step_frozen(&[1.0; PORT_WIDTH], &reward_mods()).unwrap();
+        assert!(!fired.is_empty(), "frozen path still produces spikes");
+        assert_eq!(
+            net.inner.global_step,
+            step_before + 1,
+            "runtime state advances"
+        );
+        assert_eq!(
+            neuromod_learning_state(&net),
+            before,
+            "frozen step mutated learning state"
+        );
+
+        // Control: a learning-enabled step with the same input does move
+        // traces.
+        net.step(&[1.0; PORT_WIDTH], &reward_mods()).unwrap();
+        assert_ne!(neuromod_learning_state(&net), before);
+    }
+
+    /// Issue #92: the adapter always owns its seeded RNG, so a mixed
+    /// learning/held-out sequence replays bit-for-bit on a second instance,
+    /// and — unlike the cortex adapter, whose reset kept learned weights —
+    /// `reset()` (weight restore) plus `reseed` replays a learned epoch from
+    /// scratch.
+    #[test]
+    fn seeded_rng_replays_mixed_step_and_frozen_sequences() {
+        fn run_mixed(net: &mut NeuromodSnn) -> (Vec<Vec<usize>>, Vec<i64>) {
+            let mut spikes = Vec::new();
+            for i in 0..40 {
+                let stimulus = if i % 2 == 0 {
+                    [0.5; PORT_WIDTH]
+                } else {
+                    [0.3; PORT_WIDTH]
+                };
+                // Every 5th step is held out; the rest learn under reward.
+                spikes.push(if i % 5 == 0 {
+                    net.step_frozen(&stimulus, &reward_mods()).unwrap()
+                } else {
+                    net.step(&stimulus, &reward_mods()).unwrap()
+                });
+            }
+            (spikes, net.inner.input_spike_times.clone())
+        }
+
+        let mut a = NeuromodSnn::identity_wired(PORT_WIDTH, SEED).unwrap();
+        let mut b = NeuromodSnn::identity_wired(PORT_WIDTH, SEED).unwrap();
+        let initial = lif_weights(&a);
+        let first = run_mixed(&mut a);
+        assert_eq!(
+            first,
+            run_mixed(&mut b),
+            "same seed, same inputs, different trajectory"
+        );
+        assert_ne!(
+            lif_weights(&a),
+            initial,
+            "learning epoch must change weights for the replay to mean anything"
+        );
+
+        // reset() restores the constructor weights (not neuromod's learned
+        // ones) and reseed() restarts the stream: the same mixed sequence
+        // replays from the original connectivity.
+        a.reset();
+        a.reseed(SEED);
+        assert_eq!(lif_weights(&a), initial);
+        assert_eq!(run_mixed(&mut a), first, "reset + reseed did not replay");
+    }
+
+    /// Issue #91 end to end through the relocated host: a backend that can
+    /// spike on every channel must actually do so through
+    /// `SpikingExpertRouter::forward`, so no expert silently stays ANN-only.
+    #[test]
+    fn drives_spiking_expert_router_on_every_expert() {
+        use crate::traits::{ExpertRouteOutput, ExpertRouter};
+        use crate::{
+            HybridError, RateEncoder, SpikeCountDecoder, SpikingExpertRouter, SpikingNetwork,
+        };
+
+        /// Uniform gate: equal positive logits (a uniform embedding through a
+        /// dense router), `top_k == num_experts`, so a forward stimulates
+        /// every expert channel.
+        struct UniformRouter {
+            num_experts: usize,
+        }
+        impl ExpertRouter for UniformRouter {
+            fn num_experts(&self) -> usize {
+                self.num_experts
+            }
+            fn top_k(&self) -> usize {
+                self.num_experts
+            }
+            fn route(&mut self, embedding: &[f32]) -> crate::Result<ExpertRouteOutput> {
+                let logits = self.gate_logits(embedding)?;
+                let weights = crate::routing::softmax(&logits)?;
+                let entropy = crate::routing::routing_entropy(&weights);
+                Ok(ExpertRouteOutput {
+                    expert_weights: weights,
+                    selected_experts: crate::routing::top_k_indices(&logits, self.num_experts),
+                    routing_entropy: Some(entropy),
+                })
+            }
+            fn gate_logits(&mut self, embedding: &[f32]) -> crate::Result<Vec<f32>> {
+                if embedding.is_empty() {
+                    return Err(HybridError::InvalidConfig("empty embedding".into()));
+                }
+                Ok(vec![1.0; self.num_experts])
+            }
+        }
+
+        /// Recording backend: the same adapter, counting per-neuron spikes so
+        /// the test can see the tick activity the router consumed.
+        struct Recording {
+            inner: NeuromodSnn,
+            counts: Vec<usize>,
+        }
+        impl SpikingNetwork for Recording {
+            fn step(
+                &mut self,
+                stimuli: &[f32],
+                modulators: &NeuroModulators,
+            ) -> crate::Result<Vec<usize>> {
+                let fired = self.inner.step(stimuli, modulators)?;
+                for &idx in &fired {
+                    self.counts[idx] += 1;
+                }
+                Ok(fired)
+            }
+            fn step_frozen(
+                &mut self,
+                stimuli: &[f32],
+                modulators: &NeuroModulators,
+            ) -> crate::Result<Vec<usize>> {
+                self.inner.step_frozen(stimuli, modulators)
+            }
+            fn num_channels(&self) -> usize {
+                self.inner.num_channels()
+            }
+            fn num_neurons(&self) -> usize {
+                self.inner.num_neurons()
+            }
+            fn reset(&mut self) -> crate::Result<()> {
+                // The inherent NeuromodSnn::reset returns (); route through
+                // the trait impl for the Result contract.
+                SpikingNetwork::reset(&mut self.inner)
+            }
+            fn capabilities(&self) -> crate::BackendCapabilities {
+                self.inner.capabilities()
+            }
+        }
+
+        let backend = Recording {
+            inner: NeuromodSnn::identity_wired(PORT_WIDTH, SEED).unwrap(),
+            counts: vec![0; PORT_WIDTH],
+        };
+        let mut model = SpikingExpertRouter::new(
+            UniformRouter {
+                num_experts: PORT_WIDTH,
+            },
+            backend,
+            RateEncoder::default(),
+            SpikeCountDecoder,
+        )
+        .unwrap();
+        // A uniform gate stimulates all eight expert channels, so each one
+        // must fire at least once through `forward`.
+        let mods = NeuroModulators::default();
+        for _ in 0..200 {
+            let out = model.forward(&[1.0; 4], &mods).unwrap();
+            assert!(out.route.expert_weights.iter().all(|w| w.is_finite()));
+            assert!(out.hidden_gain.is_finite());
+        }
+        let counts = &model.snn().counts;
+        assert!(
+            counts.iter().all(|&c| c > 0),
+            "not every expert channel spiked: {counts:?}"
+        );
     }
 }

@@ -170,10 +170,20 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         };
         // The backend may already have advanced. Reject an invalid output
         // without incrementing the host counter; no backend rollback is implied.
-        if let Some(&id) = fired_neurons.iter().find(|&&id| id >= num_neurons) {
-            return Err(HybridError::SnnStep(format!(
-                "fired neuron {id} outside output population {num_neurons}"
-            )));
+        // Out-of-range and duplicate fired IDs are the host-side check of the
+        // backend contract, so every SpikingNetwork is validated, not only
+        // the spiking-router path.
+        let mut seen = std::collections::HashSet::with_capacity(fired_neurons.len());
+        for &id in &fired_neurons {
+            if id >= num_neurons {
+                return Err(HybridError::SnnSpikeOutOfRange {
+                    neuron: id,
+                    num_neurons,
+                });
+            }
+            if !seen.insert(id) {
+                return Err(HybridError::SnnDuplicateSpike { neuron: id });
+            }
         }
 
         self.global_step = self.global_step.saturating_add(1);

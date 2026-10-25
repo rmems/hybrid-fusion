@@ -17,6 +17,8 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 
 1. [Transformer trait](#1-transformer-trait)
 2. [SpikingNetwork trait](#2-spikingnetwork-trait)
+   - [SpikeEncoder / SpikeDecoder boundary adapters](#22-spikeencoder--spikedecoder-annsnn-boundary-adapters)
+   - [SpikingExpertRouter host](#23-spikingexpertrouter-hybrid-moe-routing-host)
 3. [NeuroModulators](#3-neuromodulators)
 4. [GgufLoader / GgufLayout (legacy)](#4-ggufloader--gguflayout)
 5. [SafetensorsLoader / SafetensorsLayout (legacy)](#5-safetensorsloader--safetensorslayout)
@@ -109,12 +111,20 @@ such as `"reference-embedding"`. Do not run `hidden_states` from this method.
 ```rust
 pub trait SpikingNetwork {
     fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>;
+    fn step_frozen(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>;
     fn num_channels(&self) -> usize;
     fn num_neurons(&self) -> usize { self.num_channels() }
     fn reset(&mut self) -> Result<()> { /* unsupported by default */ }
     fn capabilities(&self) -> BackendCapabilities { /* default report */ }
 }
 ```
+
+This is the **single ANN↔SNN step contract** for the stack (issue #61): the
+cortex-tensor `SnnBackend` surface was folded into it and lives nowhere else.
+The boundary adapters around it are
+[`SpikeEncoder`](#22-spikeencoder--spikedecoder-annsnn-boundary-adapters) and
+`SpikeDecoder`; the hybrid routing host composing all three is
+[`SpikingExpertRouter`](#23-spikingexpert-router-hybrid-moe-routing-host).
 
 ### `step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>`
 
@@ -151,6 +161,26 @@ fn step(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<
 }
 ```
 
+### `step_frozen(&mut self, stimuli: &[f32], modulators: &NeuroModulators) -> Result<Vec<usize>>`
+
+Held-out tick (issue #61, ported from cortex-tensor issue #92): like `step`,
+but **no plasticity-controlled state** — weights, eligibility traces,
+thresholds — may change. Runtime state (membranes, spike timestamps, the tick
+counter) may advance.
+
+**Contract:**
+
+- The default **fails closed** with an unsupported-operation
+  `HybridError::SnnStep`, mirroring the `reset` default: a backend that does
+  not override it cannot be evaluated frozen, so a held-out tick can never
+  silently run the learning path.
+- A backend that overrides it **must** advertise the `frozen_evaluation`
+  `RequiredFeature` in `capabilities()`. Hosts enforce this:
+  `SpikingExpertRouter::forward_frozen` rejects the call *before the encoder
+  or backend advances* when the feature is absent, and never falls back to
+  the learning `step`.
+- Same stimuli/modulators/fired-ID contract as `step`.
+
 ### `num_channels(&self) -> usize`
 
 The number of input channels the SNN expects. This determines the length
@@ -186,13 +216,13 @@ as a compatibility alias but normalizes to this typed reset capability.
 Side-effect-free report. The default advertises the SNN domain, `f32`, the
 stimulus width, `num_neurons()`, the mandatory one-step temporal window, and
 the mandatory `step` feature. It does **not** advertise cross-call state,
-reset, or `caller_rng`. Override
+reset, frozen evaluation, or `caller_rng`. Override
 `capabilities` with `with_stateful(true)` only when `step` retains state
-across calls, and override `reset` whenever `with_reset(true)` is reported.
-`NeuromodSnn` overrides both to report
+across calls, override `reset` whenever `with_reset(true)` is reported, and
+add the `frozen_evaluation` feature whenever `step_frozen` is overridden.
+`NeuromodSnn` overrides all of these to report
 `backend_name: "neuromod::SpikingNetwork"` plus `reset`, `caller_rng`,
-`plasticity`, and `neuromodulation`, matching cortex-tensor's neuromod
-adapter. Frozen evaluation is intentionally absent. Do not call `step`.
+`plasticity`, `neuromodulation`, and `frozen_evaluation`. Do not call `step`.
 
 ### The real SNN backend: `NeuromodSnn` (optional `neuromod` feature)
 
@@ -226,6 +256,24 @@ initial weights and thresholds, but does not
 reseed the generator; call `reseed(seed)` to restart the random stream
 explicitly. Reset plus reseed replays a run from a known starting point.
 
+**Frozen evaluation (issue #61 / cortex-tensor #92).** `step_frozen` routes
+through neuromod 0.7's `step_frozen_with_rng` with the same owned generator:
+runtime state advances, but weights, eligibility traces, LIF thresholds/decay,
+and the stored modulators stay bit-for-bit unchanged. `capabilities()`
+advertises `frozen_evaluation`, and mixed learning/held-out sequences replay
+under one seed exactly like learning-only ones.
+
+**Identity wiring (issue #61 / cortex-tensor #91).** `with_seed` seeds hashed
+dense weights so the LIF bank fires in heterogeneous subsets — good for
+coverage, but channels are not isolated. For the expert-*i*-at-neuron-*i*
+router topology use `NeuromodSnn::identity_wired(num_channels, seed)?`: one
+LIF output neuron per input channel, neuron *i* wired to channel *i* at the
+configured maximum weight, so driving channel *i* alone spikes neuron *i*
+alone. Wrapping a hand-built `neuromod::SpikingNetwork`
+(`NeuromodSnn::from_network`, crate-internal) rejects a LIF neuron with no
+strictly positive weight on an integrated channel — a channel that provably
+can never spike — at construction instead of after thousands of silent ticks.
+
 **Width and memory.** `new` / `with_seed` require explicit input and output
 dimensions. All LIF outputs retain full-width input connectivity. The internal
 Izhikevich neuron does not contribute returned IDs. Weights, eligibility, and
@@ -235,6 +283,98 @@ zero dimensions, overflow, and matrix payloads above `MAX_MATRIX_BYTES` (64 MiB)
 before allocating. This fixed guard allows up to 256 outputs at 16,384 inputs
 without permitting the former 4 GiB matrix construction. It is a conservative
 adapter allocation policy, not a neuron-dynamics limit or a total-memory bound.
+
+### 2.2 `SpikeEncoder` / `SpikeDecoder` (ANN↔SNN boundary adapters)
+
+Ported from cortex-tensor `SnnEncoder` / `SnnDecoder` as part of the single
+step contract (issue #61). They live in `src/encoding.rs`.
+
+```rust
+pub trait SpikeEncoder {
+    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> Result<Vec<f32>>;
+    fn reset(&mut self) {}
+    fn encoding(&self) -> SpikeEncoding { SpikeEncoding::default() } // Rate, 1 timestep
+}
+
+pub trait SpikeDecoder {
+    fn decode(&self, fired: &[usize], num_neurons: usize) -> Result<Vec<f32>>;
+    fn decoding(&self) -> SpikeDecoding { SpikeDecoding::default() } // Count, 1 tick
+}
+```
+
+- `SpikeEncoder::encode` maps an ANN-side f32 signal (e.g. `ExpertRouter`
+  gate logits) into exactly `channels` stimuli, or errors when the signal
+  cannot be represented. It is `&mut self` because real encoders are stateful
+  (phase accumulators, streaming windows): one `encode` call is one tick, and
+  encoder state is **not** failure-atomic with respect to later forward
+  errors — callers needing a clean epoch reset the encoder
+  (`SpikingExpertRouter::reset` does so only after the backend reset
+  succeeds).
+- `SpikeDecoder::decode` maps one tick of fired IDs into exactly
+  `num_neurons` readouts. It is fallible and sized by the **output
+  population**, not the channel count — hybrid-fusion keeps those axes
+  separate, unlike cortex-tensor, where they were collapsed. Out-of-range
+  fired IDs are an error (`SnnSpikeOutOfRange`), not a silent drop.
+- `RateEncoder { gain }` tiles `ann_signal[idx % len] * gain` across the
+  channels (empty signal → zeros). `SpikeCountDecoder` counts fired IDs per
+  neuron. Both are ported from cortex-tensor with unchanged semantics.
+- `encoding()` / `decoding()` declare the wire contract; plan ports mirror
+  them via `PortSpec::with_encoding` / `with_decoding`.
+
+### 2.3 `SpikingExpertRouter` (hybrid MoE routing host)
+
+Ported from cortex-tensor's `SpikingMoeRouter` with its issue #93 fixes
+(issue #61). It lives in `src/spiking_router.rs` and composes the step
+contract end to end:
+
+```text
+ExpertRouter::gate_logits ──▶ SpikeEncoder ──▶ SpikingNetwork::step(_frozen)
+                                                        │
+                        top-k ◀── additive boost ◀── SpikeDecoder
+```
+
+```rust
+use hybrid_fusion::{
+    NeuroModulators, RateEncoder, SpikingExpertRouter, SpikeCountDecoder,
+};
+
+// Requires snn.num_neurons() >= router.num_experts(): readout index i is
+// expert i. Otherwise ConfigMismatch on HybridError::FIELD_SNN_NUM_NEURONS.
+let mut model = SpikingExpertRouter::new(
+    router, snn, RateEncoder::default(), SpikeCountDecoder,
+)?;
+let out = model.forward(&embedding, &NeuroModulators::default())?;
+// out.route: ExpertRouteOutput (softmax of the boosted scores, top-k selection)
+// out.fired_neurons / out.num_neurons: the tick the route came from
+// out.hidden_gain: bounded [0, 1] spike-shaped scale for the embedding
+```
+
+- **Additive spike boost** (cortex-tensor #93): routing score is
+  `gate_logit + spike_boost × activity` with
+  `DEFAULT_SPIKE_BOOST = 1.0`, saturating at `f32::MAX`; `±Inf` logits keep
+  their value. A spike can only promote its expert, never demote it.
+  `with_spike_boost(β)?` validates finite ≥ 0; `β = 0.0` keeps routing
+  ANN-driven while the backend still shapes the hidden gain.
+- **Bounded hidden gain** (cortex-tensor #93): `hidden_gain` is the selected
+  softmax mass weighted by activity normalized to the tick peak, so it stays
+  in `[0, 1]` at any decoder scale; a silent tick (or spikes only on
+  unselected neurons) falls back to the dense selected mass.
+- **Why `gate_logits` is required**: the boost is defined on pre-softmax
+  logits. `ExpertRouter::route` returns *normalized* weights, which cannot
+  express "add one spike" monotonically, so `ExpertRouter::gate_logits`
+  exposes the raw scores (the default fails closed; the stub and synthetic
+  reference routers override it).
+- **Fail-closed ordering**: modulator finiteness, the `frozen_evaluation`
+  capability (for `forward_frozen`), gate-logit count/NaN, and
+  encoder-stimulus NaN are all checked *before* the backend tick, so a
+  rejected forward consumes no tick and a stateful encoder never advances for
+  a tick the backend then rejects. After the tick, fired IDs are validated
+  (range, at-most-once) and the readout must be exactly `num_neurons` long,
+  NaN-free, and finite/non-negative.
+- Neurons beyond `num_experts` are excluded from the boost and the hidden
+  gain but still appear in `fired_neurons` and are still validated. Expert
+  isolation (one expert per channel, no cross-talk) is a wiring property of
+  the backend: use `NeuromodSnn::identity_wired`.
 
 ### RM-1940 migration
 
@@ -1021,7 +1161,10 @@ or silent data corruption. The example above returns
 
 The projector applies `tanh` to all stimuli values. Your SNN should expect
 inputs in this range. Don't assume raw embedding magnitudes — they are
-squashed before reaching you.
+squashed before reaching you. (The `SpikingExpertRouter` path is the one
+exception: it feeds `SpikeEncoder`-encoded gate logits, which are not
+pre-bounded — a cortex-tensor parity behavior; the backend's own preflight
+rejects what it cannot integrate.)
 
 ### Modulator defaults
 
@@ -1050,15 +1193,18 @@ All errors come from [`src/error.rs`](../src/error.rs):
 | Variant | When |
 |---------|------|
 | `InputLengthMismatch { expected, got }` | Empty input or exceeds `max_seq_len` |
-| `ConfigMismatch { field, configured, backend }` | `try_new`: config vs backend dim / max sequence / SNN channels (including zeros) |
+| `ConfigMismatch { field, configured, backend }` | `try_new`: config vs backend dim / max sequence / SNN channels (including zeros); `SpikingExpertRouter::new`: output population < expert count (field `snn.num_neurons`) |
 | `HiddenStateRank { got }` | Hidden-state rank is not 1 or 2 |
 | `HiddenStateSeqLen { expected, got }` | Rank-2 `shape[0]` ≠ `token_ids.len()` |
 | `HiddenStateDim { expected, got }` | Hidden width ≠ `Transformer::dim()` |
 | `HiddenStateDataLen { expected, got }` | Backing `data.len()` ≠ layout product |
-| `NonFinite { stage, index }` | NaN or ±Inf in hidden / embedding / stimuli |
+| `NonFinite { stage, index }` | NaN or ±Inf in hidden / embedding / stimuli; NaN in `SpikingExpertRouter` encoder stimulus or decoder readout (`ForwardValueStage::EncoderStimulus` / `DecoderReadout`) |
 | `ZeroSnnChannels` | `SpikingNetwork::num_channels()` is 0 |
 | `InvalidConfig(String)` | Other host/config contract failures |
-| `SnnStep(String)` | SNN internal error during `step` (Sentry when enabled) |
+| `SnnStep(String)` | SNN internal error during `step` / `step_frozen` (Sentry when enabled); unsupported frozen evaluation / reset |
+| `SnnSpikeOutOfRange { neuron, num_neurons }` | Backend reported a fired ID outside `0..num_neurons` (host-side check; was free-text `SnnStep`) |
+| `SnnDuplicateSpike { neuron }` | Backend reported the same neuron twice in one tick |
+| `SnnInvalidReadout { index, value }` | `SpikeDecoder` readout was negative or `±Inf` (NaN uses `NonFinite`) |
 | `ModelLoad { path, reason }` | File I/O failure during loading |
 | `MissingTensor { name, path }` | Expected tensor not found in checkpoint |
 | `GgufParse(String)` | GGUF file parse failure |

@@ -16,6 +16,12 @@ pub enum ForwardValueStage {
     Embedding,
     /// Projector output about to be passed to [`crate::SpikingNetwork::step`].
     Stimuli,
+    /// [`crate::SpikeEncoder`] output about to be passed to
+    /// [`crate::SpikingNetwork::step`] by [`crate::SpikingExpertRouter`].
+    EncoderStimulus,
+    /// [`crate::SpikeDecoder`] readout returned to
+    /// [`crate::SpikingExpertRouter`].
+    DecoderReadout,
 }
 
 impl fmt::Display for ForwardValueStage {
@@ -24,6 +30,8 @@ impl fmt::Display for ForwardValueStage {
             Self::HiddenState => write!(f, "hidden-state"),
             Self::Embedding => write!(f, "embedding"),
             Self::Stimuli => write!(f, "stimuli"),
+            Self::EncoderStimulus => write!(f, "encoder stimulus"),
+            Self::DecoderReadout => write!(f, "decoder readout"),
         }
     }
 }
@@ -97,6 +105,26 @@ pub enum HybridError {
     #[error("SNN step failed: {0}")]
     SnnStep(String),
 
+    /// A backend reported a fired ID outside its output population
+    /// (`0..num_neurons`).
+    ///
+    /// Replaces a free-text [`Self::SnnStep`] for this condition; the check is
+    /// host-side so every [`crate::SpikingNetwork`], not only the router path,
+    /// is validated.
+    #[error("SNN fired neuron {neuron} outside output population {num_neurons}")]
+    SnnSpikeOutOfRange { neuron: usize, num_neurons: usize },
+
+    /// A backend reported the same neuron more than once in one tick,
+    /// violating the at-most-once contract of a fired-ID list.
+    #[error("SNN backend reported neuron {neuron} more than once in one tick")]
+    SnnDuplicateSpike { neuron: usize },
+
+    /// A [`crate::SpikeDecoder`] readout was negative or `±Inf`; spike
+    /// activity must be a finite, non-negative quantity (NaN is reported
+    /// as [`Self::NonFinite`]).
+    #[error("SNN decoder readout at index {index} is {value}; expected finite and >= 0")]
+    SnnInvalidReadout { index: usize, value: f32 },
+
     /// Structured stage-graph / execution-plan validation failure
     /// (RM-1804 / issue #40).
     #[error("execution plan error: {0}")]
@@ -116,6 +144,10 @@ impl HybridError {
     pub const FIELD_TRANSFORMER_MAX_SEQ_LEN: &'static str = "transformer.max_seq_len";
     /// `ConfigMismatch.field` for SNN input width (`"snn_input_channels"`).
     pub const FIELD_SNN_INPUT_CHANNELS: &'static str = "snn_input_channels";
+    /// `ConfigMismatch.field` for the SNN output population
+    /// (`"snn.num_neurons"`). Used by [`crate::SpikingExpertRouter::new`]
+    /// when the backend population cannot cover the expert set.
+    pub const FIELD_SNN_NUM_NEURONS: &'static str = "snn.num_neurons";
 
     pub(crate) fn config_mismatch(field: &'static str, configured: usize, backend: usize) -> Self {
         Self::ConfigMismatch {
