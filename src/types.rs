@@ -569,15 +569,14 @@ mod tests {
         }
     }
 
-    fn outputs_eq(a: &HybridOutput, b: &HybridOutput) -> bool {
-        a.embedding == b.embedding
-            && a.stimuli == b.stimuli
-            && a.fired_neurons == b.fired_neurons
-            && a.num_neurons == b.num_neurons
-            && a.global_step == b.global_step
-            && a.expert_weights == b.expert_weights
-            && a.selected_experts == b.selected_experts
-            && a.routing_entropy == b.routing_entropy
+    /// Lossless round trip: deserialize `out`, re-serialize, and require the
+    /// same bytes. Serialization is deterministic, so byte equality is exactly
+    /// field equality (and stricter than `==` for `-0.0` vs `0.0`).
+    fn assert_round_trips(out: &HybridOutput) {
+        let json = serde_json::to_string(out).expect("finite output serializes");
+        let restored: HybridOutput = serde_json::from_str(&json).expect("round trip");
+        let reserialized = serde_json::to_string(&restored).expect("finite restore serializes");
+        assert_eq!(reserialized, json, "round trip must be lossless: {out:?}");
     }
 
     #[test]
@@ -587,8 +586,7 @@ mod tests {
         let reverse = reverse_shaped_output();
         let json = serde_json::to_string(&reverse).expect("finite output serializes");
         assert!(!json.contains("null"), "unexpected null in {json}");
-        let restored: HybridOutput = serde_json::from_str(&json).expect("round trip");
-        assert!(outputs_eq(&restored, &reverse), "restored {restored:?}");
+        assert_round_trips(&reverse);
 
         // Tiny ANN→SNN shape: `None` is the legitimate wire spelling of null.
         let tiny = tiny_forward_output();
@@ -599,8 +597,7 @@ mod tests {
             \"fired_neurons\":[0],\"num_neurons\":2,\"global_step\":1,\"expert_weights\":null,\
             \"selected_experts\":null,\"routing_entropy\":null}"
         );
-        let restored: HybridOutput = serde_json::from_str(&json).expect("round trip");
-        assert!(outputs_eq(&restored, &tiny), "restored {restored:?}");
+        assert_round_trips(&tiny);
     }
 
     /// Field mutation + expected error prefix, shared by the policy tests.
