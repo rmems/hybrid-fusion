@@ -555,6 +555,19 @@ let modulators = NeuroModulators {
 If you don't have a specific signal, use the defaults — they represent a
 neutral, balanced state.
 
+### Persisting to JSON (RM-1465)
+
+`NeuroModulators`, `HybridOutput`, `ExpertRouteOutput`, `SpikingRouteOutput`,
+`SpikeActivity`, and `Tensor` all fail closed on non-finite values when
+serialized: any `NaN` or ±`Inf` field returns a serde error naming the field,
+index, and value (e.g. `NeuroModulators.dopamine is NaN: …`) instead of
+letting `serde_json` write `null`. JSON has no `NaN` / `Infinity` spelling, so
+without that guard a persisted value would come back as `null` — and an
+optional field would read back as `None`, silently losing the signal. Clamp or
+reject non-finite telemetry *before* building the struct; wrap the serialization
+call with `?` and the error surfaces as `HybridError::Json`. Deserialization is
+unchanged, so `null` remains the wire spelling of `None` for optional fields.
+
 ### Mapping to `NeuromodSnn` (the `neuromod` backend)
 
 `neuromod`'s own modulator vocabulary differs from hybrid-fusion's. It exposes

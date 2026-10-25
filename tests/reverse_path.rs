@@ -238,6 +238,55 @@ fn reverse_path_new_rejects_zeros() {
     assert!(ReverseHybridPath::new(ProjectionMode::RateSum, 4, 0, MockRouter::new(2, 1)).is_err());
 }
 
+/// RM-1465: a finite reverse-path `HybridOutput` round-trips through JSON
+/// without losing any MoE field, and a non-finite value fails closed with an
+/// error naming the field instead of silently becoming `null`.
+#[test]
+fn reverse_path_output_json_policy_round_trips_and_fails_closed() {
+    let n_neurons = 8;
+    let embed_dim = 16;
+    let mut path = ReverseHybridPath::new(
+        ProjectionMode::RateSum,
+        n_neurons,
+        embed_dim,
+        MockRouter::new(4, 2),
+    )
+    .unwrap();
+    let activity = SpikeActivity::from_fired(&[1, 3, 7], n_neurons).unwrap();
+    let out = path.forward_activity(&activity).unwrap();
+    assert_moe_ok(&out, embed_dim, 4, 2);
+
+    // Finite record: no `null` anywhere, every field survives.
+    let json = serde_json::to_string(&out).expect("finite reverse-path output serializes");
+    assert!(!json.contains("null"), "unexpected null in {json}");
+    let restored: hybrid_fusion::HybridOutput =
+        serde_json::from_str(&json).expect("finite reverse-path output round-trips");
+    assert_eq!(restored.embedding, out.embedding);
+    assert_eq!(restored.stimuli, out.stimuli);
+    assert_eq!(restored.fired_neurons, out.fired_neurons);
+    assert_eq!(restored.num_neurons, out.num_neurons);
+    assert_eq!(restored.global_step, out.global_step);
+    assert_eq!(restored.expert_weights, out.expert_weights);
+    assert_eq!(restored.selected_experts, out.selected_experts);
+    assert_eq!(restored.routing_entropy, out.routing_entropy);
+
+    // Hand-built corruption (a router could still report non-finite entropy,
+    // or a caller could build the record by hand): serialization fails closed.
+    let mut bad = out;
+    bad.routing_entropy = Some(f32::NAN);
+    let err = serde_json::to_string(&bad)
+        .expect_err("non-finite entropy must fail closed, not write null");
+    let text = err.to_string();
+    assert!(
+        text.starts_with("HybridOutput.routing_entropy is NaN"),
+        "unexpected error: {text}"
+    );
+    assert!(
+        text.contains("JSON would emit null"),
+        "policy reason in {text}"
+    );
+}
+
 #[cfg(feature = "backends")]
 mod with_backends {
     use super::*;
