@@ -1,6 +1,16 @@
 # ADR 0001: one ANN↔SNN step contract, owned by hybrid-fusion
 
-- **Status:** Proposed (2026-10-19)
+- **Status:** Superseded in part (2026-10-26) — the single-owner/cortex-removal
+  decision in §2 ("cortex-tensor keeps no spiking types"), §3, §4's cortex
+  removal, and migration steps 2–5 were **abandoned**; cortex-tensor keeps its
+  `src/snn` twin contract (Linear RM-2206 / RM-2360; removal PRs
+  rmems/cortex-tensor#137 and #141 closed unmerged). hybrid-fusion's own step
+  contract (§2.1) stands as implemented and is held in sync with cortex-tensor
+  by the mapping and parity gate in
+  [ADR 0002](0002-snn-step-contract-parity.md). The "single ANN↔SNN step
+  contract" wording throughout this document is historical; do not repeat it
+  in new text.
+- **Status (original):** Proposed (2026-10-19)
 - **Tracking:** rmems/hybrid-fusion#61 (Linear RM-2205); this ADR is Linear RM-2210.
   Twin removal issue: rmems/cortex-tensor#137. Related: hybrid-fusion#62 (ResultTrack),
   hybrid-fusion#44 (neuromod dependency exception), hybrid-fusion#20 (epic).

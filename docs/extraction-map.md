@@ -50,6 +50,11 @@ token_ids → Transformer::hidden_states → projector (pool/resize/tanh)
 | Config / output | `HybridConfig`, `TransformerConfig`, `HybridOutput` | this crate |
 | Optional error reporting | `sentry` feature + `telemetry` | optional; apps init DSN |
 
+`SpikingNetwork` is hybrid-fusion's step contract; cortex-tensor keeps a twin
+`SnnBackend` contract for its own ANN+SNN reference path. The mapping and the
+parity gate between the two are in
+[ADR 0002](adr/0002-snn-step-contract-parity.md) (RM-2360).
+
 ---
 
 ## Target reverse path (v0.3 epic)

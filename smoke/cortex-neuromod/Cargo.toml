@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.99.0"
 publish = false
-description = "Fixed-seed smoke harness: one cortex-tensor embedding stage into NeuromodSnn (issue #45)."
+description = "Fixed-seed smoke harness: one cortex-tensor embedding stage into NeuromodSnn (issue #45), plus cross-crate SNN step-contract parity tests (RM-2360)."
 license = "MIT OR Apache-2.0"
 
 # Not a workspace member of the library root. An empty `[workspace]` table
@@ -21,6 +21,18 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 hybrid-fusion = { path = "../..", features = ["neuromod"] }
 # cortex-tensor 0.1.0 is not on crates.io (index 404 as of 2026-10-02).
-# Pinned to the commit that exports ReferenceExecutor's embedding stage.
 # Authorized by issue #45 as a test-only harness, not a library dependency.
-cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", rev = "5cbee81473ed69bd8e74d53e210ef64c02d232da" }
+# The `neuromod` feature turns on `snn::NeuromodNetwork` for the parity
+# tests; it pulls the same published neuromod 0.7 both crates already use.
+# Pinned past the engram-backed MoE + SNN fix series (#91/#92/#93, PRs
+# #131/#145): `NeuromodNetwork::with_seed`, `step_frozen`, the additive spike
+# boost, and the bounded hidden gain all exist at this rev, so the parity
+# tests in tests/snn_contract_parity.rs can compare like with like. The old
+# `5cbee81` pin predates those fixes (RM-2208's bump, unblocked by RM-2360).
+cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", rev = "f591f2efd298e920250dd6cfdbf6056ea9368257", features = [
+    "neuromod",
+] }
+# Direct test-only dependency for the parity tests: constructing a blank
+# `neuromod::SpikingNetwork` proves cortex-tensor's public #91 rejection.
+# Resolves to the same published neuromod 0.7 both crates already depend on.
+neuromod = "0.7"

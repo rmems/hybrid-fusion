@@ -10,19 +10,54 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- **SNN step-contract sync with cortex-tensor** (Linear
+  [RM-2360](https://linear.app/rpd-34/issue/RM-2360/snn-keep-cortex-tensors-snn-step-contract-in-sync-with-hybrid-fusions);
+  design in [ADR 0002](docs/adr/0002-snn-step-contract-parity.md)):
+  cortex-tensor keeps its own `src/snn` twin contract (decision RM-2206 —
+  that crate is deliberately ANN+SNN capable; the removal plan
+  [rmems/cortex-tensor#137](https://github.com/rmems/cortex-tensor/pull/137)
+  / [#141](https://github.com/rmems/cortex-tensor/pull/141) was closed
+  unmerged), so the two contracts are now held together explicitly instead
+  of by prose.
+  - New ADR 0002 documents the mapping between the trait sets (`SnnBackend`
+    ↔ `SpikingNetwork`, `SnnEncoder`/`SnnDecoder` ↔
+    `SpikeEncoder`/`SpikeDecoder`, `SpikingMoeRouter` ↔
+    `SpikingExpertRouter`, `NeuromodNetwork` ↔ `NeuromodSnn`) and every
+    intentional difference (width axes, decoder fallibility, reset
+    semantics, output shape, capabilities vocabulary). It is mirrored in
+    cortex-tensor as `docs/snn-contract-mapping.md`.
+  - New parity tests
+    `smoke/cortex-neuromod/tests/snn_contract_parity.rs` run the same seeded
+    inputs through both spiking routers and both neuromod adapters in CI
+    (validate + MSRV jobs): seeded identity-wired adapters must replay
+    bit-for-bit, the boosted selection must agree, host validation must fail
+    closed on out-of-range/duplicate fired IDs on both sides, and every
+    intentional difference is asserted, not assumed.
+  - `smoke/cortex-neuromod` pins cortex-tensor at
+    `f591f2efd298e920250dd6cfdbf6056ea9368257` (past the
+    [#91](https://github.com/rmems/cortex-tensor/issues/91)/
+    [#92](https://github.com/rmems/cortex-tensor/issues/92)/
+    [#93](https://github.com/rmems/cortex-tensor/issues/93) fix series) and
+    enables its `neuromod` feature — the bump RM-2208 was waiting on; the
+    smoke harness and the new parity tests pass against it.
+  - Wording that claimed this crate is the *single* owner of the step
+    contract, or that cortex-tensor "keeps no spiking types" (AGENTS.md,
+    REVIEW.md, `docs/implementing-backends.md`, module docs, and the entry
+    below) is corrected, and ADR 0001's single-owner decision is marked
+    superseded by ADR 0002.
 - **Single ANN↔SNN step contract** ([#61](https://github.com/rmems/hybrid-fusion/issues/61),
   Linear [RM-2205](https://linear.app/rpd-34/issue/RM-2205); design in ADR
   0001, [PR #64](https://github.com/rmems/hybrid-fusion/pull/64)): hybrid-fusion
-  is now the one owner of the spiking step boundary. The cortex-tensor
+  became an owner of the spiking step boundary. The cortex-tensor
   `src/snn` trait surface (`SnnBackend`, `SnnEncoder`, `SnnDecoder`,
-  `SpikingMoeRouter`, `SnnCapabilities`, `SnnStepOutput`) is folded into this
-  crate and lives nowhere else (cortex-tensor removal tracked in
-  [rmems/cortex-tensor#137](https://github.com/rmems/cortex-tensor/issues/137));
-  the cortex-tensor fixes for
+  `SpikingMoeRouter`, `SnnCapabilities`, `SnnStepOutput`) was ported into this
+  crate as its own twin contract; cortex-tensor keeps its `src/snn` copy
+  (decision RM-2206/RM-2360 — the originally tracked removal was abandoned),
+  and the cortex-tensor fixes for
   [#91](https://github.com/rmems/cortex-tensor/issues/91),
   [#92](https://github.com/rmems/cortex-tensor/issues/92), and
-  [#93](https://github.com/rmems/cortex-tensor/issues/93) are ported with it so
-  they are fixed exactly once.
+  [#93](https://github.com/rmems/cortex-tensor/issues/93) are ported with it,
+  so both sides carry them and the parity tests hold them together.
   - New `encoding` module: `SpikeEncoder` / `SpikeDecoder` boundary traits with
     declared `SpikeEncoding` / `SpikeDecoding` metadata, plus `RateEncoder`
     and `SpikeCountDecoder` ported from cortex-tensor. `SpikeDecoder::decode`
