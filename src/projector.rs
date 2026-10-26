@@ -13,7 +13,7 @@ use crate::types::ProjectionMode;
 /// Temporal histogram bins (matches corinth-canal `TEMPORAL_BINS`).
 const TEMPORAL_BINS: usize = 4;
 
-fn mean_pool(embedding: &Tensor) -> Vec<f32> {
+pub(crate) fn mean_pool(embedding: &Tensor) -> Vec<f32> {
     match embedding.ndim() {
         0 | 1 => embedding.data().to_vec(),
         2 => {
@@ -85,8 +85,13 @@ pub fn embed_to_stimuli(embedding: &Tensor) -> Vec<f32> {
 }
 
 pub fn embed_to_stimuli_with_width(embedding: &Tensor, snn_width: usize) -> Vec<f32> {
-    let pooled = mean_pool(embedding);
-    let mut resized = resize_to(&pooled, snn_width);
+    pooled_to_stimuli(&mean_pool(embedding), snn_width)
+}
+
+/// Resize an already mean-pooled vector to `snn_width` and squash with `tanh`
+/// (tanh after resize, never before).
+pub(crate) fn pooled_to_stimuli(pooled: &[f32], snn_width: usize) -> Vec<f32> {
+    let mut resized = resize_to(pooled, snn_width);
     squash_inplace(&mut resized);
     resized
 }
