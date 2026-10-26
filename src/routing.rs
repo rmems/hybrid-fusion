@@ -269,6 +269,11 @@ mod tests {
     use super::*;
 
     /// The pre-RM-1470 implementation: full stable sort.
+    ///
+    /// Deliberately has no index tie-break: it relies on `sort_by` being stable
+    /// (guaranteed by std) so equal weights keep input order, i.e. lower index
+    /// first. That is the independent oracle for the explicit tie-break in
+    /// `top_k_indices`; keep `weight_order` free of index logic.
     fn top_k_reference(weights: &[f32], top_k: usize) -> Vec<usize> {
         if top_k == 0 || weights.is_empty() {
             return Vec::new();
