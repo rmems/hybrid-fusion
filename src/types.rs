@@ -13,13 +13,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ProjectionMode {
     /// Per-neuron spike-count / firing-rate features only (`len == n_neurons`).
+    ///
+    /// Each rate is the per-neuron mean count over timesteps, in `[0, 1]`
+    /// (a timestep is a set; see
+    /// [`SpikeActivity`](crate::SpikeActivity) "Timestep semantics").
     #[default]
     RateSum,
     /// Time-binned spike histogram features only (`len == n_neurons * 4`).
     TemporalHistogram,
     /// Clamped membrane-potential features only (`len == n_neurons`).
     MembraneSnapshot,
-    /// Pure-path alias of [`RateSum`]; full ternary/GIF impl is out of crate.
+    /// **Alias** of [`RateSum`](Self::RateSum) (issue #25): on the pure path
+    /// this mode emits **identical** firing-rate features and encodes no
+    /// ternary (spike/burst/silent) events. It exists as a trait-level hook
+    /// for the neuromod GIF bank; GIF/ternary dynamics are out of crate (a
+    /// non-extract, `docs/extraction-map.md`) and no mode in this crate
+    /// reads `SpikeActivity::iz_potentials`. Until that lands, selecting this
+    /// mode is equivalent to selecting `RateSum` — do not expect ternary
+    /// encoding.
+    #[doc(alias = "RateSum")]
     SpikingTernary,
 }
 

@@ -216,6 +216,62 @@ fn reverse_path_rejects_bad_activity_from_projector() {
     assert_eq!(path.global_step(), 0);
 }
 
+/// RM-1445: a timestep is a set — a step naming the same neuron twice is
+/// rejected instead of being counted twice into a rate above 1.0 — and a
+/// non-empty `iz_potentials` whose length is not `n_neurons` is a shape
+/// error rather than a silently ignored field.
+#[test]
+fn reverse_path_rejects_duplicate_spikes_and_garbage_iz_potentials() {
+    let router = MockRouter::new(2, 1);
+    let mut path = ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, router).unwrap();
+
+    // Duplicate fired IDs in one step (the from_fired multiset case).
+    let duplicated = SpikeActivity {
+        spike_train: vec![vec![0, 0, 0]],
+        potentials: vec![0.0; 4],
+        iz_potentials: vec![],
+    };
+    let err = path.forward_activity(&duplicated).unwrap_err();
+    match err {
+        HybridError::InvalidConfig(msg) => {
+            assert!(
+                msg.contains("index 0 appears more than once at step 0"),
+                "{msg}"
+            );
+        }
+        other => panic!("expected duplicate rejection, got {other:?}"),
+    }
+    assert_eq!(path.global_step(), 0);
+
+    // Well-formed (neuron-sized) iz_potentials is accepted and ignored.
+    let ignored = SpikeActivity {
+        spike_train: vec![vec![0]],
+        potentials: vec![0.0; 4],
+        iz_potentials: vec![0.5; 4],
+    };
+    assert!(path.forward_activity(&ignored).is_ok());
+    assert_eq!(path.global_step(), 1);
+
+    // Garbage-length iz_potentials is a shape mismatch, not a silent ignore.
+    let garbage = SpikeActivity {
+        spike_train: vec![vec![0]],
+        potentials: vec![0.0; 4],
+        iz_potentials: vec![0.5; 99],
+    };
+    match path.forward_activity(&garbage).unwrap_err() {
+        HybridError::InputLengthMismatch {
+            expected: 4,
+            got: 99,
+        } => {}
+        other => panic!("expected iz_potentials length mismatch, got {other:?}"),
+    }
+    assert_eq!(
+        path.global_step(),
+        1,
+        "the rejected activity is not counted"
+    );
+}
+
 #[test]
 fn reverse_path_propagates_router_errors() {
     let mut path = ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, FailingRouter).unwrap();

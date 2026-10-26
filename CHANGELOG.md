@@ -269,6 +269,40 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Fixed
 
+- **BREAKING (reverse path / RM-1445):** a `SpikeActivity` timestep is
+  defined as a **set**, matching the forward host's at-most-once fired-ID
+  contract from [#61](https://github.com/rmems/hybrid-fusion/issues/61)
+  (`HybridError::SnnDuplicateSpike`). `SpikeActivity::from_fired` and
+  `spike_activity_features` (so also `project_spike_activity` and
+  `ReverseHybridPath::forward_activity`) now **reject** an index that appears
+  more than once in one step with `HybridError::InvalidConfig` naming the
+  neuron and step, instead of counting it into the rate. Previously three
+  copies of neuron `0` in a single step produced a `RateSum` rate of `3.0`,
+  which then silently saturated through the projector's `tanh`. Multisets are
+  not a supported input; callers holding one must deduplicate first. With
+  uniqueness enforced, `RateSum` / `SpikingTernary` features are per-neuron
+  means over steps and are guaranteed to stay in `[0, 1]` by construction
+  (documented on `spike_activity_features` and `firing_rates`; the `tanh` is
+  a squash of an already-bounded vector, not a substitute for the contract).
+- **BREAKING (reverse path / RM-1445):** `SpikeActivity::iz_potentials` now
+  has a **defined contract** instead of being silently ignored at any length.
+  No `ProjectionMode` reads it (the adaptive/Izhikevich-GIF bank lives in
+  `neuromod`; ternary/GIF events are a non-extract per
+  `docs/extraction-map.md`), so the field is kept for trace/serde fidelity
+  only: **empty** is the unused spelling, **`len == n_neurons`** with finite
+  values is accepted and documented as ignored by every pure mode, and any
+  other length is rejected with `HybridError::InputLengthMismatch` while a
+  non-finite value is rejected with `InvalidConfig` — the 99-element-vector
+  case now fails instead of being dropped. Enforced in
+  `spike_activity_features`, hence through `project_spike_activity`,
+  `ReverseHybridPath::forward_activity`, and `SpikingTernary`/`RateSum`/
+  `TemporalHistogram`/`MembraneSnapshot` alike.
+- `ProjectionMode::SpikingTernary` is doc-commented as an **alias** of
+  `RateSum` (issue #25) with `#[doc(alias = "RateSum")]`: it emits identical
+  firing-rate features, encodes no ternary (spike/burst/silent) events, and
+  reads no `iz_potentials` until a neuromod GIF mode lands
+  ([#25](https://github.com/rmems/hybrid-fusion/issues/25),
+  Linear [RM-1445](https://linear.app/rpd-34/issue/RM-1445)).
 - **BREAKING (serde / RM-1465):** JSON serialization of the `f32`-bearing record
   types now **fails closed on non-finite values** instead of writing `null`
   (Linear [RM-1465](https://linear.app/rpd-34/issue/RM-1465)). JSON is not a

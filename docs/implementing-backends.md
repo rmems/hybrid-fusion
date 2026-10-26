@@ -1251,9 +1251,28 @@ pub struct SpikeActivity {
 }
 ```
 
+**A timestep is a set.** Each entry of `spike_train` is one tick and holds
+each fired neuron **at most once**, mirroring the forward host, which rejects
+a backend reporting the same neuron twice in one tick
+(`HybridError::SnnDuplicateSpike`, issue #61). `SpikeActivity::from_fired`
+and `spike_activity_features` reject a repeated index in a step with
+`InvalidConfig` instead of counting it twice — a multiset is not a supported
+input. With that enforced, `RateSum` / `SpikingTernary` rates are per-neuron
+means over steps and stay in `[0, 1]`; they can no longer reach `3.0` and
+saturate the `tanh`.
+
+**`iz_potentials` is carried, never read.** No `ProjectionMode` consumes it:
+the adaptive (Izhikevich/GIF) bank lives in `neuromod` and ternary/GIF events
+are a non-extract (see `docs/extraction-map.md`). Projection accepts it only
+when empty (the unused spelling) or exactly `n_neurons` long and finite — a
+well-formed vector is a **documented ignore** kept for trace/serde fidelity.
+Any other length, or a non-finite value, is rejected (`InputLengthMismatch` /
+`InvalidConfig`) instead of being silently dropped.
+
 Helper: `SpikeActivity::from_fired(fired, n_neurons) -> Result` for one-step
-tests. Rejects `n_neurons == 0` and any fired index `>= n_neurons`; empty
-`fired` with `n_neurons > 0` is valid. Use `snn.num_neurons()` or
+tests. Rejects `n_neurons == 0`, any fired index `>= n_neurons`, and any index
+appearing more than once; empty `fired` with `n_neurons > 0` is valid. It
+builds `iz_potentials` empty. Use `snn.num_neurons()` or
 `HybridOutput.num_neurons`, never input width, for this dimension and the
 reverse host's `n_neurons`.
 

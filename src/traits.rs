@@ -323,6 +323,29 @@ impl From<SafetensorsLayoutDe> for SafetensorsLayout {
 /// Field names mirror corinth-canal `FunnelActivity` / `Projector::project` inputs
 /// (`spike_train`, `potentials`, `iz_potentials`) without ternary events or GIF state.
 ///
+/// # Timestep semantics: a tick is a **set**
+///
+/// Each entry of `spike_train` is one timestep and holds a **set** of fired
+/// neuron indices: a neuron appears **at most once per step**. This matches the
+/// forward host, which rejects a backend reporting the same neuron twice in one
+/// tick ([`crate::HybridError::SnnDuplicateSpike`], RM-2205). A `SpikeActivity`
+/// built from a conforming `SpikingNetwork` therefore never needs
+/// deduplication. Constructors and projection entry points enforce this
+/// instead of silently collapsing duplicates: [`SpikeActivity::from_fired`]
+/// rejects a repeated index, and [`crate::spike_activity_features`] rejects a
+/// repeated index in any step (RM-1445). Multisets are not a supported input.
+///
+/// # `iz_potentials`
+///
+/// No [`ProjectionMode`](crate::ProjectionMode) reads `iz_potentials`: the
+/// adaptive (Izhikevich/GIF) bank belongs to `neuromod`, and ternary/GIF
+/// events are a non-extract (see `docs/extraction-map.md`). The field is kept
+/// so a serialized trace round-trips losslessly. Projection entry points
+/// accept `iz_potentials` only when it is **empty** or exactly
+/// `n_neurons` long and finite; any other length is a rejected shape mismatch
+/// rather than a silently ignored field (see
+/// [`spike_activity_features`](crate::spike_activity_features)).
+///
 /// # JSON / serde policy
 ///
 /// `potentials` and `iz_potentials` fail closed on non-finite values:
@@ -333,11 +356,14 @@ impl From<SafetensorsLayoutDe> for SafetensorsLayout {
 /// the only kind of trace that can round-trip.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SpikeActivity {
-    /// Per-timestep fired neuron indices.
+    /// Per-timestep fired neuron indices; each step is a set (at most one
+    /// entry per neuron — see the type-level "Timestep semantics" notes).
     pub spike_train: Vec<Vec<usize>>,
     /// Membrane potentials (typically length = neuron count).
     pub potentials: Vec<f32>,
-    /// Optional adaptive-bank potentials; empty when unused.
+    /// Optional adaptive-bank potentials; empty when unused. Not read by any
+    /// pure projection mode: when non-empty it must be `n_neurons` long and
+    /// finite, else projection rejects it instead of ignoring it silently.
     pub iz_potentials: Vec<f32>,
 }
 
@@ -370,10 +396,18 @@ impl SpikeActivity {
     /// a reduced population must not be padded to the input width. The projector
     /// cannot infer the true population from sparse fired IDs alone.
     ///
+    /// `fired` is a **set** (see the type-level "Timestep semantics" notes): a
+    /// neuron may appear at most once. Duplicates are rejected, not collapsed —
+    /// a caller holding a multiset must deduplicate before calling.
+    ///
+    /// `iz_potentials` is built empty (the unused spelling; no pure mode reads it).
+    ///
     /// # Errors
     ///
-    /// - [`HybridError::InvalidConfig`] if `n_neurons == 0` (zero-extent neuron axis).
-    /// - [`HybridError::InvalidConfig`] if any index in `fired` is `>= n_neurons`.
+    /// - [`crate::HybridError::InvalidConfig`] if `n_neurons == 0` (zero-extent neuron axis).
+    /// - [`crate::HybridError::InvalidConfig`] if any index in `fired` is `>= n_neurons`.
+    /// - [`crate::HybridError::InvalidConfig`] if any index appears more than once in
+    ///   `fired` (at-most-once-per-tick contract, RM-1445).
     ///
     /// An empty `fired` with `n_neurons > 0` is valid (silent step).
     pub fn from_fired(fired: &[usize], n_neurons: usize) -> Result<Self> {
@@ -387,6 +421,15 @@ impl SpikeActivity {
             return Err(HybridError::InvalidConfig(format!(
                 "SpikeActivity::from_fired: fired index {idx} out of range for n_neurons={n_neurons}"
             )));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(fired.len());
+        for &idx in fired {
+            if !seen.insert(idx) {
+                return Err(HybridError::InvalidConfig(format!(
+                    "SpikeActivity::from_fired: fired index {idx} appears more than once \
+                     (a timestep is a set; a neuron fires at most once per tick)"
+                )));
+            }
         }
         Ok(Self {
             spike_train: vec![fired.to_vec()],
@@ -736,6 +779,26 @@ mod tests {
         let json = serde_json::to_string(&act).expect("finite activity serializes");
         let restored: SpikeActivity = serde_json::from_str(&json).expect("round trip");
         assert_eq!(restored, act);
+    }
+
+    /// A timestep is a set (RM-1445): `from_fired` rejects a repeated index
+    /// instead of building a multiset whose rate features would exceed 1.0.
+    #[test]
+    fn spike_activity_from_fired_rejects_duplicate_indices() {
+        for (fired, label) in [
+            (&[0_usize, 1, 0][..], "last repeat"),
+            (&[2_usize, 2][..], "pair"),
+        ] {
+            match SpikeActivity::from_fired(fired, 4) {
+                Err(crate::error::HybridError::InvalidConfig(msg)) => {
+                    assert!(msg.contains("more than once"), "{label}: {msg}");
+                    assert!(msg.contains("SpikeActivity::from_fired"), "{label}: {msg}");
+                }
+                other => panic!("{label}: unexpected {other:?}"),
+            }
+        }
+        // Distinct indices — including unsorted ones — still build.
+        assert!(SpikeActivity::from_fired(&[3, 0, 1], 4).is_ok());
     }
 
     #[test]

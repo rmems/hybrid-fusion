@@ -210,6 +210,15 @@ fn test_spike_activity_from_fired_edges() {
         HybridError::InvalidConfig(_) => {}
         other => panic!("expected InvalidConfig, got {other:?}"),
     }
+
+    // duplicate index rejected (RM-1445: a timestep is a set, not a multiset)
+    match SpikeActivity::from_fired(&[0, 1, 0], 8).unwrap_err() {
+        HybridError::InvalidConfig(msg) => assert!(msg.contains("more than once"), "{msg}"),
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+
+    // distinct indices, including unsorted, still build
+    assert!(SpikeActivity::from_fired(&[5, 0, 2], 8).is_ok());
 }
 
 #[test]

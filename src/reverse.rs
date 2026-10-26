@@ -438,6 +438,60 @@ mod tests {
         assert!(out.routing_entropy.is_some());
     }
 
+    /// A timestep is a set: `forward_activity` rejects a spike step naming the
+    /// same neuron twice (RM-1445) instead of letting RateSum count it twice
+    /// and emit a rate above 1.0. `from_fired` cannot build such an activity,
+    /// so the record is hand-built.
+    #[test]
+    fn forward_activity_rejects_duplicate_spike_indices() {
+        let mut path =
+            ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, MockRouter::new(4, 2)).unwrap();
+        let act = SpikeActivity {
+            spike_train: vec![vec![0, 0, 0]],
+            potentials: vec![0.0; 4],
+            iz_potentials: vec![],
+        };
+        match path.forward_activity(&act).unwrap_err() {
+            HybridError::InvalidConfig(msg) => {
+                assert!(
+                    msg.contains("index 0 appears more than once at step 0"),
+                    "{msg}"
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // Rejected activity must not consume a step.
+        assert_eq!(path.global_step(), 0);
+    }
+
+    /// `iz_potentials` is either empty, neuron-sized (ignored — no pure mode
+    /// reads it), or rejected: a garbage length never passes silently.
+    #[test]
+    fn forward_activity_enforces_iz_potentials_contract() {
+        let act_ok = SpikeActivity {
+            spike_train: vec![vec![0]],
+            potentials: vec![0.0; 4],
+            iz_potentials: vec![0.5; 4],
+        };
+        let mut path =
+            ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, MockRouter::new(4, 2)).unwrap();
+        assert!(path.forward_activity(&act_ok).is_ok());
+
+        let act_garbage = SpikeActivity {
+            spike_train: vec![vec![0]],
+            potentials: vec![0.0; 4],
+            iz_potentials: vec![0.5; 99],
+        };
+        match path.forward_activity(&act_garbage).unwrap_err() {
+            HybridError::InputLengthMismatch {
+                expected: 4,
+                got: 99,
+            } => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(path.global_step(), 1, "only the accepted activity counts");
+    }
+
     /// Drives the rejection branch from both directions and pins the documented
     /// step semantics: a rejected route must not consume a `global_step`.
     #[test]

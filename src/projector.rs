@@ -109,6 +109,30 @@ pub fn embed_to_stimuli_with_width(embedding: &Tensor, snn_width: usize) -> Vec<
 ///
 /// Unlike corinth-canal’s full rates+hist+membrane+iz concat (for a learned
 /// linear layer), pure hybrid-fusion modes do not share a common concatenation.
+///
+/// # Input contract (validated before any mode runs)
+///
+/// - `n_neurons > 0`.
+/// - `potentials.len() == n_neurons` and every value finite.
+/// - Every `spike_train` step holds in-range indices (`< n_neurons`), and each
+///   step is a **set**: a neuron appears at most once. A repeated index in a
+///   step is rejected, not collapsed — the forward host already rejects a
+///   backend emitting the same neuron twice in one tick
+///   ([`HybridError::SnnDuplicateSpike`], RM-2205), so a multiset here cannot
+///   be a faithful record of a real tick (RM-1445).
+/// - `iz_potentials` is either empty or exactly `n_neurons` long with every
+///   value finite. No pure mode reads it (the adaptive bank lives in
+///   `neuromod`); a well-formed vector is a documented ignore that is carried
+///   for trace fidelity, and any other length is rejected instead of being
+///   silently dropped.
+///
+/// With the set contract enforced, every feature this function returns is
+/// bounded: [`RateSum`] rates are per-neuron mean counts over steps in
+/// `[0, 1]`, histogram bins in `[0, 1]`, membranes in `[0, 1]`. The `tanh`
+/// applied later by [`project_spike_activity`] is a squashing of an already
+/// bounded vector, not a substitute for this contract.
+///
+/// [`RateSum`]: ProjectionMode::RateSum
 pub fn spike_activity_features(
     mode: ProjectionMode,
     activity: &SpikeActivity,
@@ -132,11 +156,38 @@ pub fn spike_activity_features(
             )));
         }
     }
+    // iz_potentials: empty = unused; non-empty must match the neuron axis and
+    // be finite. Rejecting a malformed length here (rather than ignoring it)
+    // is what keeps the "silently ignored 99-element vector" case impossible.
+    if !activity.iz_potentials.is_empty() {
+        if activity.iz_potentials.len() != n_neurons {
+            return Err(HybridError::InputLengthMismatch {
+                expected: n_neurons,
+                got: activity.iz_potentials.len(),
+            });
+        }
+        for (i, &v) in activity.iz_potentials.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(HybridError::InvalidConfig(format!(
+                    "spike_activity_features: non-finite iz_potential at index {i}"
+                )));
+            }
+        }
+    }
     for (t, step) in activity.spike_train.iter().enumerate() {
         if let Some(&idx) = step.iter().find(|&&i| i >= n_neurons) {
             return Err(HybridError::InvalidConfig(format!(
                 "spike_activity_features: spike index {idx} out of range at step {t} (n_neurons={n_neurons})"
             )));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(step.len());
+        for &idx in step {
+            if !seen.insert(idx) {
+                return Err(HybridError::InvalidConfig(format!(
+                    "spike_activity_features: spike index {idx} appears more than once at \
+                     step {t} (a timestep is a set; a neuron fires at most once per tick)"
+                )));
+            }
         }
     }
 
@@ -155,6 +206,12 @@ pub fn spike_activity_features(
 }
 
 /// Per-neuron mean spike counts over timesteps (`len == n_neurons`).
+///
+/// Each returned rate is in `[0, 1]`: with the set contract enforced by
+/// [`spike_activity_features`] (a neuron fires at most once per step), a
+/// neuron's total count over `T` steps cannot exceed `T`, so the mean over
+/// steps cannot exceed `1.0`. Duplicates would break this bound and are
+/// rejected upstream — they are not counted here.
 fn firing_rates(activity: &SpikeActivity, n_neurons: usize) -> Vec<f32> {
     let n_steps = activity.spike_train.len().max(1) as f32;
     let mut rates = vec![0.0_f32; n_neurons];
@@ -170,7 +227,9 @@ fn firing_rates(activity: &SpikeActivity, n_neurons: usize) -> Vec<f32> {
 }
 
 /// Time-binned spike rates (`len == n_neurons * TEMPORAL_BINS`), each bin
-/// normalized by its actual timestep width.
+/// normalized by its actual timestep width. Each bin value is in `[0, 1]`:
+/// the set contract (at most one fire per neuron per step) means a neuron
+/// cannot contribute more than one count to any bin it appears in.
 fn temporal_histogram(activity: &SpikeActivity, n_neurons: usize) -> Vec<f32> {
     let bins = TEMPORAL_BINS;
     let mut hist = vec![0.0_f32; n_neurons * bins];
@@ -368,6 +427,199 @@ mod tests {
             Err(HybridError::InvalidConfig(msg)) => assert!(msg.contains("non-finite")),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// The 2026-09-15 evidence case: three copies of 0 in one step used to
+    /// yield rate 3.0 (then `tanh`-saturate). A timestep is a set, so the
+    /// duplicate is rejected before any feature is built.
+    #[test]
+    fn features_reject_duplicate_indices_in_one_step() {
+        let act = SpikeActivity {
+            spike_train: vec![vec![0, 0, 0]],
+            potentials: vec![0.0; 2],
+            iz_potentials: vec![],
+        };
+        // The input contract is mode-independent: every mode is guarded.
+        for mode in [
+            ProjectionMode::RateSum,
+            ProjectionMode::SpikingTernary,
+            ProjectionMode::TemporalHistogram,
+            ProjectionMode::MembraneSnapshot,
+        ] {
+            match spike_activity_features(mode, &act, 2) {
+                Err(HybridError::InvalidConfig(msg)) => {
+                    assert!(
+                        msg.contains("index 0 appears more than once at step 0"),
+                        "{msg}"
+                    );
+                }
+                other => panic!("mode {mode:?}: unexpected {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn features_reject_duplicate_indices_in_a_later_step() {
+        let act = SpikeActivity {
+            spike_train: vec![vec![1], vec![2, 2]],
+            potentials: vec![0.0; 3],
+            iz_potentials: vec![],
+        };
+        match spike_activity_features(ProjectionMode::RateSum, &act, 3) {
+            Err(HybridError::InvalidConfig(msg)) => {
+                assert!(
+                    msg.contains("index 2 appears more than once at step 1"),
+                    "{msg}"
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_fired_rejects_duplicate_indices() {
+        // `from_fired` builds a one-step bag, so it enforces the same set rule.
+        match SpikeActivity::from_fired(&[0, 1, 0], 2) {
+            Err(HybridError::InvalidConfig(msg)) => {
+                assert!(msg.contains("index 0 appears more than once"), "{msg}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // Order / distinctness: an unsorted set is fine, a multiset is not.
+        assert!(SpikeActivity::from_fired(&[3, 1, 0], 4).is_ok());
+    }
+
+    /// With uniqueness enforced, RateSum rates stay in `[0, 1]` per neuron,
+    /// measured as the mean over steps — they cannot exceed 1.0 any more.
+    #[test]
+    fn rate_sum_rates_are_mean_over_steps_and_bounded() {
+        let act = SpikeActivity {
+            // neuron 0 fires in 2 of 3 steps, neuron 1 in all 3, neuron 2 never.
+            spike_train: vec![vec![0, 1], vec![1], vec![0, 1]],
+            potentials: vec![0.0; 3],
+            iz_potentials: vec![],
+        };
+        let rates = spike_activity_features(ProjectionMode::RateSum, &act, 3).unwrap();
+        assert_eq!(rates.len(), 3);
+        assert!((rates[0] - 2.0 / 3.0).abs() < 1e-6);
+        assert!((rates[1] - 1.0).abs() < 1e-6);
+        assert!((rates[2] - 0.0).abs() < 1e-6);
+        for &r in &rates {
+            assert!(
+                (0.0..=1.0).contains(&r),
+                "set semantics keep per-neuron mean rates in [0, 1], got {r}"
+            );
+        }
+        // A full-population burst on every step saturates at exactly 1.0.
+        let full = SpikeActivity {
+            spike_train: vec![vec![0, 1, 2]; 7],
+            potentials: vec![0.0; 3],
+            iz_potentials: vec![],
+        };
+        let rates = spike_activity_features(ProjectionMode::RateSum, &full, 3).unwrap();
+        for &r in &rates {
+            assert!(
+                (r - 1.0).abs() < 1e-6,
+                "full burst rate must be exactly 1.0, got {r}"
+            );
+        }
+    }
+
+    #[test]
+    fn iz_potentials_empty_is_accepted_unused() {
+        // Empty is the unused spelling: every mode projects normally.
+        let act = SpikeActivity {
+            spike_train: vec![vec![0]],
+            potentials: vec![0.0, 0.0],
+            iz_potentials: vec![],
+        };
+        assert_eq!(
+            spike_activity_features(ProjectionMode::RateSum, &act, 2).unwrap(),
+            vec![1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn iz_potentials_neuron_sized_is_a_documented_ignore() {
+        // Well-formed (len == n_neurons, finite) iz_potentials is accepted and
+        // ignored: no pure mode reads it (GIF lives in neuromod). The rates
+        // must not change versus the empty spelling.
+        let empty = SpikeActivity {
+            spike_train: vec![vec![0]],
+            potentials: vec![0.25, 0.5],
+            iz_potentials: vec![],
+        };
+        let filled = SpikeActivity {
+            spike_train: vec![vec![0]],
+            potentials: vec![0.25, 0.5],
+            iz_potentials: vec![0.9, 0.1],
+        };
+        for mode in [
+            ProjectionMode::RateSum,
+            ProjectionMode::SpikingTernary,
+            ProjectionMode::TemporalHistogram,
+            ProjectionMode::MembraneSnapshot,
+        ] {
+            let a = spike_activity_features(mode, &empty, 2).unwrap();
+            let b = spike_activity_features(mode, &filled, 2).unwrap();
+            assert_eq!(a, b, "mode {mode:?} must ignore well-formed iz_potentials");
+        }
+    }
+
+    #[test]
+    fn iz_potentials_garbage_length_is_rejected() {
+        // The evidence case: a 99-element vector must not be silently ignored.
+        let act = SpikeActivity {
+            spike_train: vec![vec![0]],
+            potentials: vec![0.0; 4],
+            iz_potentials: vec![0.0; 99],
+        };
+        match spike_activity_features(ProjectionMode::RateSum, &act, 4) {
+            Err(HybridError::InputLengthMismatch {
+                expected: 4,
+                got: 99,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        // Short-but-nonempty is just as wrong.
+        let short = SpikeActivity {
+            spike_train: vec![vec![0]],
+            potentials: vec![0.0; 4],
+            iz_potentials: vec![0.0],
+        };
+        match spike_activity_features(ProjectionMode::MembraneSnapshot, &short, 4) {
+            Err(HybridError::InputLengthMismatch {
+                expected: 4,
+                got: 1,
+            }) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iz_potentials_non_finite_is_rejected() {
+        let act = SpikeActivity {
+            spike_train: vec![vec![0]],
+            potentials: vec![0.0, 0.0],
+            iz_potentials: vec![0.0, f32::INFINITY],
+        };
+        match spike_activity_features(ProjectionMode::RateSum, &act, 2) {
+            Err(HybridError::InvalidConfig(msg)) => {
+                assert!(msg.contains("non-finite iz_potential"), "{msg}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iz_potentials_contract_holds_through_project_entry_point() {
+        // The same rule via the public project entry point.
+        let act = SpikeActivity {
+            spike_train: vec![vec![0]],
+            potentials: vec![0.0; 2],
+            iz_potentials: vec![0.0; 5],
+        };
+        assert!(project_spike_activity(ProjectionMode::RateSum, &act, 2, 4).is_err());
     }
 
     #[test]
