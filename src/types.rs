@@ -294,7 +294,28 @@ impl Default for HybridConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One forward-pass record: pooled embedding, projected SNN stimuli, fired
+/// output neurons, and the MoE routing fields when a reverse path ran.
+///
+/// # JSON / serde policy
+///
+/// `serde_json` maps a non-finite `f32` (`NaN` or ±`Inf`) to JSON `null`, which
+/// destroys type and meaning on the wire (`embedding: vec![NaN]` would become
+/// `"embedding":[null]`, `routing_entropy: Some(NaN)` would round-trip as
+/// `None`). This type therefore **fails closed**: serializing it while
+/// `embedding`, `stimuli`, `expert_weights`, or `routing_entropy` holds any
+/// non-finite value returns an error naming the field instead of writing
+/// `null`. Wrap it with `?` and the error surfaces as
+/// [`crate::HybridError::Json`].
+///
+/// Deserialization is unchanged and needs no symmetric guard, because strict
+/// JSON cannot express a non-finite number at all. That makes `null` the wire
+/// spelling of `None` for the two optional fields in records written under
+/// this policy; pre-policy records that already contain `null` inside
+/// `embedding` / `stimuli` / `expert_weights` are rejected by `serde_json`
+/// (`invalid type: null, expected f32`). Do not trust a legacy
+/// `"routing_entropy": null`: re-derive the value rather than guessing.
+#[derive(Debug, Clone, Deserialize)]
 pub struct HybridOutput {
     pub embedding: Vec<f32>,
     pub stimuli: Vec<f32>,
@@ -329,6 +350,37 @@ pub struct HybridOutput {
     /// Passed through exactly as the router reported it; it is **not** recomputed
     /// after [`expert_weights`](Self::expert_weights) renormalization.
     pub routing_entropy: Option<f32>,
+}
+
+/// Fails closed on non-finite `f32` values instead of letting `serde_json`
+/// write `null` (see [`HybridOutput`] docs).
+impl Serialize for HybridOutput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        crate::serde_finite::check_f32_slice(&self.embedding, "HybridOutput.embedding")?;
+        crate::serde_finite::check_f32_slice(&self.stimuli, "HybridOutput.stimuli")?;
+        crate::serde_finite::check_opt_f32_slice(
+            &self.expert_weights,
+            "HybridOutput.expert_weights",
+        )?;
+        crate::serde_finite::check_opt_f32(self.routing_entropy, "HybridOutput.routing_entropy")?;
+
+        // Field order mirrors the struct declaration, as the derived impl did.
+        let mut state = serializer.serialize_struct("HybridOutput", 8)?;
+        state.serialize_field("embedding", &self.embedding)?;
+        state.serialize_field("stimuli", &self.stimuli)?;
+        state.serialize_field("fired_neurons", &self.fired_neurons)?;
+        state.serialize_field("num_neurons", &self.num_neurons)?;
+        state.serialize_field("global_step", &self.global_step)?;
+        state.serialize_field("expert_weights", &self.expert_weights)?;
+        state.serialize_field("selected_experts", &self.selected_experts)?;
+        state.serialize_field("routing_entropy", &self.routing_entropy)?;
+        state.end()
+    }
 }
 
 #[cfg(test)]
@@ -485,5 +537,159 @@ mod tests {
         assert_eq!(empty.shape, vec![0, 16]);
         let scalar = TensorManifestEntry::new("scalar".into(), Dtype::F32, vec![], None, vec![]);
         assert!(scalar.shape.is_empty());
+    }
+
+    // ── HybridOutput JSON policy (RM-1465) ─────────────────────────────────
+
+    /// Finite ANN→SNN-only output (no MoE fields): `None` optionals.
+    fn tiny_forward_output() -> HybridOutput {
+        HybridOutput {
+            embedding: vec![0.125, -0.75, 0.0],
+            stimuli: vec![0.5, -0.5],
+            fired_neurons: vec![0],
+            num_neurons: 2,
+            global_step: 1,
+            expert_weights: None,
+            selected_experts: None,
+            routing_entropy: None,
+        }
+    }
+
+    /// Finite reverse-path-shaped output (dense MoE fields set).
+    fn reverse_shaped_output() -> HybridOutput {
+        HybridOutput {
+            embedding: vec![-0.5, 0.25, 0.0],
+            stimuli: Vec::new(),
+            fired_neurons: vec![1],
+            num_neurons: 4,
+            global_step: 7,
+            expert_weights: Some(vec![0.5, 0.25, 0.25]),
+            selected_experts: Some(vec![0, 2]),
+            routing_entropy: Some(0.42),
+        }
+    }
+
+    /// Lossless round trip: deserialize `out`, re-serialize, and require the
+    /// same bytes. Serialization is deterministic, so byte equality is exactly
+    /// field equality (and stricter than `==` for `-0.0` vs `0.0`).
+    fn assert_round_trips(out: &HybridOutput) {
+        let json = serde_json::to_string(out).expect("finite output serializes");
+        let restored: HybridOutput = serde_json::from_str(&json).expect("round trip");
+        let reserialized = serde_json::to_string(&restored).expect("finite restore serializes");
+        assert_eq!(reserialized, json, "round trip must be lossless: {out:?}");
+    }
+
+    #[test]
+    fn hybrid_output_finite_round_trips_both_shapes() {
+        // Reverse-path shape: every optional field is `Some`, so a lossless
+        // record carries no `null` at all.
+        let reverse = reverse_shaped_output();
+        let json = serde_json::to_string(&reverse).expect("finite output serializes");
+        assert!(!json.contains("null"), "unexpected null in {json}");
+        assert_round_trips(&reverse);
+
+        // Tiny ANN→SNN shape: `None` is the legitimate wire spelling of null.
+        let tiny = tiny_forward_output();
+        let json = serde_json::to_string(&tiny).expect("finite output serializes");
+        assert_eq!(
+            json,
+            "{\"embedding\":[0.125,-0.75,0.0],\"stimuli\":[0.5,-0.5],\
+            \"fired_neurons\":[0],\"num_neurons\":2,\"global_step\":1,\"expert_weights\":null,\
+            \"selected_experts\":null,\"routing_entropy\":null}"
+        );
+        assert_round_trips(&tiny);
+    }
+
+    /// Field mutation + expected error prefix, shared by the policy tests.
+    type FieldCase<T> = (fn(&mut T), &'static str);
+
+    #[test]
+    fn hybrid_output_serialization_rejects_non_finite_per_field() {
+        // (mutate, expected prefix) pairs: one per guarded f32 field, covering
+        // every non-finite spelling at least once.
+        let cases: Vec<FieldCase<HybridOutput>> = vec![
+            (
+                |o| o.embedding[1] = f32::NAN,
+                "HybridOutput.embedding[1] is NaN",
+            ),
+            (
+                |o| o.stimuli = vec![f32::INFINITY],
+                "HybridOutput.stimuli[0] is +Inf",
+            ),
+            (
+                |o| o.stimuli = vec![1.0, f32::NEG_INFINITY],
+                "HybridOutput.stimuli[1] is -Inf",
+            ),
+            (
+                |o| o.expert_weights = Some(vec![0.5, f32::NAN]),
+                "HybridOutput.expert_weights[1] is NaN",
+            ),
+            (
+                |o| o.routing_entropy = Some(f32::INFINITY),
+                "HybridOutput.routing_entropy is +Inf",
+            ),
+        ];
+        for (mutate, prefix) in cases {
+            let mut out = reverse_shaped_output();
+            mutate(&mut out);
+            let err = serde_json::to_string(&out)
+                .expect_err("non-finite output must fail closed, not write null");
+            let text = err.to_string();
+            assert!(text.starts_with(prefix), "expected {prefix}, got {text}");
+            assert!(
+                text.contains("JSON would emit null"),
+                "policy reason in {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn hybrid_output_serialization_still_accepts_none_optionals() {
+        let out = tiny_forward_output();
+        let json = serde_json::to_string(&out).expect("`None` fields are finite-by-definition");
+        assert!(json.contains("\"expert_weights\":null"));
+        assert!(json.contains("\"routing_entropy\":null"));
+    }
+
+    #[test]
+    fn hybrid_output_deserialization_rejects_null_inside_float_arrays() {
+        // Legacy record shape produced by the pre-policy writer.
+        let json = r#"{
+            "embedding": [null],
+            "stimuli": [0.5],
+            "fired_neurons": [0],
+            "num_neurons": 2,
+            "global_step": 1,
+            "expert_weights": null,
+            "selected_experts": null,
+            "routing_entropy": null
+        }"#;
+        let err =
+            serde_json::from_str::<HybridOutput>(json).expect_err("a null element is not an f32");
+        let text = err.to_string();
+        assert!(
+            text.contains("invalid type: null, expected f32"),
+            "unexpected error: {text}"
+        );
+    }
+
+    #[test]
+    fn hybrid_output_legacy_null_entropy_decodes_as_none() {
+        // Documented asymmetry: `null` is the wire spelling of `None`, so a
+        // legacy `Some(NaN)`-turned-`null` is indistinguishable. Callers must
+        // re-derive entropy rather than trust the value.
+        let json = r#"{
+            "embedding": [0.25],
+            "stimuli": [],
+            "fired_neurons": [],
+            "num_neurons": 1,
+            "global_step": 3,
+            "expert_weights": null,
+            "selected_experts": null,
+            "routing_entropy": null
+        }"#;
+        let out: HybridOutput = serde_json::from_str(json).expect("null entropy decodes as None");
+        assert_eq!(out.routing_entropy, None);
+        assert_eq!(out.expert_weights, None);
     }
 }

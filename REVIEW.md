@@ -47,6 +47,9 @@ Copy-paste this into every PR review:
 - [ ] Hidden-state rank is 1 (`[dim]`) or 2 (`[seq, dim]`); other ranks error before `snn.step`
 - [ ] `Transformer::dim()` is `> 0`; Rank-2 `shape[0] == token_ids.len()` and hidden width equals `Transformer::dim()`
 - [ ] Hidden / pooled / stimuli buffers are finite; zero-channel SNNs are rejected
+- [ ] JSON serialization of `f32`-bearing record types (`HybridOutput`, `ExpertRouteOutput`,
+      `SpikingRouteOutput`, `SpikeActivity`, `NeuroModulators`, `Tensor`) fails closed on
+      NaN/±Inf with an error naming the field, never writes `null` (`serde_finite` policy, RM-1465)
 - [ ] `global_step` is unchanged on every forward-path validation failure
 - [ ] No silent fallback on shape mismatches — return an error
 

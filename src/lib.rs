@@ -12,6 +12,7 @@ pub mod plan;
 pub mod projector;
 pub mod reverse;
 pub mod routing;
+mod serde_finite;
 pub mod spiking_router;
 pub mod telemetry;
 pub mod tensor;

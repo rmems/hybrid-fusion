@@ -269,6 +269,30 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Fixed
 
+- **BREAKING (serde / RM-1465):** JSON serialization of the `f32`-bearing record
+  types now **fails closed on non-finite values** instead of writing `null`
+  (Linear [RM-1465](https://linear.app/rpd-34/issue/RM-1465)). JSON is not a
+  lossless `f32` container: `serde_json` has no spelling for `NaN` or ±`Inf`
+  and silently emits `null`, so `HybridOutput { embedding: vec![NaN], … }`
+  serialized to `"embedding":[null]` and `routing_entropy: Some(NaN)` to
+  `"routing_entropy":null`, which reads back as `None` — silently wrong logs,
+  Sentry breadcrumbs, and checkpointed fusion traces. `HybridOutput`
+  (`embedding`, `stimuli`, `expert_weights`, `routing_entropy`),
+  `ExpertRouteOutput`, `SpikingRouteOutput` (`hidden_gain`, plus the nested
+  route's own guard), `SpikeActivity` (`potentials`, `iz_potentials`),
+  `NeuroModulators`, and `Tensor` now return a serde error naming the offending
+  field, index, and value (e.g. `HybridOutput.embedding[1] is NaN: …`); via
+  `serde_json` that is a `serde_json::Error`, which `HybridError::Json` wraps
+  with `?`. Deserialization is unchanged: strict JSON cannot carry a
+  non-finite number in the first place, `null` stays the wire spelling of
+  `None` for the optional fields, and legacy records containing `null` inside
+  a float array are already rejected by `serde_json` (`invalid type: null,
+  expected f32`) — a legacy `"routing_entropy": null` must be re-derived, not
+  trusted. Finite records round-trip losslessly; new tests cover the tiny
+  forward-path and reverse-path outputs plus every guarded field. Complements
+  the runtime NaN rejection in `HybridNetwork::forward` (RM-1356), which cannot
+  see a router that reports non-finite `routing_entropy` or a hand-built
+  `HybridOutput`.
 - **BREAKING**: `routing::softmax` now returns `Result<Vec<f32>>` and has a
   documented non-finite policy. `NaN` and `+Inf` scores no longer produce a
   uniform distribution. A single `+Inf` score gives a one-hot result, several `+Inf`

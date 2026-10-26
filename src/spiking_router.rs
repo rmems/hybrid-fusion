@@ -75,7 +75,15 @@ pub const DEFAULT_SPIKE_BOOST: f32 = 1.0;
 
 /// One spiking-routing forward: the boosted dense route plus the SNN tick it
 /// came from.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// # JSON / serde policy
+///
+/// `hidden_gain` fails closed on non-finite values, and the nested
+/// [`ExpertRouteOutput`](crate::ExpertRouteOutput) brings its own guard for
+/// `expert_weights` and `routing_entropy`: serialization returns an error
+/// naming the offending field instead of letting `serde_json` write `null`
+/// (crate `serde_finite` policy, RM-1465).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SpikingRouteOutput {
     /// Boosted dense route: normalized `expert_weights` (softmax of the
     /// boosted scores), `selected_experts` ranked by those scores, and
@@ -90,6 +98,29 @@ pub struct SpikingRouteOutput {
     /// `[0, 1]` (issue #93): scale the embedding by this to obtain the
     /// spike-shaped hidden state.
     pub hidden_gain: f32,
+}
+
+/// Fails closed on non-finite `f32` values instead of letting `serde_json`
+/// write `null` (see [`SpikingRouteOutput`] docs).
+impl Serialize for SpikingRouteOutput {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        crate::serde_finite::check_f32(self.hidden_gain, "SpikingRouteOutput.hidden_gain")?;
+        // `route` re-enters `ExpertRouteOutput::serialize`, which guards its
+        // own `f32` fields (`expert_weights`, `routing_entropy`).
+
+        // Field order mirrors the struct declaration, as the derived impl did.
+        let mut state = serializer.serialize_struct("SpikingRouteOutput", 4)?;
+        state.serialize_field("route", &self.route)?;
+        state.serialize_field("fired_neurons", &self.fired_neurons)?;
+        state.serialize_field("num_neurons", &self.num_neurons)?;
+        state.serialize_field("hidden_gain", &self.hidden_gain)?;
+        state.end()
+    }
 }
 
 /// Hybrid MoE routing host through a spiking network:
@@ -1335,5 +1366,47 @@ mod tests {
         let mut ok = spiking_router(MockSnn::new(8, 8, 0.0));
         ok.reset().unwrap();
         assert_eq!(ok.snn().steps, 0);
+    }
+
+    /// RM-1465: a spiking route record is JSON-lossless while every field is
+    /// finite, and a non-finite `hidden_gain` fails closed instead of writing
+    /// `null`. The nested `route` guard is covered in `src/traits.rs` tests.
+    #[test]
+    fn spiking_route_output_json_policy() {
+        let mut model = spiking_router(MockSnn::new(8, 8, 0.0));
+        let out = model
+            .forward(&[0.5; 4], &NeuroModulators::default())
+            .unwrap();
+
+        let json = serde_json::to_string(&out).expect("finite route serializes");
+        assert!(!json.contains("null"), "unexpected null in {json}");
+        let restored: SpikingRouteOutput =
+            serde_json::from_str(&json).expect("finite route round trips");
+        assert_eq!(restored, out);
+
+        let mut bad = out.clone();
+        bad.hidden_gain = f32::NAN;
+        let err = serde_json::to_string(&bad)
+            .expect_err("non-finite hidden_gain must fail closed, not write null");
+        let text = err.to_string();
+        assert!(
+            text.starts_with("SpikingRouteOutput.hidden_gain is NaN"),
+            "unexpected error: {text}"
+        );
+        assert!(
+            text.contains("JSON would emit null"),
+            "policy reason in {text}"
+        );
+
+        // Nested records keep their own guard through the outer impl.
+        let mut nested = out;
+        nested.route.routing_entropy = Some(f32::INFINITY);
+        let err = serde_json::to_string(&nested)
+            .expect_err("non-finite entropy must fail closed, not write null");
+        assert!(
+            err.to_string()
+                .starts_with("ExpertRouteOutput.routing_entropy is +Inf"),
+            "unexpected error: {err}"
+        );
     }
 }

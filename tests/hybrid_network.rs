@@ -990,6 +990,45 @@ fn forward_output_population_is_independent_and_required_in_serialization() {
     }
 }
 
+/// RM-1465: a finite tiny-config forward output round-trips through JSON with
+/// every field preserved, and a non-finite value fails closed with an error
+/// naming the field instead of silently becoming `null`.
+#[test]
+fn forward_output_json_round_trips_and_fails_closed_on_nan() {
+    let mut net = build_network();
+    let tokens = [1u32, 2, 3, 4];
+    let out = net.forward(&tokens, None).unwrap();
+    assert!(out.embedding.iter().all(|v| v.is_finite()));
+    assert!(out.stimuli.iter().all(|v| v.is_finite()));
+
+    let json = serde_json::to_string(&out).expect("finite forward output serializes");
+    let restored: HybridOutput = serde_json::from_str(&json).expect("round trip");
+    assert_eq!(restored.embedding, out.embedding);
+    assert_eq!(restored.stimuli, out.stimuli);
+    assert_eq!(restored.fired_neurons, out.fired_neurons);
+    assert_eq!(restored.num_neurons, out.num_neurons);
+    assert_eq!(restored.global_step, out.global_step);
+    assert_eq!(restored.expert_weights, out.expert_weights);
+    assert_eq!(restored.selected_experts, out.selected_experts);
+    assert_eq!(restored.routing_entropy, out.routing_entropy);
+
+    // The forward path rejects non-finite values upstream, but the record type
+    // is public and constructible by hand: serialization must still fail closed.
+    let mut bad = out;
+    bad.embedding[0] = f32::NAN;
+    let err = serde_json::to_string(&bad)
+        .expect_err("non-finite embedding must fail closed, not write null");
+    let text = err.to_string();
+    assert!(
+        text.starts_with("HybridOutput.embedding[0] is NaN"),
+        "unexpected error: {text}"
+    );
+    assert!(
+        text.contains("JSON would emit null"),
+        "policy reason in {text}"
+    );
+}
+
 #[test]
 fn invalid_output_contract_does_not_advance_host_counter() {
     // 3 is a legal input ID but NOT an output ID for this 8 -> 3 backend.

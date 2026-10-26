@@ -126,13 +126,49 @@ pub trait SpikingNetwork {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Neuromodulator state handed to every [`SpikingNetwork`] step.
+///
+/// # JSON / serde policy
+///
+/// This type is persisted in step records and telemetry, and `serde_json`
+/// would silently write a non-finite `f32` as JSON `null`. Serialization
+/// therefore fails closed: any `NaN` / ±`Inf` in a field returns an error
+/// naming that field instead of writing `null` (crate `serde_finite` policy,
+/// RM-1465).
+/// Deserialization is unchanged — strict JSON cannot carry a non-finite number.
+#[derive(Debug, Clone, Deserialize)]
 pub struct NeuroModulators {
     pub dopamine: f32,
     pub cortisol: f32,
     pub acetylcholine: f32,
     pub tempo: f32,
     pub aux_dopamine: f32,
+}
+
+/// Fails closed on non-finite `f32` values instead of letting `serde_json`
+/// write `null` (see [`NeuroModulators`] docs).
+impl Serialize for NeuroModulators {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        crate::serde_finite::check_f32(self.dopamine, "NeuroModulators.dopamine")?;
+        crate::serde_finite::check_f32(self.cortisol, "NeuroModulators.cortisol")?;
+        crate::serde_finite::check_f32(self.acetylcholine, "NeuroModulators.acetylcholine")?;
+        crate::serde_finite::check_f32(self.tempo, "NeuroModulators.tempo")?;
+        crate::serde_finite::check_f32(self.aux_dopamine, "NeuroModulators.aux_dopamine")?;
+
+        // Field order mirrors the struct declaration, as the derived impl did.
+        let mut state = serializer.serialize_struct("NeuroModulators", 5)?;
+        state.serialize_field("dopamine", &self.dopamine)?;
+        state.serialize_field("cortisol", &self.cortisol)?;
+        state.serialize_field("acetylcholine", &self.acetylcholine)?;
+        state.serialize_field("tempo", &self.tempo)?;
+        state.serialize_field("aux_dopamine", &self.aux_dopamine)?;
+        state.end()
+    }
 }
 
 impl Default for NeuroModulators {
@@ -286,7 +322,16 @@ impl From<SafetensorsLayoutDe> for SafetensorsLayout {
 ///
 /// Field names mirror corinth-canal `FunnelActivity` / `Projector::project` inputs
 /// (`spike_train`, `potentials`, `iz_potentials`) without ternary events or GIF state.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// # JSON / serde policy
+///
+/// `potentials` and `iz_potentials` fail closed on non-finite values:
+/// serialization returns an error naming the field instead of letting
+/// `serde_json` write `null` (crate `serde_finite` policy, RM-1465). This
+/// matches the runtime rule — [`crate::project_spike_activity`] already
+/// rejects non-finite potentials — so a record written under this policy is
+/// the only kind of trace that can round-trip.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SpikeActivity {
     /// Per-timestep fired neuron indices.
     pub spike_train: Vec<Vec<usize>>,
@@ -294,6 +339,27 @@ pub struct SpikeActivity {
     pub potentials: Vec<f32>,
     /// Optional adaptive-bank potentials; empty when unused.
     pub iz_potentials: Vec<f32>,
+}
+
+/// Fails closed on non-finite `f32` values instead of letting `serde_json`
+/// write `null` (see [`SpikeActivity`] docs).
+impl Serialize for SpikeActivity {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        crate::serde_finite::check_f32_slice(&self.potentials, "SpikeActivity.potentials")?;
+        crate::serde_finite::check_f32_slice(&self.iz_potentials, "SpikeActivity.iz_potentials")?;
+
+        // Field order mirrors the struct declaration, as the derived impl did.
+        let mut state = serializer.serialize_struct("SpikeActivity", 3)?;
+        state.serialize_field("spike_train", &self.spike_train)?;
+        state.serialize_field("potentials", &self.potentials)?;
+        state.serialize_field("iz_potentials", &self.iz_potentials)?;
+        state.end()
+    }
 }
 
 impl SpikeActivity {
@@ -359,7 +425,15 @@ impl SpikeActivity {
 /// `O(num_experts * 2^-24)` — up to ~`4.8e-2` at
 /// [`MAX_REASONABLE_EXPERTS`](crate::MAX_REASONABLE_EXPERTS) — and will be
 /// rejected at large expert counts.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// # JSON / serde policy
+///
+/// `expert_weights` and `routing_entropy` fail closed on non-finite values:
+/// serialization returns an error naming the field instead of letting
+/// `serde_json` write `null` (crate `serde_finite` policy, RM-1465).
+/// `routing_entropy` is passed through verbatim, so a router that reports
+/// `Some(NaN)` is caught here even when every host-side weight check passes.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ExpertRouteOutput {
     /// Full gate distribution over experts (`len == num_experts`, sum ≈ 1).
     pub expert_weights: Vec<f32>,
@@ -367,6 +441,33 @@ pub struct ExpertRouteOutput {
     pub selected_experts: Vec<usize>,
     /// Optional routing entropy for telemetry; `None` if not computed.
     pub routing_entropy: Option<f32>,
+}
+
+/// Fails closed on non-finite `f32` values instead of letting `serde_json`
+/// write `null` (see [`ExpertRouteOutput`] docs).
+impl Serialize for ExpertRouteOutput {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        crate::serde_finite::check_f32_slice(
+            &self.expert_weights,
+            "ExpertRouteOutput.expert_weights",
+        )?;
+        crate::serde_finite::check_opt_f32(
+            self.routing_entropy,
+            "ExpertRouteOutput.routing_entropy",
+        )?;
+
+        // Field order mirrors the struct declaration, as the derived impl did.
+        let mut state = serializer.serialize_struct("ExpertRouteOutput", 3)?;
+        state.serialize_field("expert_weights", &self.expert_weights)?;
+        state.serialize_field("selected_experts", &self.selected_experts)?;
+        state.serialize_field("routing_entropy", &self.routing_entropy)?;
+        state.end()
+    }
 }
 
 /// Mixture-of-Experts routing contract: embedding → expert weights + selection.
@@ -537,5 +638,156 @@ mod tests {
         let err = loader.load("").unwrap_err();
         assert!(matches!(err, HybridError::SafetensorsParse(_)));
         assert!(err.to_string().contains("Safetensors parse failed"));
+    }
+
+    // ── Non-finite JSON policy (RM-1465) ────────────────────────────────────
+
+    #[test]
+    fn neuro_modulators_finite_round_trip() {
+        let mods = NeuroModulators {
+            dopamine: 0.25,
+            cortisol: 0.75,
+            acetylcholine: 1.5,
+            tempo: 2.0,
+            aux_dopamine: -0.5,
+        };
+        let json = serde_json::to_string(&mods).expect("finite modulators serialize");
+        assert!(!json.contains("null"), "unexpected null in {json}");
+        let restored: NeuroModulators = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(restored.dopamine, mods.dopamine);
+        assert_eq!(restored.cortisol, mods.cortisol);
+        assert_eq!(restored.acetylcholine, mods.acetylcholine);
+        assert_eq!(restored.tempo, mods.tempo);
+        assert_eq!(restored.aux_dopamine, mods.aux_dopamine);
+    }
+
+    /// Field mutation + expected error prefix, shared by the policy tests.
+    type FieldCase<T> = (fn(&mut T), &'static str);
+
+    #[test]
+    fn neuro_modulators_serialization_rejects_non_finite_per_field() {
+        let cases: Vec<FieldCase<NeuroModulators>> = vec![
+            (|m| m.dopamine = f32::NAN, "NeuroModulators.dopamine is NaN"),
+            (
+                |m| m.cortisol = f32::INFINITY,
+                "NeuroModulators.cortisol is +Inf",
+            ),
+            (
+                |m| m.acetylcholine = f32::NEG_INFINITY,
+                "NeuroModulators.acetylcholine is -Inf",
+            ),
+            (|m| m.tempo = f32::NAN, "NeuroModulators.tempo is NaN"),
+            (
+                |m| m.aux_dopamine = f32::INFINITY,
+                "NeuroModulators.aux_dopamine is +Inf",
+            ),
+        ];
+        for (mutate, prefix) in cases {
+            let mut mods = NeuroModulators::default();
+            mutate(&mut mods);
+            let err = serde_json::to_string(&mods)
+                .expect_err("non-finite modulators must fail closed, not write null");
+            let text = err.to_string();
+            assert!(text.starts_with(prefix), "expected {prefix}, got {text}");
+            assert!(
+                text.contains("JSON would emit null"),
+                "policy reason in {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn spike_activity_serialization_rejects_non_finite_potentials() {
+        let cases: Vec<FieldCase<SpikeActivity>> = vec![
+            (
+                |a| a.potentials[1] = f32::NAN,
+                "SpikeActivity.potentials[1] is NaN",
+            ),
+            (
+                |a| a.iz_potentials[0] = f32::INFINITY,
+                "SpikeActivity.iz_potentials[0] is +Inf",
+            ),
+        ];
+        for (mutate, prefix) in cases {
+            let mut act = SpikeActivity {
+                spike_train: vec![vec![0]],
+                potentials: vec![0.0, 1.0],
+                iz_potentials: vec![0.0, 2.0],
+            };
+            mutate(&mut act);
+            let err = serde_json::to_string(&act)
+                .expect_err("non-finite potentials must fail closed, not write null");
+            let text = err.to_string();
+            assert!(text.starts_with(prefix), "expected {prefix}, got {text}");
+            assert!(
+                text.contains("JSON would emit null"),
+                "policy reason in {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn spike_activity_finite_round_trip() {
+        let act = SpikeActivity {
+            spike_train: vec![vec![0, 2], vec![1]],
+            potentials: vec![-0.5, 0.0, 1.25],
+            iz_potentials: vec![0.75],
+        };
+        let json = serde_json::to_string(&act).expect("finite activity serializes");
+        let restored: SpikeActivity = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(restored, act);
+    }
+
+    #[test]
+    fn expert_route_output_rejects_non_finite_weights_and_entropy() {
+        let cases: Vec<FieldCase<ExpertRouteOutput>> = vec![
+            (
+                |r| r.expert_weights[1] = f32::NAN,
+                "ExpertRouteOutput.expert_weights[1] is NaN",
+            ),
+            (
+                |r| r.routing_entropy = Some(f32::INFINITY),
+                "ExpertRouteOutput.routing_entropy is +Inf",
+            ),
+        ];
+        for (mutate, prefix) in cases {
+            let mut route = ExpertRouteOutput {
+                expert_weights: vec![0.25, 0.75],
+                selected_experts: vec![1],
+                routing_entropy: Some(0.42),
+            };
+            mutate(&mut route);
+            let err = serde_json::to_string(&route)
+                .expect_err("non-finite route must fail closed, not write null");
+            let text = err.to_string();
+            assert!(text.starts_with(prefix), "expected {prefix}, got {text}");
+            assert!(
+                text.contains("JSON would emit null"),
+                "policy reason in {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn expert_route_output_finite_round_trip() {
+        let route = ExpertRouteOutput {
+            expert_weights: vec![0.25, 0.75],
+            selected_experts: vec![1],
+            routing_entropy: Some(0.42),
+        };
+        let json = serde_json::to_string(&route).expect("finite route serializes");
+        assert!(!json.contains("null"), "unexpected null in {json}");
+        let restored: ExpertRouteOutput = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(restored, route);
+
+        let none_entropy = ExpertRouteOutput {
+            expert_weights: vec![1.0],
+            selected_experts: vec![0],
+            routing_entropy: None,
+        };
+        let json = serde_json::to_string(&none_entropy).expect("`None` entropy serializes");
+        assert!(json.contains("\"routing_entropy\":null"));
+        let restored: ExpertRouteOutput = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(restored, none_entropy);
     }
 }
