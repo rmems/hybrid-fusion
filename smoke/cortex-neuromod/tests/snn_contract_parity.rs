@@ -25,7 +25,11 @@
 //!   and readouts, on learning and held-out ticks alike.
 //! * Host-side validation: a backend firing an out-of-range or duplicate ID
 //!   is rejected by both routers before the readout can influence routing.
-//! * The #91 never-spiking-channel fix exists on both sides.
+//! * The #91 never-spiking-channel fix exists on both sides. The tests
+//!   assert cortex-tensor's public rejection (`from_network` on a blank
+//!   network); hybrid-fusion's copy sits behind its `pub(crate)` boundary
+//!   and its public constructors cannot produce a dead network, so its side
+//!   is covered by that crate's in-crate tests, not by this gate.
 //!
 //! # Intentional differences (documented in ADR 0002, asserted here)
 //!
@@ -586,10 +590,14 @@ fn assert_routes_agree(
         hybrid.hidden_gain
     );
     for (i, (&hidden, &value)) in cortex.hidden.iter().zip(embedding.iter()).enumerate() {
+        // Embedding values are tiny (about 4e-4..9e-3), so an absolute
+        // tolerance on the scaled hidden state could not see gain drift:
+        // compare the implied gain instead. Every fixture value is strictly
+        // positive, so the division is exact enough for the 1e-5 tolerance.
         assert_close(
-            hidden,
-            value * hybrid.hidden_gain,
-            &format!("tick {tick}: hidden[{i}]"),
+            hidden / value,
+            hybrid.hidden_gain,
+            &format!("tick {tick}: implied hidden gain at [{i}]"),
         );
     }
 }

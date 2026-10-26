@@ -61,7 +61,13 @@ Drift is prevented mechanically, not by prose:
    package runs in both the `validate` and `msrv` jobs) run the same seeded
    inputs through both trait sets. Agreement is asserted exactly where the
    contracts must agree, and every intentional difference is asserted, so a
-   difference can only enter through an edited test that names it.
+   difference can only enter through an edited test that names it. **Scope
+   of the gate:** the smoke package pins cortex-tensor by git rev, so the
+   gate proves agreement with *that rev*. A later cortex-tensor change to a
+   shared contract is invisible to the gate until the pin moves — a change
+   to either crate's side of the contract must therefore bump the pin (and
+   extend these tests) in the same PR series; a green gate against a stale
+   pin only proves agreement with the pinned tree.
 3. The smoke package's cortex-tensor pin is bumped past the #91/#92/#93 fix
    series (`f591f2e`, RM-2208), so the parity tests compare like with like.
 
@@ -87,7 +93,14 @@ Drift is prevented mechanically, not by prose:
 | `src/snn/axon_adapter.rs` (`AxonEncoder` over `axon-encoder`, feature `axon-encoder`) | — | no hybrid-fusion counterpart; cortex-tensor-only adapter, out of this mapping's parity scope |
 | `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnSpikeOutOfRange, SnnDuplicateSpike, SnnReadoutLength, SnnInvalidReadout}` | `HybridError::{SnnStep, ConfigMismatch, NonFinite, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnInvalidReadout}` | same failure conditions, different vocabularies; both hosts reject NaN before the tick and validate spikes/readouts after it |
 
-## 4. Intentional differences (each asserted by the parity tests)
+## 4. Intentional differences
+
+Each difference below is **asserted by the parity tests where it is
+externally observable** through both crates' public APIs. The one exception
+is the hybrid-fusion half of §4.5: its rejection path is `pub(crate)` and
+its public constructors cannot produce a dead network, so the parity tests
+assert cortex-tensor's public rejection and hybrid-fusion's in-crate tests
+cover its own side; this ADR documents the boundary.
 
 ### 4.1 Width axes
 
@@ -146,7 +159,11 @@ public constructors (`with_seed`, `identity_wired`) always seed strictly
 positive weights, so the #91 rejection lives behind the `pub(crate)`
 `from_network` — no `neuromod` type may cross hybrid-fusion's public API.
 hybrid-fusion's adapter additionally enforces a 64 MiB matrix budget and an
-exhaustive `StepError` mapping.
+exhaustive `StepError` mapping. Coverage note: the parity tests assert
+cortex-tensor's public rejection (`from_network` on a blank network);
+hybrid-fusion's `pub(crate)` rejection path and its matrix budget are covered
+by that crate's in-crate tests, not by the cross-crate gate, because neither
+is reachable through hybrid-fusion's public API.
 
 ## 5. Fix parity (#91–#93)
 
@@ -170,10 +187,14 @@ All four fixes exist on **both** sides; the parity tests keep it that way:
   change that adds this ADR; ADR 0001 keeps its history with a superseded
   marker.
 - A change to one contract that should apply to both must now say so: edit
-  both crates, both mapping documents, and extend the parity tests, or
-  explicitly record a new intentional difference here.
+  both crates, both mapping documents, extend the parity tests, and **bump
+  the smoke pin** when cortex-tensor's behavior changes — the gate only
+  tests the pinned rev — or explicitly record a new intentional difference
+  here.
 - The `smoke/cortex-neuromod` pin (RM-2208) is bumped to `f591f2e` in the
-  same change; future pin bumps only need to keep the parity tests green.
+  same change. Future pin bumps must keep the parity tests green, and a
+  green gate against a stale pin only proves agreement with the pinned
+  tree, not with cortex-tensor `main`.
 - `AxonEncoder` (cortex-tensor, `axon-encoder` feature) has no
   hybrid-fusion counterpart and is out of parity scope; if it ever grows one,
   extend §3 and the parity tests in the same PR.

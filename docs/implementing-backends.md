@@ -320,11 +320,15 @@ pub trait SpikeDecoder {
 - `SpikeDecoder::decode` maps one tick of fired IDs into exactly
   `num_neurons` readouts. It is fallible and sized by the **output
   population**, not the channel count — hybrid-fusion keeps those axes
-  separate, unlike cortex-tensor, where they were collapsed. Out-of-range
+  separate, unlike cortex-tensor, where they are collapsed (its
+  `channels()` is the whole width contract; see
+  [ADR 0002](adr/0002-snn-step-contract-parity.md) §4.1). Out-of-range
   fired IDs are an error (`SnnSpikeOutOfRange`), not a silent drop.
 - `RateEncoder { gain }` tiles `ann_signal[idx % len] * gain` across the
   channels (empty signal → zeros). `SpikeCountDecoder` counts fired IDs per
-  neuron. Both are ported from cortex-tensor with unchanged semantics.
+  neuron. Tiling and counting match cortex-tensor's `RateEncoder` /
+  `SpikeCountDecoder`; the decoder still differs on sizing and on
+  out-of-range IDs (ADR 0002 §4.2).
 - `encoding()` / `decoding()` declare the wire contract; plan ports mirror
   them via `PortSpec::with_encoding` / `with_decoding`.
 
