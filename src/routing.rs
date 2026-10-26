@@ -13,7 +13,19 @@ use std::cmp::Ordering;
 
 use crate::error::{HybridError, Result};
 
-/// Soft upper bound for synthetic / stub expert counts (keeps f32 math sane).
+/// Soft upper bound for synthetic / stub expert counts.
+///
+/// Two reasons, one numeric and one about resources:
+///
+/// - **Accuracy:** the `f64` softmax normalizer keeps the weight sum within f32
+///   round-off for any `n` up to this bound (see `softmax`); past it nothing
+///   here has been validated.
+/// - **Memory and time per route:** every route materializes all `n` weights.
+///   `softmax` holds the input scores, an `exp` buffer and the output at once,
+///   about `8n` bytes of extra peak memory (about 8 MB at this bound), and
+///   `top_k_indices` builds `n` `(usize, f32)` pairs (16 bytes each on 64-bit).
+///   Softmax costs about 5 ms at this bound on a desktop CPU (order of
+///   magnitude, single run). This is a sanity bound, not a latency budget.
 pub const MAX_REASONABLE_EXPERTS: usize = 1_000_000;
 
 /// Synthetic gate scores from an embedding and expert count.
@@ -124,23 +136,41 @@ pub fn softmax(scores: &[f32]) -> Result<Vec<f32>> {
 
 /// Indices of the `top_k` largest weights (descending). NaN weights sort last.
 ///
-/// Returns at most `weights.len()` indices. `top_k == 0` yields empty.
+/// Returns at most `weights.len()` indices. `top_k == 0` yields empty. Ties
+/// (including NaN with NaN) are broken by lower index first.
+///
+/// # Complexity
+///
+/// `O(n + k log k)` time for `n = weights.len()` and `k = top_k.min(n)`:
+/// a quickselect partition around the `k`-th element, then a sort of only the
+/// `k` winners. Extra memory is `n` `(usize, f32)` pairs.
 pub fn top_k_indices(weights: &[f32], top_k: usize) -> Vec<usize> {
     if top_k == 0 || weights.is_empty() {
         return Vec::new();
     }
+    let k = top_k.min(weights.len());
     let mut indexed: Vec<(usize, f32)> = weights.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| match (a.1.is_nan(), b.1.is_nan()) {
+    // Total order: descending weight, NaN last, then lower index first. The
+    // index tie-break makes the unstable select/sort deterministic and equal to
+    // a stable sort on the weight alone.
+    let cmp =
+        |a: &(usize, f32), b: &(usize, f32)| weight_order(a.1, b.1).then_with(|| a.0.cmp(&b.0));
+    if k < indexed.len() {
+        indexed.select_nth_unstable_by(k - 1, cmp);
+        indexed.truncate(k);
+    }
+    indexed.sort_unstable_by(cmp);
+    indexed.into_iter().map(|(idx, _)| idx).collect()
+}
+
+/// Descending weight order with NaN after every finite value.
+fn weight_order(a: f32, b: f32) -> Ordering {
+    match (a.is_nan(), b.is_nan()) {
         (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater, // NaN after finite
+        (true, false) => Ordering::Greater,
         (false, true) => Ordering::Less,
-        (false, false) => b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal),
-    });
-    indexed
-        .into_iter()
-        .take(top_k.min(weights.len()))
-        .map(|(idx, _)| idx)
-        .collect()
+        (false, false) => b.partial_cmp(&a).unwrap_or(Ordering::Equal),
+    }
 }
 
 /// Shannon entropy of a discrete distribution, normalized by `ln(n)` into `[0, 1]`.
@@ -237,6 +267,76 @@ pub fn route_synthetic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-RM-1470 implementation: full stable sort.
+    ///
+    /// Deliberately has no index tie-break: it relies on `sort_by` being stable
+    /// (guaranteed by std) so equal weights keep input order, i.e. lower index
+    /// first. That is the independent oracle for the explicit tie-break in
+    /// `top_k_indices`; keep `weight_order` free of index logic.
+    fn top_k_reference(weights: &[f32], top_k: usize) -> Vec<usize> {
+        if top_k == 0 || weights.is_empty() {
+            return Vec::new();
+        }
+        let mut indexed: Vec<(usize, f32)> = weights.iter().copied().enumerate().collect();
+        indexed.sort_by(|a, b| weight_order(a.1, b.1));
+        indexed
+            .into_iter()
+            .take(top_k.min(weights.len()))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 33
+    }
+
+    #[test]
+    fn top_k_matches_full_sort_on_random_inputs_with_nan_and_ties() {
+        let mut st = 0x5eed_u64;
+        for _ in 0..2_000 {
+            let n = (lcg(&mut st) % 64) as usize + 1;
+            let weights: Vec<f32> = (0..n)
+                .map(|_| match lcg(&mut st) % 8 {
+                    0 => f32::NAN,
+                    1 => 0.0,
+                    2 => -0.0,
+                    3 => f32::INFINITY,
+                    // few distinct values -> many ties
+                    _ => (lcg(&mut st) % 5) as f32 * 0.25,
+                })
+                .collect();
+            let k = (lcg(&mut st) % (n as u64 + 3)) as usize;
+            assert_eq!(
+                top_k_indices(&weights, k),
+                top_k_reference(&weights, k),
+                "weights={weights:?} k={k}"
+            );
+        }
+    }
+
+    #[test]
+    fn top_k_ties_prefer_lower_index() {
+        assert_eq!(top_k_indices(&[1.0, 1.0, 1.0, 1.0], 2), vec![0, 1]);
+        assert_eq!(top_k_indices(&[f32::NAN, f32::NAN, 0.0], 3), vec![2, 0, 1]);
+    }
+
+    /// Exercises the largest accepted size. Run with
+    /// `cargo test --release -- --ignored top_k_stress`.
+    #[test]
+    #[ignore = "stress: n = MAX_REASONABLE_EXPERTS"]
+    fn top_k_stress_at_max_experts() {
+        let n = MAX_REASONABLE_EXPERTS;
+        let scores: Vec<f32> = (0..n).map(|i| ((i * 7919) % n) as f32 / n as f32).collect();
+        let weights = softmax(&scores).unwrap();
+        let top = top_k_indices(&weights, 8);
+        assert_eq!(top.len(), 8);
+        assert_eq!(top, top_k_reference(&weights, 8));
+        assert!(top.windows(2).all(|w| weights[w[0]] >= weights[w[1]]));
+    }
 
     #[test]
     fn softmax_sums_to_one() {
