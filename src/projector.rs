@@ -143,6 +143,32 @@ pub fn spike_activity_features(
             "spike_activity_features: n_neurons must be > 0".into(),
         ));
     }
+    validate_potential_vectors(activity, n_neurons)?;
+    validate_spike_train(activity, n_neurons)?;
+
+    match mode {
+        ProjectionMode::RateSum | ProjectionMode::SpikingTernary => {
+            // SpikingTernary pure path matches RateSum; GIF lives in neuromod.
+            Ok(firing_rates(activity, n_neurons))
+        }
+        ProjectionMode::TemporalHistogram => Ok(temporal_histogram(activity, n_neurons)),
+        ProjectionMode::MembraneSnapshot => Ok(activity
+            .potentials
+            .iter()
+            .map(|&v| v.clamp(0.0, 1.0))
+            .collect()),
+    }
+}
+
+/// Potential-vector half of the [`spike_activity_features`] input contract.
+///
+/// `potentials` must be exactly `n_neurons` long and finite. `iz_potentials`,
+/// which no pure mode reads, must be empty (the unused spelling) or exactly
+/// `n_neurons` long and finite — a documented ignore kept for trace/serde
+/// fidelity. Rejecting a malformed length here (rather than ignoring it) is
+/// what keeps the "silently ignored 99-element vector" case impossible.
+/// Error messages name the public entry point, [`spike_activity_features`].
+fn validate_potential_vectors(activity: &SpikeActivity, n_neurons: usize) -> Result<()> {
     if activity.potentials.len() != n_neurons {
         return Err(HybridError::InputLengthMismatch {
             expected: n_neurons,
@@ -156,9 +182,6 @@ pub fn spike_activity_features(
             )));
         }
     }
-    // iz_potentials: empty = unused; non-empty must match the neuron axis and
-    // be finite. Rejecting a malformed length here (rather than ignoring it)
-    // is what keeps the "silently ignored 99-element vector" case impossible.
     if !activity.iz_potentials.is_empty() {
         if activity.iz_potentials.len() != n_neurons {
             return Err(HybridError::InputLengthMismatch {
@@ -174,6 +197,19 @@ pub fn spike_activity_features(
             }
         }
     }
+    Ok(())
+}
+
+/// Spike-train half of the [`spike_activity_features`] input contract.
+///
+/// Every index must be in range (`< n_neurons`) and every step must be a
+/// **set**: a neuron appears at most once. A repeated index is rejected with
+/// `InvalidConfig` naming the neuron and step — never collapsed — mirroring
+/// the forward host's at-most-once-per-tick rule
+/// ([`HybridError::SnnDuplicateSpike`], RM-2205), so a multiset cannot be
+/// recorded as a faithful tick (RM-1445). Error messages name the public
+/// entry point, [`spike_activity_features`].
+fn validate_spike_train(activity: &SpikeActivity, n_neurons: usize) -> Result<()> {
     for (t, step) in activity.spike_train.iter().enumerate() {
         if let Some(&idx) = step.iter().find(|&&i| i >= n_neurons) {
             return Err(HybridError::InvalidConfig(format!(
@@ -190,19 +226,7 @@ pub fn spike_activity_features(
             }
         }
     }
-
-    match mode {
-        ProjectionMode::RateSum | ProjectionMode::SpikingTernary => {
-            // SpikingTernary pure path matches RateSum; GIF lives in neuromod.
-            Ok(firing_rates(activity, n_neurons))
-        }
-        ProjectionMode::TemporalHistogram => Ok(temporal_histogram(activity, n_neurons)),
-        ProjectionMode::MembraneSnapshot => Ok(activity
-            .potentials
-            .iter()
-            .map(|&v| v.clamp(0.0, 1.0))
-            .collect()),
-    }
+    Ok(())
 }
 
 /// Per-neuron mean spike counts over timesteps (`len == n_neurons`).
@@ -458,6 +482,8 @@ mod tests {
         }
     }
 
+    /// The set rule holds for every timestep, not just the first: the
+    /// rejection names the step the duplicate sits in.
     #[test]
     fn features_reject_duplicate_indices_in_a_later_step() {
         let act = SpikeActivity {
@@ -476,12 +502,16 @@ mod tests {
         }
     }
 
+    /// `from_fired` builds a one-step record, so it enforces the same set
+    /// rule as the projector: the rejection names both the neuron and `step 0`.
     #[test]
     fn from_fired_rejects_duplicate_indices() {
-        // `from_fired` builds a one-step bag, so it enforces the same set rule.
         match SpikeActivity::from_fired(&[0, 1, 0], 2) {
             Err(HybridError::InvalidConfig(msg)) => {
-                assert!(msg.contains("index 0 appears more than once"), "{msg}");
+                assert!(
+                    msg.contains("index 0 appears more than once at step 0"),
+                    "{msg}"
+                );
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -525,9 +555,10 @@ mod tests {
         }
     }
 
+    /// `iz_potentials` case 1 of 3: empty is the unused spelling, accepted
+    /// by every mode.
     #[test]
     fn iz_potentials_empty_is_accepted_unused() {
-        // Empty is the unused spelling: every mode projects normally.
         let act = SpikeActivity {
             spike_train: vec![vec![0]],
             potentials: vec![0.0, 0.0],
@@ -539,11 +570,10 @@ mod tests {
         );
     }
 
+    /// `iz_potentials` case 2 of 3: neuron-sized and finite is a documented
+    /// ignore — no pure mode reads it, so features match the empty spelling.
     #[test]
     fn iz_potentials_neuron_sized_is_a_documented_ignore() {
-        // Well-formed (len == n_neurons, finite) iz_potentials is accepted and
-        // ignored: no pure mode reads it (GIF lives in neuromod). The rates
-        // must not change versus the empty spelling.
         let empty = SpikeActivity {
             spike_train: vec![vec![0]],
             potentials: vec![0.25, 0.5],
@@ -566,9 +596,11 @@ mod tests {
         }
     }
 
+    /// `iz_potentials` case 3 of 3: any length other than empty or
+    /// `n_neurons` is a shape error — the 99-element evidence vector is no
+    /// longer silently dropped.
     #[test]
     fn iz_potentials_garbage_length_is_rejected() {
-        // The evidence case: a 99-element vector must not be silently ignored.
         let act = SpikeActivity {
             spike_train: vec![vec![0]],
             potentials: vec![0.0; 4],
@@ -596,6 +628,8 @@ mod tests {
         }
     }
 
+    /// A neuron-sized `iz_potentials` must still be finite: one non-finite
+    /// value rejects the whole record rather than poisoning a feature.
     #[test]
     fn iz_potentials_non_finite_is_rejected() {
         let act = SpikeActivity {
@@ -611,9 +645,10 @@ mod tests {
         }
     }
 
+    /// The contract is enforced at the public `project_spike_activity` entry
+    /// point too, not only on the internal feature builder.
     #[test]
     fn iz_potentials_contract_holds_through_project_entry_point() {
-        // The same rule via the public project entry point.
         let act = SpikeActivity {
             spike_train: vec![vec![0]],
             potentials: vec![0.0; 2],

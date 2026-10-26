@@ -407,7 +407,8 @@ impl SpikeActivity {
     /// - [`crate::HybridError::InvalidConfig`] if `n_neurons == 0` (zero-extent neuron axis).
     /// - [`crate::HybridError::InvalidConfig`] if any index in `fired` is `>= n_neurons`.
     /// - [`crate::HybridError::InvalidConfig`] if any index appears more than once in
-    ///   `fired` (at-most-once-per-tick contract, RM-1445).
+    ///   `fired` (at-most-once-per-tick contract, RM-1445). The error names the
+    ///   neuron and `step 0`: `from_fired` always builds exactly one timestep.
     ///
     /// An empty `fired` with `n_neurons > 0` is valid (silent step).
     pub fn from_fired(fired: &[usize], n_neurons: usize) -> Result<Self> {
@@ -426,8 +427,8 @@ impl SpikeActivity {
         for &idx in fired {
             if !seen.insert(idx) {
                 return Err(HybridError::InvalidConfig(format!(
-                    "SpikeActivity::from_fired: fired index {idx} appears more than once \
-                     (a timestep is a set; a neuron fires at most once per tick)"
+                    "SpikeActivity::from_fired: fired index {idx} appears more than once at \
+                     step 0 (a timestep is a set; a neuron fires at most once per tick)"
                 )));
             }
         }
@@ -783,18 +784,25 @@ mod tests {
 
     /// A timestep is a set (RM-1445): `from_fired` rejects a repeated index
     /// instead of building a multiset whose rate features would exceed 1.0.
+    /// The error names both the neuron and `step 0` (the one timestep built).
     #[test]
     fn spike_activity_from_fired_rejects_duplicate_indices() {
-        for (fired, label) in [
-            (&[0_usize, 1, 0][..], "last repeat"),
-            (&[2_usize, 2][..], "pair"),
+        for (fired, want) in [
+            (
+                &[0_usize, 1, 0][..],
+                "fired index 0 appears more than once at step 0",
+            ),
+            (
+                &[2_usize, 2][..],
+                "fired index 2 appears more than once at step 0",
+            ),
         ] {
             match SpikeActivity::from_fired(fired, 4) {
                 Err(crate::error::HybridError::InvalidConfig(msg)) => {
-                    assert!(msg.contains("more than once"), "{label}: {msg}");
-                    assert!(msg.contains("SpikeActivity::from_fired"), "{label}: {msg}");
+                    assert!(msg.contains(want), "{msg}");
+                    assert!(msg.contains("SpikeActivity::from_fired"), "{msg}");
                 }
-                other => panic!("{label}: unexpected {other:?}"),
+                other => panic!("unexpected {other:?}"),
             }
         }
         // Distinct indices — including unsorted ones — still build.

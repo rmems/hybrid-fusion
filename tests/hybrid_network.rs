@@ -186,6 +186,10 @@ fn test_spike_activity_from_fired() {
     assert!(act.iz_potentials.is_empty());
 }
 
+/// `from_fired` edge cases: silent steps are valid, a zero-extent neuron axis
+/// and out-of-range indices are rejected, and a duplicate index is rejected
+/// as a multiset violation (RM-1445: a timestep is a set), with the error
+/// naming the neuron and step. Distinct unsorted indices still build.
 #[test]
 fn test_spike_activity_from_fired_edges() {
     use hybrid_fusion::{HybridError, SpikeActivity};
@@ -211,9 +215,13 @@ fn test_spike_activity_from_fired_edges() {
         other => panic!("expected InvalidConfig, got {other:?}"),
     }
 
-    // duplicate index rejected (RM-1445: a timestep is a set, not a multiset)
+    // duplicate index rejected (RM-1445: a timestep is a set, not a multiset);
+    // the error names the neuron and the step it built.
     match SpikeActivity::from_fired(&[0, 1, 0], 8).unwrap_err() {
-        HybridError::InvalidConfig(msg) => assert!(msg.contains("more than once"), "{msg}"),
+        HybridError::InvalidConfig(msg) => assert!(
+            msg.contains("index 0 appears more than once at step 0"),
+            "{msg}"
+        ),
         other => panic!("expected InvalidConfig, got {other:?}"),
     }
 
