@@ -1069,3 +1069,133 @@ fn invalid_output_contract_does_not_advance_host_counter() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// RM-1443: post-step fired-set validation (duplicate, boundary, empty, order)
+// ---------------------------------------------------------------------------
+
+/// Build a network over an `8 -> outputs` backend that always returns `fired`.
+fn fixed_fired_network(
+    outputs: usize,
+    fired: Vec<usize>,
+) -> HybridNetwork<MockTransformer, UnequalSnn> {
+    let mut cfg = HybridConfig::tiny();
+    cfg.snn_input_channels = 8;
+    let t = MockTransformer {
+        dim: cfg.transformer.dim,
+        max_seq: cfg.transformer.max_seq_len,
+    };
+    let s = UnequalSnn {
+        inputs: 8,
+        outputs,
+        fired,
+        calls: 0,
+    };
+    HybridNetwork::try_new(t, s, cfg).unwrap()
+}
+
+#[test]
+fn duplicate_fired_index_is_rejected_without_advancing_host_counter() {
+    for (fired, dup) in [
+        (vec![0, 0], 0),
+        (vec![2, 1, 2], 2),
+        (vec![1, 1, 1], 1),
+        (vec![0, 1, 2, 0], 0),
+    ] {
+        let mut net = fixed_fired_network(3, fired.clone());
+        let err = net.forward(&[1], None).unwrap_err();
+        assert!(
+            matches!(err, HybridError::SnnDuplicateSpike { neuron } if neuron == dup),
+            "{fired:?} -> {err:?}"
+        );
+        assert_eq!(net.global_step(), 0, "{fired:?}");
+        // The backend ran (its state is not rolled back); only the host rejects.
+        assert_eq!(net.snn.calls, 1, "{fired:?}");
+    }
+}
+
+#[test]
+fn fired_index_boundary_accepts_last_neuron_and_rejects_population_size() {
+    for outputs in [1usize, 3, 12] {
+        // Highest legal index is accepted.
+        let mut net = fixed_fired_network(outputs, vec![outputs - 1]);
+        let out = net.forward(&[1], None).unwrap();
+        assert_eq!(out.fired_neurons, vec![outputs - 1]);
+        assert_eq!(out.num_neurons, outputs);
+        assert_eq!(net.global_step(), 1);
+
+        // `num_neurons` itself is one past the end and rejected.
+        let mut net = fixed_fired_network(outputs, vec![outputs]);
+        let err = net.forward(&[1], None).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                HybridError::SnnSpikeOutOfRange { neuron, num_neurons }
+                    if neuron == outputs && num_neurons == outputs
+            ),
+            "outputs={outputs}: {err:?}"
+        );
+        assert_eq!(net.global_step(), 0);
+    }
+}
+
+#[test]
+fn fired_bound_is_output_population_not_input_width() {
+    // 8 inputs, 3 outputs: index 5 is a legal input channel but not a neuron.
+    let mut net = fixed_fired_network(3, vec![5]);
+    assert!(matches!(
+        net.forward(&[1], None).unwrap_err(),
+        HybridError::SnnSpikeOutOfRange {
+            neuron: 5,
+            num_neurons: 3
+        }
+    ));
+    assert_eq!(net.global_step(), 0);
+}
+
+#[test]
+fn first_offending_fired_entry_determines_the_error() {
+    let mut net = fixed_fired_network(3, vec![7, 7]);
+    assert!(matches!(
+        net.forward(&[1], None).unwrap_err(),
+        HybridError::SnnSpikeOutOfRange { neuron: 7, .. }
+    ));
+    let mut net = fixed_fired_network(3, vec![1, 1, 7]);
+    assert!(matches!(
+        net.forward(&[1], None).unwrap_err(),
+        HybridError::SnnDuplicateSpike { neuron: 1 }
+    ));
+    assert_eq!(net.global_step(), 0);
+}
+
+#[test]
+fn empty_fired_set_is_accepted_and_advances_host_counter() {
+    let mut net = fixed_fired_network(3, vec![]);
+    let out = net.forward(&[1], None).unwrap();
+    assert!(out.fired_neurons.is_empty());
+    assert_eq!(out.num_neurons, 3);
+    assert_eq!(out.global_step, 1);
+    assert_eq!(net.global_step(), 1);
+}
+
+#[test]
+fn valid_unique_fired_set_keeps_backend_order() {
+    for fired in [vec![2, 0, 1], vec![0, 1, 2], vec![1], vec![2, 1, 0]] {
+        let mut net = fixed_fired_network(3, fired.clone());
+        let out = net.forward(&[1], None).unwrap();
+        assert_eq!(out.fired_neurons, fired);
+        assert_eq!(out.global_step, 1);
+    }
+}
+
+#[test]
+fn rejected_step_does_not_poison_a_later_valid_step() {
+    let mut net = fixed_fired_network(3, vec![0, 0]);
+    assert!(net.forward(&[1], None).is_err());
+    assert_eq!(net.global_step(), 0);
+    net.snn.fired = vec![2, 0];
+    let out = net.forward(&[1], None).unwrap();
+    assert_eq!(out.fired_neurons, vec![2, 0]);
+    assert_eq!(out.global_step, 1);
+    assert_eq!(net.snn.calls, 2);
+}
