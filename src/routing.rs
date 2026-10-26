@@ -145,18 +145,34 @@ pub fn top_k_indices(weights: &[f32], top_k: usize) -> Vec<usize> {
 
 /// Shannon entropy of a discrete distribution, normalized by `ln(n)` into `[0, 1]`.
 ///
-/// Accumulates in `f64` for large expert counts. Empty or single-weight → `0.0`.
+/// Finite positive weights are renormalized to sum to one in `f64` before the
+/// entropy is calculated. Zero, negative, and non-finite weights are ignored;
+/// `n` remains the input length. A vector with no positive finite mass returns
+/// `0.0`. Empty or single-weight input also returns `0.0`.
+///
+/// Accumulates in `f64` for large expert counts.
 pub fn routing_entropy(weights: &[f32]) -> f32 {
     if weights.len() <= 1 {
         return 0.0;
     }
+
+    let weight_sum: f64 = weights
+        .iter()
+        .copied()
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .map(f64::from)
+        .sum();
+    if !weight_sum.is_finite() || weight_sum <= 0.0 {
+        return 0.0;
+    }
+
     let entropy: f64 = weights
         .iter()
         .copied()
         .filter(|w| w.is_finite() && *w > 0.0)
         .map(|w| {
-            let w = f64::from(w);
-            -w * w.ln()
+            let probability = f64::from(w) / weight_sum;
+            -probability * probability.ln()
         })
         .sum();
     let max_entropy = (weights.len() as f64).ln();
@@ -368,7 +384,24 @@ mod tests {
     fn entropy_uniform_near_one() {
         let u = vec![0.25; 4];
         assert!((routing_entropy(&u) - 1.0).abs() < 1e-5);
+        assert!((routing_entropy(&[1.0, 1.0]) - 1.0).abs() < 1e-5);
+        assert!((routing_entropy(&[1.0 / 3.0; 3]) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn entropy_is_scale_invariant_and_delta_is_zero() {
+        let normalized = routing_entropy(&[0.25, 0.75]);
+        let unnormalized = routing_entropy(&[1.0, 3.0]);
+        assert!((unnormalized - normalized).abs() < 1e-5);
+        assert_eq!(routing_entropy(&[2.0, 0.0]), 0.0);
+    }
+
+    #[test]
+    fn entropy_empty_and_single_weight_are_zero() {
+        assert_eq!(routing_entropy(&[]), 0.0);
+        assert_eq!(routing_entropy(&[0.0, 0.0]), 0.0);
         assert_eq!(routing_entropy(&[1.0]), 0.0);
+        assert_eq!(routing_entropy(&[2.0]), 0.0);
     }
 
     #[test]
