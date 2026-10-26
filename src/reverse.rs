@@ -588,6 +588,11 @@ mod tests {
             (sum - 1.0).abs() <= WEIGHT_SUM_TOLERANCE,
             "renormalized sum {sum}"
         );
+        assert_eq!(
+            out.routing_entropy,
+            Some(0.25),
+            "router telemetry is passed through, not recomputed from the emitted weights"
+        );
         assert_eq!(path.global_step(), 1);
     }
 
