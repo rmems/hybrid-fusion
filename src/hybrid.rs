@@ -5,7 +5,6 @@
 use crate::error::{ForwardValueStage, HybridError, Result};
 use crate::projector;
 use crate::telemetry;
-use crate::tensor::Tensor;
 use crate::traits::{NeuroModulators, SpikingNetwork, Transformer};
 use crate::types::{HybridConfig, HybridOutput};
 use crate::validate;
@@ -153,10 +152,14 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         let hidden = self.transformer.hidden_states(token_ids);
         validate::validate_hidden_state(&hidden, token_ids.len(), self.transformer.dim())?;
 
-        let embedding = pool_embedding(&hidden, self.transformer.dim());
+        // One mean-pool feeds both the embedding (pre-tanh, `dim()` wide) and
+        // the stimuli (resized, then tanh).
+        let pooled = projector::mean_pool(&hidden);
+        let mut embedding = pooled.clone();
+        embedding.truncate(self.transformer.dim());
         validate::validate_finite(&embedding, ForwardValueStage::Embedding)?;
 
-        let stimuli = projector::embed_to_stimuli_with_width(&hidden, snn_width);
+        let stimuli = projector::pooled_to_stimuli(&pooled, snn_width);
         validate::validate_finite(&stimuli, ForwardValueStage::Stimuli)?;
 
         let modulators = modulators.unwrap_or_default();
@@ -275,32 +278,6 @@ fn check_capacity(field: &'static str, configured: usize, backend: usize) -> Res
         return Err(HybridError::config_mismatch(field, configured, backend));
     }
     Ok(())
-}
-
-fn pool_embedding(hidden: &Tensor, dim: usize) -> Vec<f32> {
-    if hidden.ndim() == 1 {
-        return hidden.data().to_vec();
-    }
-    if hidden.ndim() == 2 {
-        let shape = hidden.shape();
-        let seq = shape[0].max(1);
-        let hdim = shape[1];
-        let take = dim.min(hdim);
-        let data = hidden.data();
-        let mut pooled = vec![0.0f32; take];
-        for t in 0..seq {
-            let row = &data[t * hdim..(t + 1) * hdim];
-            for (i, v) in row.iter().take(take).enumerate() {
-                pooled[i] += *v;
-            }
-        }
-        let inv = 1.0 / seq as f32;
-        for v in &mut pooled {
-            *v *= inv;
-        }
-        return pooled;
-    }
-    hidden.data().iter().copied().take(dim).collect()
 }
 
 #[cfg(test)]
@@ -729,5 +706,16 @@ mod tests {
         assert_eq!(out.stimuli.len(), channels);
         assert_eq!(net.snn.step_calls, 1);
         assert_eq!(net.global_step(), 1);
+    }
+
+    #[test]
+    fn embedding_equals_mean_pool_of_rank2_hidden() {
+        let (dim, channels) = tiny_dims();
+        let data: Vec<f32> = (0..2 * dim).map(|i| 0.01 * i as f32).collect();
+        let hidden = Tensor::from_vec(data, &[2, dim]);
+        let expected = crate::projector::mean_pool(&hidden);
+        let mut net = scripted_net(hidden, dim, channels);
+        let out = net.forward(&[1, 2], None).expect("valid rank-2");
+        assert_eq!(out.embedding, expected);
     }
 }
