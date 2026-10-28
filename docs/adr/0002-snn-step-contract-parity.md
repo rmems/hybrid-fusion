@@ -9,8 +9,9 @@
   (ADR 0001), [RM-2206](https://linear.app/rpd-34/issue/RM-2206) (closed not
   planned — cortex-tensor keeps its SNN code), [RM-2208](https://linear.app/rpd-34/issue/RM-2208)
   (smoke pin bump, unblocked here).
-- **Trees cited:** hybrid-fusion `ea230f7`, cortex-tensor `f591f2e`
-  (the smoke pin this ADR lands with).
+- **Trees cited:** hybrid-fusion `ea230f7`, cortex-tensor `74d63ee`
+  (the smoke pin this ADR lands with, past the #91–#93 fix series and
+  RM-2364).
 
 ## 1. Context
 
@@ -69,7 +70,8 @@ Drift is prevented mechanically, not by prose:
    extend these tests) in the same PR series; a green gate against a stale
    pin only proves agreement with the pinned tree.
 3. The smoke package's cortex-tensor pin is bumped past the #91/#92/#93 fix
-   series (`f591f2e`, RM-2208), so the parity tests compare like with like.
+   series and past RM-2364 (`74d63ee`; RM-2208's bump plus the fold-in this
+   ADR series performs), so the parity tests compare like with like.
 
 ## 3. Trait-set mapping
 
@@ -91,7 +93,7 @@ Drift is prevented mechanically, not by prose:
 | `MoeOutput { expert_weights, selected_experts, hidden: Vec<f32> }` | `SpikingRouteOutput { route: ExpertRouteOutput, fired_neurons, num_neurons, hidden_gain: f32 }` | same boosted softmax weights and selection; hidden state vs scalar gain (§4.4), plus entropy + fired IDs on the hybrid-fusion side |
 | `NeuromodNetwork` (`new(num_lif, num_izh, num_channels)`, `from_network`, `with_seed`) | `NeuromodSnn` (`with_seed(channels, neurons, seed)`, `identity_wired(channels, seed)`, `reseed`) | both wrap `neuromod::SpikingNetwork`; wiring and reset semantics differ (§4.3, §4.5) |
 | `src/snn/axon_adapter.rs` (`AxonEncoder` over `axon-encoder`, feature `axon-encoder`) | — | no hybrid-fusion counterpart; cortex-tensor-only adapter, out of this mapping's parity scope |
-| `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnSpikeOutOfRange, SnnDuplicateSpike, SnnReadoutLength, SnnInvalidReadout}` | `HybridError::{SnnStep, ConfigMismatch, NonFinite, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnInvalidReadout}` | same failure conditions, different vocabularies; both hosts reject NaN before the tick and validate spikes/readouts after it |
+| `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnInvalidStimulus, SnnSpikeOutOfRange, SnnDuplicateSpike, SnnReadoutLength, SnnInvalidReadout}` | `HybridError::{SnnStep, ConfigMismatch, NonFinite, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnInvalidReadout}` | same failure conditions except the ±Inf stimulus policy (§4.6); both hosts reject NaN before the tick and validate spikes/readouts after it; both adapters map `neuromod::StepError` structurally — cortex-tensor maps `InputLenMismatch` → `InputLengthMismatch` and `NonFiniteStimulus` → `SnnInvalidStimulus`, the rest stay `SnnBackend` (RM-2364) |
 
 ## 4. Intentional differences
 
@@ -158,12 +160,34 @@ where the #91 never-spiking-neuron rejection is observable. hybrid-fusion's
 public constructors (`with_seed`, `identity_wired`) always seed strictly
 positive weights, so the #91 rejection lives behind the `pub(crate)`
 `from_network` — no `neuromod` type may cross hybrid-fusion's public API.
-hybrid-fusion's adapter additionally enforces a 64 MiB matrix budget and an
-exhaustive `StepError` mapping. Coverage note: the parity tests assert
+hybrid-fusion's adapter additionally enforces a 64 MiB matrix budget and maps
+`neuromod::StepError` exhaustively (`InputLenMismatch` → `InputLengthMismatch`,
+every other variant → `SnnStep`); cortex-tensor's adapter maps the two
+structural cases (`InputLenMismatch` → `InputLengthMismatch`,
+`NonFiniteStimulus` → `SnnInvalidStimulus`) and keeps the rest in `SnnBackend`
+(RM-2364). Coverage note: the parity tests assert
 cortex-tensor's public rejection (`from_network` on a blank network);
 hybrid-fusion's `pub(crate)` rejection path and its matrix budget are covered
 by that crate's in-crate tests, not by the cross-crate gate, because neither
 is reachable through hybrid-fusion's public API.
+
+### 4.6 ±Inf stimulus policy
+
+cortex-tensor's `SpikingMoeRouter::forward` / `forward_frozen` reject a ±Inf
+gate score, or a ±Inf encoded stimulus sample, with
+`CortexError::SnnInvalidStimulus` **before** the encoder or backend runs;
+NaN keeps `NanRoutingScore` / `SnnNan` (RM-2364, cortex-tensor #155).
+hybrid-fusion's `SpikingExpertRouter` ranks ±Inf gate logits — its
+finite-value policy rejects only NaN pre-tick, and the additive spike boost
+keeps ±Inf gate values — and passes the encoded ±Inf stimulus to the
+backend, whose own failure-atomic preflight rejects it
+(`neuromod::StepError::NonFiniteStimulus` → `HybridError::SnnStep`). Both
+hosts fail closed on ±Inf; they differ in the rejecting layer (router
+preflight in cortex-tensor, backend preflight here), in the error variant,
+and in whether the encoder consumes a tick before the rejection (observable
+through a stateful encoder; the shared `RateEncoder` is stateless). The
+parity tests assert all three, using a mirrored stateful phase encoder and
+the post-failure recovery tick.
 
 ## 5. Fix parity (#91–#93)
 
@@ -174,7 +198,7 @@ All four fixes exist on **both** sides; the parity tests keep it that way:
 | #91 never-spiking channel rejection + drivable wiring | `NeuromodNetwork::checked` / `new` (PR #131), public via `from_network` | `NeuromodSnn::from_network` (`pub(crate)`) + seeded constructors (PR #65) |
 | #92 real frozen step + truthful `caller_rng` | `step_frozen_with_rng`, `with_seed`/`set_seed`, `caller_rng` reflects the installed seed (PR #131) | `step_frozen_with_rng`, always-owned seeded RNG, `frozen_evaluation` + `caller_rng` features (PR #65) |
 | #92-style held-out never runs the learning path | trait contract: backends without a frozen path may delegate | trait default fails closed + host capability gate |
-| #93 additive spike boost on gate logits (`gate + spike_boost × activity`, saturating at `f32::MAX`, `±Inf` gates keep their value) | `SpikingMoeRouter` (PR #130/#131 series) | `SpikingExpertRouter` (PR #65) |
+| #93 additive spike boost on gate logits (`gate + spike_boost × activity`, saturating at `f32::MAX`, `±Inf` gates keep their value — though RM-2364 now rejects a ±Inf *gate score* in cortex-tensor's router before the boost runs, §4.6) | `SpikingMoeRouter` (PR #130/#131 series) | `SpikingExpertRouter` (PR #65) |
 | #93 bounded hidden gain (activity normalized to the tick peak, silent-tick fallback) | same formula | same formula |
 
 ## 6. Consequences
@@ -191,10 +215,13 @@ All four fixes exist on **both** sides; the parity tests keep it that way:
   the smoke pin** when cortex-tensor's behavior changes — the gate only
   tests the pinned rev — or explicitly record a new intentional difference
   here.
-- The `smoke/cortex-neuromod` pin (RM-2208) is bumped to `f591f2e` in the
-  same change. Future pin bumps must keep the parity tests green, and a
-  green gate against a stale pin only proves agreement with the pinned
-  tree, not with cortex-tensor `main`.
+- The `smoke/cortex-neuromod` pin (RM-2208) is bumped to `74d63ee` in the
+  same change — past the #91–#93 fix series and past RM-2364, whose contract
+  changes are folded into §3, §4.6, and the parity tests here. RM-2364
+  landed on cortex-tensor `main` without a pin bump of its own because this
+  rule postdates it; this series performs the catch-up. Future pin bumps
+  must keep the parity tests green, and a green gate against a stale pin
+  only proves agreement with the pinned tree, not with cortex-tensor `main`.
 - `AxonEncoder` (cortex-tensor, `axon-encoder` feature) has no
   hybrid-fusion counterpart and is out of parity scope; if it ever grows one,
   extend §3 and the parity tests in the same PR.

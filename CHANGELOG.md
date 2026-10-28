@@ -24,7 +24,8 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
     `SpikeEncoder`/`SpikeDecoder`, `SpikingMoeRouter` ↔
     `SpikingExpertRouter`, `NeuromodNetwork` ↔ `NeuromodSnn`) and every
     intentional difference (width axes, decoder fallibility, reset
-    semantics, output shape, capabilities vocabulary). It is mirrored in
+    semantics, output shape, capabilities vocabulary, and the ±Inf stimulus
+    policy RM-2364 introduced on the cortex-tensor side). It is mirrored in
     cortex-tensor as `docs/snn-contract-mapping.md`.
   - New parity tests
     `smoke/cortex-neuromod/tests/snn_contract_parity.rs` run the same seeded
@@ -34,12 +35,14 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
     closed on out-of-range/duplicate fired IDs on both sides, and every
     intentional difference is asserted, not assumed.
   - `smoke/cortex-neuromod` pins cortex-tensor at
-    `f591f2efd298e920250dd6cfdbf6056ea9368257` (past the
+    `74d63ee0430bcc11486ceff302e0816a9628559f` (past the
     [#91](https://github.com/rmems/cortex-tensor/issues/91)/
     [#92](https://github.com/rmems/cortex-tensor/issues/92)/
-    [#93](https://github.com/rmems/cortex-tensor/issues/93) fix series) and
-    enables its `neuromod` feature — the bump RM-2208 was waiting on; the
-    smoke harness and the new parity tests pass against it.
+    [#93](https://github.com/rmems/cortex-tensor/issues/93) fix series and
+    past RM-2364's typed `StepError` mapping + ±Inf pre-tick rejection) and
+    enables its `neuromod` feature — the bump RM-2208 was waiting on,
+    re-bumped to fold RM-2364 into the gate; the smoke harness and the
+    parity tests pass against it, including ADR 0002 §4.6 (±Inf policy).
   - Wording that claimed this crate is the *single* owner of the step
     contract, or that cortex-tensor "keeps no spiking types" (AGENTS.md,
     REVIEW.md, `docs/implementing-backends.md`, module docs, and the entry

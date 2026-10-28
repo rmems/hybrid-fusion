@@ -51,6 +51,13 @@
 //!   (`embedding × gain`); `SpikingExpertRouter` reports the scalar
 //!   `hidden_gain` and the fired IDs instead. The parity assertion is
 //!   `cortex.hidden ≈ embedding × hybrid.hidden_gain`.
+//! * ±Inf stimulus policy (ADR 0002 §4.6, cortex-tensor RM-2364):
+//!   `SpikingMoeRouter` rejects a ±Inf gate score (or encoded stimulus
+//!   sample) with `SnnInvalidStimulus` before the encoder or backend runs;
+//!   `SpikingExpertRouter` ranks ±Inf and the backend's own preflight
+//!   rejects the encoded stimulus (`SnnStep`). Both fail closed; the
+//!   layer, variant, and encoder-tick consumption differences are asserted
+//!   below with a mirrored stateful phase encoder.
 //! * Capabilities vocabulary: cortex-tensor's `SnnCapabilities` struct maps
 //!   onto hybrid-fusion's `BackendCapabilities` + `RequiredFeature` strings
 //!   (asserted field by field below).
@@ -94,6 +101,8 @@ use hybrid_fusion::{
     SpikingNetwork, routing_entropy, softmax, synthetic_gate_scores, top_k_indices,
 };
 use neuromod::SpikingNetwork as NeuromodEngine;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Output population / expert count used by the router fixtures. Must divide
 /// [`EMBEDDING_DIM`] so the two crates' synthetic gate chunkings coincide.
@@ -677,4 +686,161 @@ fn spiking_routers_agree_on_seeded_frozen_ticks() {
         assert_routes_agree(&c, &h, &embedding, tick);
     }
     assert!(fired_total > 0, "fixture never spiked; parity is vacuous");
+}
+
+/// Stateful encoder mirroring [`HybridPhaseEncoder`] for the ±Inf policy
+/// test: rotates the gate scores across the channel slots by a per-encode
+/// phase and counts its own `encode` calls through shared state, so a
+/// consumed tick is observable both in the encoder's streaming state (the
+/// probe clone held by the test) and in the next tick's stimulus. The
+/// shared [`CortexRateEncoder`] is stateless, so it could not show this.
+struct CortexPhaseEncoder {
+    phase: Rc<RefCell<usize>>,
+}
+
+impl CortexSnnEncoder for CortexPhaseEncoder {
+    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> cortex_tensor::Result<Vec<f32>> {
+        let phase = *self.phase.borrow();
+        let mut stimulus = vec![0.0_f32; channels];
+        for (i, &value) in ann_signal.iter().enumerate() {
+            stimulus[(i + phase) % channels] = value;
+        }
+        *self.phase.borrow_mut() = (phase + 1) % channels;
+        Ok(stimulus)
+    }
+
+    fn reset(&mut self) {
+        *self.phase.borrow_mut() = 0;
+    }
+}
+
+/// Stateful encoder mirroring [`CortexPhaseEncoder`] (see that struct's doc);
+/// the shared [`HybridRateEncoder`] is stateless.
+struct HybridPhaseEncoder {
+    phase: Rc<RefCell<usize>>,
+}
+
+impl HybridSpikeEncoder for HybridPhaseEncoder {
+    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> HybridResult<Vec<f32>> {
+        let phase = *self.phase.borrow();
+        let mut stimulus = vec![0.0_f32; channels];
+        for (i, &value) in ann_signal.iter().enumerate() {
+            stimulus[(i + phase) % channels] = value;
+        }
+        *self.phase.borrow_mut() = (phase + 1) % channels;
+        Ok(stimulus)
+    }
+
+    fn reset(&mut self) {
+        *self.phase.borrow_mut() = 0;
+    }
+}
+
+#[test]
+fn inf_gate_scores_fail_closed_at_documented_layers() {
+    // ADR 0002 §4.6: a +Inf gate score is rejected by cortex-tensor's router
+    // preflight (`SnnInvalidStimulus`, before the encoder or backend run) but
+    // ranked by hybrid-fusion's router and rejected by the backend's own
+    // preflight (`SnnStep`) after the encoder advanced. Both fail closed. The
+    // probe clones pin the layer difference directly (did `encode` run
+    // before the rejection?), and the recovery tick proves no other state
+    // was consumed on the cortex-tensor side.
+    let mut inf_embedding = embedding_for_tick(0);
+    inf_embedding[0] = f32::INFINITY;
+
+    let cortex_probe = Rc::new(RefCell::new(0_usize));
+    let mut cortex = SpikingMoeRouter::new(
+        MoeRouter::load("", EXPERTS, TOP_K).expect("stub MoeRouter"),
+        cortex_adapter(),
+        CortexPhaseEncoder {
+            phase: cortex_probe.clone(),
+        },
+        CortexSpikeCountDecoder,
+    )
+    .expect("cortex SpikingMoeRouter");
+    let err = cortex
+        .forward(&inf_embedding)
+        .expect_err("cortex router must reject a +Inf gate score");
+    assert!(
+        matches!(err, CortexError::SnnInvalidStimulus { .. }),
+        "cortex error was {err:?}"
+    );
+    assert_eq!(
+        *cortex_probe.borrow(),
+        0,
+        "cortex must reject a ±Inf gate score before encoding"
+    );
+
+    let hybrid_probe = Rc::new(RefCell::new(0_usize));
+    let mut hybrid = SpikingExpertRouter::new(
+        SyntheticChunkRouter {
+            num_experts: EXPERTS,
+            top_k: TOP_K,
+        },
+        hybrid_adapter(),
+        HybridPhaseEncoder {
+            phase: hybrid_probe.clone(),
+        },
+        HybridSpikeCountDecoder,
+    )
+    .expect("hybrid SpikingExpertRouter");
+    let err = hybrid
+        .forward(&inf_embedding, &zero_modulators())
+        .expect_err("hybrid backend must reject the +Inf stimulus");
+    assert!(
+        matches!(err, HybridError::SnnStep(_)),
+        "hybrid error was {err:?}"
+    );
+    assert_eq!(
+        *hybrid_probe.borrow(),
+        1,
+        "hybrid must have encoded once before the backend preflight rejected"
+    );
+
+    // Recovery on the next, valid tick. The fresh control carries the same
+    // encoder (a fresh probe) and a fresh backend, so its first tick matches
+    // the failed router's would-be phase exactly.
+    let valid = embedding_for_tick(0);
+    let mut fresh_cortex = SpikingMoeRouter::new(
+        MoeRouter::load("", EXPERTS, TOP_K).expect("stub MoeRouter"),
+        cortex_adapter(),
+        CortexPhaseEncoder {
+            phase: Rc::new(RefCell::new(0)),
+        },
+        CortexSpikeCountDecoder,
+    )
+    .expect("fresh cortex SpikingMoeRouter");
+
+    // cortex-tensor rejected before the encoder ran, so its post-failure
+    // tick is bit-for-bit a fresh router's first tick: no state was consumed.
+    let recovered_cortex = cortex.forward(&valid).expect("cortex recovers");
+    let control_cortex = fresh_cortex
+        .forward(&valid)
+        .expect("fresh cortex first tick");
+    assert_eq!(
+        recovered_cortex.selected_experts, control_cortex.selected_experts,
+        "cortex consumed a tick on a rejected ±Inf input"
+    );
+    assert_eq!(
+        recovered_cortex.expert_weights, control_cortex.expert_weights,
+        "cortex consumed a tick on a rejected ±Inf input"
+    );
+    assert_eq!(*cortex_probe.borrow(), 1);
+
+    // hybrid-fusion's post-failure tick succeeds (fail closed, not
+    // poisoned): the encoder stream continues at phase 2, one ahead of a
+    // fresh router's first tick, because the rejected call consumed its
+    // encode.
+    let recovered_hybrid = hybrid
+        .forward(&valid, &zero_modulators())
+        .expect("hybrid recovers");
+    assert_eq!(
+        *hybrid_probe.borrow(),
+        2,
+        "hybrid's encoder stream must continue past the rejected tick"
+    );
+    assert!(
+        !recovered_hybrid.fired_neurons.is_empty(),
+        "fixture tick 0 must fire for the recovery pin"
+    );
 }

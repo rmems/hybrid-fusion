@@ -34,7 +34,7 @@ dependencies = [
 [[package]]
 name = "cortex-tensor"
 version = "0.1.0"
-source = "git+https://github.com/rmems/cortex-tensor?rev=f591f2efd298e920250dd6cfdbf6056ea9368257#f591f2efd298e920250dd6cfdbf6056ea9368257"
+source = "git+https://github.com/rmems/cortex-tensor?rev=74d63ee0430bcc11486ceff302e0816a9628559f#74d63ee0430bcc11486ceff302e0816a9628559f"
 dependencies = [
  "engram-parser",
  "neuromod",
