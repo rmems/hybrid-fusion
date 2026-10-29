@@ -49,11 +49,16 @@ pub trait Transformer {
 
 /// Spiking backend: bounded stimuli → fired neuron indices.
 ///
-/// This is the **single ANN↔SNN step contract** for the stack (issue #61 /
-/// RM-2205): the cortex-tensor `SnnBackend` surface was folded into it and
-/// lives nowhere else. The boundary adapters are [`crate::SpikeEncoder`] (ANN
-/// signal → stimuli) and [`crate::SpikeDecoder`] (fired IDs → readout); the
-/// hybrid routing host composing all three is [`crate::SpikingExpertRouter`].
+/// This is hybrid-fusion's ANN↔SNN step contract (issue #61 / RM-2205).
+/// cortex-tensor keeps a **twin contract** for its own ANN+SNN reference
+/// path (`SnnBackend` / `SnnEncoder` / `SnnDecoder` in `src/snn`, decision
+/// RM-2206 / RM-2360): the two are held in sync by the documented mapping in
+/// `docs/adr/0002-snn-step-contract-parity.md` (mirrored in cortex-tensor as
+/// `docs/snn-contract-mapping.md`) and by cross-crate parity tests in
+/// `smoke/cortex-neuromod/tests/snn_contract_parity.rs`. The boundary
+/// adapters are [`crate::SpikeEncoder`] (ANN signal → stimuli) and
+/// [`crate::SpikeDecoder`] (fired IDs → readout); the hybrid routing host
+/// composing all three is [`crate::SpikingExpertRouter`].
 ///
 /// Input channels and output neurons are separate axes, stable over stepping.
 /// [`crate::HybridNetwork::forward`] rejects either axis being zero before

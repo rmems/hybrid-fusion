@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! ANN↔SNN boundary encoders and decoders for the spiking step contract.
+//! ANN↔SNN boundary encoders and decoders for hybrid-fusion's spiking step
+//! contract.
 //!
-//! Ported from cortex-tensor `src/snn/mod.rs` (issues #61 / RM-2205): the
-//! encoder/decoder half of the single step contract now owned by
-//! hybrid-fusion. [`crate::SpikingNetwork`] consumes the stimuli a
+//! Ported from cortex-tensor `src/snn/mod.rs` (issues #61 / RM-2205).
+//! cortex-tensor keeps its own twin `SnnEncoder` / `SnnDecoder` traits for
+//! its ANN+SNN reference path (decision RM-2206 / RM-2360); the mapping
+//! between the two trait sets is documented in
+//! `docs/adr/0002-snn-step-contract-parity.md` and enforced by cross-crate
+//! parity tests in `smoke/cortex-neuromod/tests/snn_contract_parity.rs`.
+//! [`crate::SpikingNetwork`] consumes the stimuli a
 //! [`SpikeEncoder`] produces and emits the fired IDs a [`SpikeDecoder`]
 //! turns back into ANN-side readouts; [`crate::SpikingExpertRouter`] composes
 //! all three.

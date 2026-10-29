@@ -26,8 +26,13 @@ Copy-paste this into every PR review:
       (`HybridTopology`, `TopologySource`). `GgufLoader` / `SafetensorsLoader`
       are deprecated compatibility shims; do not add a new loader abstraction
       (plus config/output types)
-- [ ] The single ANN↔SNN step contract lives here and only here (issue #61);
-      cortex-tensor keeps no spiking types
+- [ ] hybrid-fusion's ANN↔SNN step contract stays in sync with cortex-tensor's
+      twin `src/snn` contract (issue #61, decision RM-2206/RM-2360): wording
+      must not claim cortex-tensor is ANN-only or that this is the stack's
+      single contract, the mapping lives in
+      `docs/adr/0002-snn-step-contract-parity.md`, and
+      `smoke/cortex-neuromod/tests/snn_contract_parity.rs` runs both trait
+      sets against the same seeded inputs (CI gates it via the smoke package)
 - [ ] No new `use` statements pulling in concrete backend crates
 - [ ] Public types are generic over trait bounds, not pinned to implementations
 - [ ] Reverse-path MoE: pure routing math / types here; mmap loaders and gate matmul

@@ -119,8 +119,13 @@ pub trait SpikingNetwork {
 }
 ```
 
-This is the **single ANN↔SNN step contract** for the stack (issue #61): the
-cortex-tensor `SnnBackend` surface was folded into it and lives nowhere else.
+This is hybrid-fusion's ANN↔SNN step contract (issue #61). cortex-tensor
+keeps a **twin contract** for its own ANN+SNN reference path (`SnnBackend` /
+`SnnEncoder` / `SnnDecoder` in `src/snn`, decision RM-2206 / RM-2360): the
+two trait sets are held together by the mapping in
+[ADR 0002](adr/0002-snn-step-contract-parity.md) and the cross-crate parity
+tests in `smoke/cortex-neuromod/tests/snn_contract_parity.rs`, which run the
+same seeded inputs through both.
 The boundary adapters around it are
 [`SpikeEncoder`](#22-spikeencoder--spikedecoder-annsnn-boundary-adapters) and
 `SpikeDecoder`; the hybrid routing host composing all three is
@@ -286,8 +291,10 @@ adapter allocation policy, not a neuron-dynamics limit or a total-memory bound.
 
 ### 2.2 `SpikeEncoder` / `SpikeDecoder` (ANN↔SNN boundary adapters)
 
-Ported from cortex-tensor `SnnEncoder` / `SnnDecoder` as part of the single
-step contract (issue #61). They live in `src/encoding.rs`.
+Ported from cortex-tensor `SnnEncoder` / `SnnDecoder` as part of
+hybrid-fusion's step contract (issue #61; cortex-tensor keeps its own twin
+traits — see [ADR 0002](adr/0002-snn-step-contract-parity.md)). They live in
+`src/encoding.rs`.
 
 ```rust
 pub trait SpikeEncoder {
@@ -313,11 +320,15 @@ pub trait SpikeDecoder {
 - `SpikeDecoder::decode` maps one tick of fired IDs into exactly
   `num_neurons` readouts. It is fallible and sized by the **output
   population**, not the channel count — hybrid-fusion keeps those axes
-  separate, unlike cortex-tensor, where they were collapsed. Out-of-range
+  separate, unlike cortex-tensor, where they are collapsed (its
+  `channels()` is the whole width contract; see
+  [ADR 0002](adr/0002-snn-step-contract-parity.md) §4.1). Out-of-range
   fired IDs are an error (`SnnSpikeOutOfRange`), not a silent drop.
 - `RateEncoder { gain }` tiles `ann_signal[idx % len] * gain` across the
   channels (empty signal → zeros). `SpikeCountDecoder` counts fired IDs per
-  neuron. Both are ported from cortex-tensor with unchanged semantics.
+  neuron. Tiling and counting match cortex-tensor's `RateEncoder` /
+  `SpikeCountDecoder`; the decoder still differs on sizing and on
+  out-of-range IDs (ADR 0002 §4.2).
 - `encoding()` / `decoding()` declare the wire contract; plan ports mirror
   them via `PortSpec::with_encoding` / `with_decoding`.
 

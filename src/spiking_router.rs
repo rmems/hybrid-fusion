@@ -3,10 +3,16 @@
 //! Hybrid spiking MoE routing host: gate logits → encode → SNN step → decode
 //! → boosted top-k.
 //!
-//! Ported from cortex-tensor `SpikingMoeRouter` (`src/snn/mod.rs`) as the
-//! single owner of spiking MoE routing (issues #61 / RM-2205); the #93 fixes
-//! (additive spike boost, bounded hidden gain, validated backend spikes) move
-//! with the code so they are ported exactly once.
+//! Ported from cortex-tensor `SpikingMoeRouter` (`src/snn/mod.rs`) as
+//! hybrid-fusion's spiking MoE routing host (issues #61 / RM-2205). cortex
+//! keeps its own twin `SpikingMoeRouter` for its ANN+SNN reference path
+//! (decision RM-2206 / RM-2360); the mapping between the two routers is
+//! documented in `docs/adr/0002-snn-step-contract-parity.md` and enforced by
+//! cross-crate parity tests in
+//! `smoke/cortex-neuromod/tests/snn_contract_parity.rs`. The #93 fixes
+//! (additive spike boost, bounded hidden gain, validated backend spikes)
+//! live on both sides, so a fix landing in one crate is a drift the parity
+//! tests will surface.
 //!
 //! Like [`crate::ReverseHybridPath`], this is a *host*: it composes the
 //! [`crate::ExpertRouter`], [`crate::SpikingNetwork`],
