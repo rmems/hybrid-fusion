@@ -8,6 +8,7 @@
 
 use crate::error::{HybridError, Result};
 use crate::projector::project_spike_activity;
+use crate::track::ResultTrack;
 use crate::traits::{ExpertRouter, SpikeActivity};
 use crate::types::{HybridOutput, ProjectionMode};
 
@@ -242,6 +243,8 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
             expert_weights: Some(expert_weights),
             selected_experts: Some(route.selected_experts),
             routing_entropy: route.routing_entropy,
+            // SNN activity → dense ExpertRouter crosses the SNN/ANN boundary.
+            track: ResultTrack::Hybrid,
         })
     }
 }

@@ -10,7 +10,14 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
-- **SNN step-contract sync with cortex-tensor** (Linear
+- **`ResultTrack` on every emitted result** ([#62](https://github.com/rmems/hybrid-fusion/issues/62),
+  Linear [RM-2207](https://linear.app/rpd-34/issue/RM-2207); shape from ADR 0001 §5.1):
+  new `#[non_exhaustive]` `ResultTrack { Ann, SnnNative, Hybrid }` in
+  `src/track.rs`, serialized as `ann` / `snn-native` / `hybrid`, plus
+  `ResultTrack::require_same` and `HybridError::TrackMismatch { left, right }`
+  for any API that combines two results. The track vocabulary is listed in
+  `docs/contracts.md` §4.
+ with cortex-tensor** (Linear
   [RM-2360](https://linear.app/rpd-34/issue/RM-2360/snn-keep-cortex-tensors-snn-step-contract-in-sync-with-hybrid-fusions);
   design in [ADR 0002](docs/adr/0002-snn-step-contract-parity.md)):
   cortex-tensor keeps its own `src/snn` twin contract (decision RM-2206 —
@@ -246,6 +253,13 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Changed
 
+- **BREAKING (#62):** `HybridOutput` and `SpikingRouteOutput` gain a required
+  `track: ResultTrack` field, set by the host. `HybridNetwork::forward`,
+  `ReverseHybridPath::forward_activity`, and `SpikingExpertRouter::forward` /
+  `forward_frozen` all emit `ResultTrack::Hybrid`. Struct literals must name
+  the track, and serialized records must carry `"track"`: records written
+  before this change fail with ``missing field `track` `` and must be migrated
+  with an explicit track rather than a default.
 - **BREAKING (RM-1940):** `NeuromodSnn::new(inputs, outputs)` and
   `with_seed(inputs, outputs, seed)` require an explicit output population and
   return `Result`. The silent eight-neuron cap / `MAX_LIF_NEURONS` is removed.

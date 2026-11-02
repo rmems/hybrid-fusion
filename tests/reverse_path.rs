@@ -311,6 +311,9 @@ fn reverse_path_output_json_policy_round_trips_and_fails_closed() {
     let activity = SpikeActivity::from_fired(&[1, 3, 7], n_neurons).unwrap();
     let out = path.forward_activity(&activity).unwrap();
     assert_moe_ok(&out, embed_dim, 4, 2);
+    // Issue #62: the reverse host tags its record `Hybrid` (SNN activity →
+    // dense router crosses the boundary) and the track is on the wire.
+    assert_eq!(out.track, hybrid_fusion::ResultTrack::Hybrid);
 
     // Finite record: no `null` anywhere, every field survives.
     let json = serde_json::to_string(&out).expect("finite reverse-path output serializes");
@@ -325,6 +328,11 @@ fn reverse_path_output_json_policy_round_trips_and_fails_closed() {
     assert_eq!(restored.expert_weights, out.expert_weights);
     assert_eq!(restored.selected_experts, out.selected_experts);
     assert_eq!(restored.routing_entropy, out.routing_entropy);
+    assert_eq!(restored.track, out.track);
+    assert!(
+        json.contains("\"track\":\"hybrid\""),
+        "track missing in {json}"
+    );
 
     // Hand-built corruption (a router could still report non-finite entropy,
     // or a caller could build the record by hand): serialization fails closed.

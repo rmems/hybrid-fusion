@@ -104,6 +104,12 @@ pub struct SpikingRouteOutput {
     /// `[0, 1]` (issue #93): scale the embedding by this to obtain the
     /// spike-shaped hidden state.
     pub hidden_gain: f32,
+    /// Result track (issue #62); always
+    /// [`ResultTrack::Hybrid`](crate::ResultTrack::Hybrid), set by the host.
+    /// The nested dense [`route`](Self::route) is a component of this hybrid
+    /// result and carries no separate `Ann` label (ADR 0001 §5.1).
+    /// Required on the wire as `"track"`.
+    pub track: crate::ResultTrack,
 }
 
 /// Fails closed on non-finite `f32` values instead of letting `serde_json`
@@ -120,11 +126,12 @@ impl Serialize for SpikingRouteOutput {
         // own `f32` fields (`expert_weights`, `routing_entropy`).
 
         // Field order mirrors the struct declaration, as the derived impl did.
-        let mut state = serializer.serialize_struct("SpikingRouteOutput", 4)?;
+        let mut state = serializer.serialize_struct("SpikingRouteOutput", 5)?;
         state.serialize_field("route", &self.route)?;
         state.serialize_field("fired_neurons", &self.fired_neurons)?;
         state.serialize_field("num_neurons", &self.num_neurons)?;
         state.serialize_field("hidden_gain", &self.hidden_gain)?;
+        state.serialize_field("track", &self.track)?;
         state.end()
     }
 }
@@ -492,6 +499,7 @@ where
             fired_neurons,
             num_neurons,
             hidden_gain,
+            track: crate::ResultTrack::Hybrid,
         })
     }
 }
@@ -913,6 +921,28 @@ mod tests {
         ));
         // Fail-closed: no tick consumed.
         assert_eq!(model.snn().steps, 0);
+    }
+
+    /// Issue #62: both spiking-router entry points emit `Hybrid`, the track is
+    /// on the wire, and an untracked record is rejected.
+    #[test]
+    fn spiking_route_output_is_tagged_hybrid_on_every_path() {
+        let mut model = spiking_router(MockSnn::new(8, 8, 0.0));
+        let learning = model
+            .forward(&[1.0; 4], &NeuroModulators::default())
+            .unwrap();
+        let frozen = model
+            .forward_frozen(&[1.0; 4], &NeuroModulators::default())
+            .unwrap();
+        for out in [learning, frozen] {
+            assert_eq!(out.track, crate::ResultTrack::Hybrid);
+            let mut value = serde_json::to_value(&out).unwrap();
+            assert_eq!(value["track"], serde_json::json!("hybrid"));
+            value.as_object_mut().unwrap().remove("track");
+            let err = serde_json::from_value::<SpikingRouteOutput>(value)
+                .expect_err("an untracked record must not decode");
+            assert_eq!(err.to_string(), "missing field `track`");
+        }
     }
 
     #[test]

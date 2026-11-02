@@ -362,6 +362,16 @@ pub struct HybridOutput {
     /// Passed through exactly as the router reported it; it is **not** recomputed
     /// after [`expert_weights`](Self::expert_weights) renormalization.
     pub routing_entropy: Option<f32>,
+    /// Result track (issue #62): which of ANN / native-SNN / hybrid produced
+    /// this record. Set by the host, never by a backend; both in-crate hosts
+    /// ([`HybridNetwork::forward`](crate::HybridNetwork::forward) and
+    /// [`ReverseHybridPath::forward_activity`](crate::ReverseHybridPath::forward_activity))
+    /// emit [`ResultTrack::Hybrid`](crate::ResultTrack::Hybrid).
+    ///
+    /// Required on the wire (`"track": "ann" | "snn-native" | "hybrid"`):
+    /// records written before #62 have no `track` key and are rejected, so a
+    /// caller migrating them must state the track explicitly.
+    pub track: crate::ResultTrack,
 }
 
 /// Fails closed on non-finite `f32` values instead of letting `serde_json`
@@ -382,7 +392,7 @@ impl Serialize for HybridOutput {
         crate::serde_finite::check_opt_f32(self.routing_entropy, "HybridOutput.routing_entropy")?;
 
         // Field order mirrors the struct declaration, as the derived impl did.
-        let mut state = serializer.serialize_struct("HybridOutput", 8)?;
+        let mut state = serializer.serialize_struct("HybridOutput", 9)?;
         state.serialize_field("embedding", &self.embedding)?;
         state.serialize_field("stimuli", &self.stimuli)?;
         state.serialize_field("fired_neurons", &self.fired_neurons)?;
@@ -391,6 +401,7 @@ impl Serialize for HybridOutput {
         state.serialize_field("expert_weights", &self.expert_weights)?;
         state.serialize_field("selected_experts", &self.selected_experts)?;
         state.serialize_field("routing_entropy", &self.routing_entropy)?;
+        state.serialize_field("track", &self.track)?;
         state.end()
     }
 }
@@ -564,6 +575,7 @@ mod tests {
             expert_weights: None,
             selected_experts: None,
             routing_entropy: None,
+            track: crate::ResultTrack::Hybrid,
         }
     }
 
@@ -578,6 +590,7 @@ mod tests {
             expert_weights: Some(vec![0.5, 0.25, 0.25]),
             selected_experts: Some(vec![0, 2]),
             routing_entropy: Some(0.42),
+            track: crate::ResultTrack::Hybrid,
         }
     }
 
@@ -607,7 +620,7 @@ mod tests {
             json,
             "{\"embedding\":[0.125,-0.75,0.0],\"stimuli\":[0.5,-0.5],\
             \"fired_neurons\":[0],\"num_neurons\":2,\"global_step\":1,\"expert_weights\":null,\
-            \"selected_experts\":null,\"routing_entropy\":null}"
+            \"selected_experts\":null,\"routing_entropy\":null,\"track\":\"hybrid\"}"
         );
         assert_round_trips(&tiny);
     }
@@ -655,6 +668,39 @@ mod tests {
         }
     }
 
+    /// Issue #62: every track round-trips through a `HybridOutput` record in
+    /// its kebab-case wire form, and a record with no `track` key is rejected
+    /// instead of defaulting.
+    #[test]
+    fn hybrid_output_track_is_serialized_and_required() {
+        use crate::ResultTrack;
+        for (track, wire) in [
+            (ResultTrack::Ann, "ann"),
+            (ResultTrack::SnnNative, "snn-native"),
+            (ResultTrack::Hybrid, "hybrid"),
+        ] {
+            let mut out = reverse_shaped_output();
+            out.track = track;
+            let value = serde_json::to_value(&out).expect("finite output serializes");
+            assert_eq!(value["track"], serde_json::json!(wire));
+            let restored: HybridOutput = serde_json::from_value(value).expect("round trip");
+            assert_eq!(restored.track, track);
+            assert_round_trips(&out);
+        }
+
+        let mut value = serde_json::to_value(tiny_forward_output()).unwrap();
+        value.as_object_mut().unwrap().remove("track");
+        let err = serde_json::from_value::<HybridOutput>(value.clone())
+            .expect_err("an untracked record must not decode");
+        assert_eq!(err.to_string(), "missing field `track`");
+
+        value["track"] = serde_json::json!("dense");
+        assert!(
+            serde_json::from_value::<HybridOutput>(value).is_err(),
+            "unknown track values must not decode"
+        );
+    }
+
     #[test]
     fn hybrid_output_serialization_still_accepts_none_optionals() {
         let out = tiny_forward_output();
@@ -674,7 +720,8 @@ mod tests {
             "global_step": 1,
             "expert_weights": null,
             "selected_experts": null,
-            "routing_entropy": null
+            "routing_entropy": null,
+            "track": "hybrid"
         }"#;
         let err =
             serde_json::from_str::<HybridOutput>(json).expect_err("a null element is not an f32");
@@ -698,7 +745,8 @@ mod tests {
             "global_step": 3,
             "expert_weights": null,
             "selected_experts": null,
-            "routing_entropy": null
+            "routing_entropy": null,
+            "track": "hybrid"
         }"#;
         let out: HybridOutput = serde_json::from_str(json).expect("null entropy decodes as None");
         assert_eq!(out.routing_entropy, None);
