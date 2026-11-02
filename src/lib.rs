@@ -17,6 +17,7 @@ pub mod spiking_router;
 pub mod telemetry;
 pub mod tensor;
 pub mod topology;
+pub mod track;
 pub mod traits;
 pub mod types;
 mod validate;
@@ -44,6 +45,7 @@ pub use routing::{
 pub use spiking_router::{DEFAULT_SPIKE_BOOST, SpikingExpertRouter, SpikingRouteOutput};
 pub use tensor::Tensor;
 pub use topology::{AnnTopology, HybridTopology, SnnTopology, TopologySource};
+pub use track::ResultTrack;
 pub use traits::{
     ExpertRouteOutput, ExpertRouter, NeuroModulators, SpikeActivity, SpikingNetwork, Transformer,
 };

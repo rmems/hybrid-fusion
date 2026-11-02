@@ -79,15 +79,19 @@ Verified for RM-1465: a scratch probe at `hf` `506ff5b` serialized `HybridOutput
 
 ## 4. Result tracks
 
-**PLANNED, not implemented.** Tracked in [rmems/hybrid-fusion#62](https://github.com/rmems/hybrid-fusion/issues/62). No `ResultTrack` type, field, or enum exists in any of the three crates.
+**Implemented in hybrid-fusion** ([#62](https://github.com/rmems/hybrid-fusion/issues/62), `hf:src/track.rs`). engram-parser and cortex-tensor do not carry a track; their outputs reach hybrid-fusion as inputs, not as emitted results.
 
-| Wire value | Intended Rust variant (planned) | Meaning |
-|------------|---------------------------------|---------|
-| `ann` | `Ann` | Transformer / dense result only |
-| `snn-native` | `SnnNative` | Spiking network result without a Transformer in the loop |
-| `hybrid` | `Hybrid` | Result that crosses the ANN/SNN boundary through hybrid-fusion |
+`hybrid_fusion::ResultTrack` is a `#[non_exhaustive]` enum, serialized in kebab-case:
 
-The issue specifies a `#[non_exhaustive]` enum, a required field on telemetry records and forward outputs, and an explicit error (or type error) when two results of different tracks are combined. Until it lands, cross-track comparison is not prevented by any type. Do not compare ANN, native-SNN, and hybrid numbers unless the track is stated in the surrounding report.
+| Wire value | Rust variant | Meaning |
+|------------|--------------|---------|
+| `ann` | `ResultTrack::Ann` | Transformer / dense result only |
+| `snn-native` | `ResultTrack::SnnNative` | Spiking network result without a Transformer in the loop |
+| `hybrid` | `ResultTrack::Hybrid` | Result that crosses the ANN/SNN boundary through hybrid-fusion |
+
+Every result record hybrid-fusion emits carries a required `track` field, set by the host: `HybridOutput` (from `HybridNetwork::forward` and `ReverseHybridPath::forward_activity`) and `SpikingRouteOutput` (from `SpikingExpertRouter::forward` / `forward_frozen`). All three hosts cross the ANN/SNN boundary, so all of them emit `hybrid` today; `ann` and `snn-native` are vocabulary for emitters outside this crate. The `ExpertRouteOutput` nested in `SpikingRouteOutput.route` is a component of that hybrid record and has no separate label (ADR 0001 §5.1).
+
+The field is required on the wire: a record without `track` fails to deserialize (`missing field `track``), and unknown values are rejected. Code that combines two results must call `ResultTrack::require_same`, which returns `HybridError::TrackMismatch { left, right }` on a cross-track pair. Scoring, comparison, and benchmarking stay in combine-for-AI.
 
 ## 5. Ownership
 
@@ -96,7 +100,7 @@ The issue specifies a `#[non_exhaustive]` enum, a required field on telemetry re
 | GGUF / Safetensors parsing, tensor inventory, dim normalization, packed to `f32` decode (Q8_0, Q5_K, Q6_K; IQ3_M only as engram's internal 111-byte block, which cortex does not bind — see §2) | engram-parser | `ct:src/moe/checkpoint.rs:3-13` states cortex does not parse and defers decode to engram |
 | Tensor math, reference ANN execution, softmax / norm / activation finite policy, `f32` storage | cortex-tensor | `ct:src/tensor/finite.rs:1-14` |
 | Orchestration, stage-graph and port contracts, capability negotiation, ANN/SNN boundary validation, hybrid result types | hybrid-fusion | `hf:src/plan.rs`, `hf:src/capabilities.rs`, `hf:src/hybrid.rs` |
-| Result track vocabulary | hybrid-fusion (planned) | #62 |
+| Result track vocabulary | hybrid-fusion | #62, `hf:src/track.rs` |
 
 ## Known gaps
 
@@ -110,5 +114,5 @@ The issue specifies a `#[non_exhaustive]` enum, a required field on telemetry re
 8. **Reverse-path embedding finiteness not traced.** `hf:src/reverse.rs:149` builds the embedding via `project_spike_activity`; only `hf:src/projector.rs:129` (potentials) was seen checking `is_finite`. Needs confirmation before claiming reverse outputs are always finite.
 9. **Opposite JSON policies for non-finite values.** cortex `Tensor` fails closed: serialization errors and deserialization rejects (`ct:src/tensor/mod.rs:82-87`, `108-110`). hf `Tensor` / `HybridOutput` write `null` and then cannot read it back (gap 7). A caller moving data between the crates as JSON gets an error on one side and silent lossy `null` on the other.
 10. **`PortSpec` axis order is undocumented.** It is positional, but nothing states outermost-first, and engram's innermost-first GGUF dims could be mistaken for a port shape. A stale comment at `ct:src/moe/checkpoint.rs:343` says "`dims` is innermost-first" next to a 1-D `[hidden]` call; that is correct for the dequant call but contradicts the module's outermost-first binding.
-11. **Result tracks absent** (section 4). `hf:src/telemetry.rs` is Sentry error capture only (`:1-35`); there is no telemetry record type for a track to attach to yet, which #62 assumes.
+11. **No structured telemetry record** (section 4). `hf:src/telemetry.rs` is Sentry error capture only; #62 attached `ResultTrack` to the emitted output types instead. A separate telemetry record type, if wanted, is its own design question.
 12. **Version skew.** cortex-tensor `main` (`74d63ee`) depends on published `engram-parser` 0.3.0 (`ct:Cargo.toml:61`). That published crate's VCS commit is `f02c935`, not later engram commits that still advertise version 0.3.0. The hf smoke harness pins cortex-tensor by git rev, not `main` (`hf:smoke/cortex-neuromod/Cargo.toml`): the pin moved from `5cbee81` (pre-#124) to `74d63ee` with RM-2360 (RM-2208's bump, then the RM-2364 fold-in), so the harness now builds post-#124 cortex-tensor with the `neuromod` feature and the cross-crate SNN parity tests; its embedding-stage fixtures still feed no activation paths, so the activation finite policy in section 3 remains unexercised there.

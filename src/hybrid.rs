@@ -5,6 +5,7 @@
 use crate::error::{ForwardValueStage, HybridError, Result};
 use crate::projector;
 use crate::telemetry;
+use crate::track::ResultTrack;
 use crate::traits::{NeuroModulators, SpikingNetwork, Transformer};
 use crate::types::{HybridConfig, HybridOutput};
 use crate::validate;
@@ -202,6 +203,9 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
             expert_weights: None,
             selected_experts: None,
             routing_entropy: None,
+            // Transformer → projector → SpikingNetwork crosses the ANN/SNN
+            // boundary by construction, even with an identity projector.
+            track: ResultTrack::Hybrid,
         })
     }
 
