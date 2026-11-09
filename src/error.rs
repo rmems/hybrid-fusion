@@ -130,6 +130,15 @@ pub enum HybridError {
     #[error("execution plan error: {0}")]
     ExecutionPlan(#[from] crate::plan::PlanError),
 
+    /// Two results from different [`crate::ResultTrack`]s were combined
+    /// (issue #62). Returned by [`crate::ResultTrack::require_same`]; any API
+    /// that merges, compares, or aggregates results must route through it.
+    #[error("result track mismatch: {left} vs {right} (cross-track results cannot be combined)")]
+    TrackMismatch {
+        left: crate::ResultTrack,
+        right: crate::ResultTrack,
+    },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

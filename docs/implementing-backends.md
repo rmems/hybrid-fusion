@@ -918,8 +918,15 @@ pub struct HybridOutput {
     pub expert_weights: Option<Vec<f32>>,
     pub selected_experts: Option<Vec<usize>>,
     pub routing_entropy: Option<f32>,
+    pub track: ResultTrack,     // always Hybrid from this crate's hosts (#62)
 }
 ```
+
+`track` is required, set by the host (never by a backend), and serialized as
+`"track": "ann" | "snn-native" | "hybrid"`. A record without it does not
+compile and does not deserialize. Code that merges or compares two results
+should call `ResultTrack::require_same`, which returns
+`HybridError::TrackMismatch` for a cross-track pair.
 
 ---
 

@@ -10,7 +10,7 @@
 
 use hybrid_fusion::{
     ForwardValueStage, HybridConfig, HybridError, HybridNetwork, HybridOutput, NeuroModulators,
-    SpikingNetwork, Tensor, Transformer,
+    ResultTrack, SpikingNetwork, Tensor, Transformer,
 };
 use std::cell::Cell;
 
@@ -1215,4 +1215,50 @@ fn rejected_step_does_not_poison_a_later_valid_step() {
     assert_eq!(out.fired_neurons, vec![2, 0]);
     assert_eq!(out.global_step, 1);
     assert_eq!(net.snn.calls, 2);
+}
+
+/// Issue #62: the ANN→SNN forward path always emits a `Hybrid` record, the
+/// track survives a JSON round trip, and the host sets it regardless of the
+/// backend's output (empty and non-empty spike ticks).
+#[test]
+fn forward_output_is_tagged_hybrid_and_round_trips_track() {
+    for fired in [vec![], vec![0, 2]] {
+        let cfg = HybridConfig::tiny();
+        let t = MockTransformer {
+            dim: cfg.transformer.dim,
+            max_seq: cfg.transformer.max_seq_len,
+        };
+        let s = UnequalSnn {
+            inputs: cfg.snn_input_channels,
+            outputs: 4,
+            fired: fired.clone(),
+            calls: 0,
+        };
+        let mut net = HybridNetwork::try_new(t, s, cfg).unwrap();
+        let out = net.forward(&[1, 2], None).unwrap();
+        assert_eq!(out.track, ResultTrack::Hybrid);
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(json["track"], serde_json::json!("hybrid"));
+        let restored: HybridOutput = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.track, ResultTrack::Hybrid);
+    }
+}
+
+/// Issue #62: combining two results goes through `ResultTrack::require_same`,
+/// which rejects a cross-track pair with an explicit error.
+#[test]
+fn combining_outputs_from_different_tracks_is_an_explicit_error() {
+    let mut net = build_network();
+    let a = net.forward(&[1, 2], None).unwrap();
+    let mut b = net.forward(&[3, 4], None).unwrap();
+    assert_eq!(a.track.require_same(b.track).unwrap(), ResultTrack::Hybrid);
+
+    b.track = ResultTrack::Ann;
+    match a.track.require_same(b.track) {
+        Err(HybridError::TrackMismatch { left, right }) => {
+            assert_eq!(left, ResultTrack::Hybrid);
+            assert_eq!(right, ResultTrack::Ann);
+        }
+        other => panic!("expected TrackMismatch, got {other:?}"),
+    }
 }
