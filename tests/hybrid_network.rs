@@ -275,8 +275,54 @@ fn test_global_step_increments_and_resets() {
     net.forward(&[0, 1], None).unwrap();
     assert_eq!(net.global_step(), 2, "step should increment each forward");
 
-    net.reset();
+    net.reset().unwrap();
     assert_eq!(net.global_step(), 0, "reset should bring step back to 0");
+}
+
+#[cfg(feature = "backends")]
+#[test]
+fn reset_restores_reference_forward_output_after_membrane_epoch() {
+    use hybrid_fusion::backends::simple_snn::SimpleSnn;
+    use hybrid_fusion::backends::simple_transformer::SimpleTransformer;
+
+    let config = HybridConfig::tiny();
+    let build = || {
+        HybridNetwork::try_new(
+            SimpleTransformer::new(config.transformer.clone()),
+            SimpleSnn::new(config.snn_input_channels),
+            config.clone(),
+        )
+        .unwrap()
+    };
+
+    let tokens_a: Vec<u32> = vec![42, 17, 8, 99];
+    let tokens_b: Vec<u32> = vec![1, 2, 3, 4, 5];
+
+    let mods = NeuroModulators {
+        dopamine: 0.6,
+        cortisol: 0.1,
+        acetylcholine: 0.7,
+        tempo: 1.2,
+        aux_dopamine: 0.0,
+    };
+
+    let mut fresh = build();
+    let baseline = fresh.forward(&tokens_a, Some(mods.clone())).unwrap();
+
+    let mut used = build();
+    assert_eq!(
+        used.forward(&tokens_a, Some(mods.clone()))
+            .unwrap()
+            .fired_neurons,
+        baseline.fired_neurons
+    );
+    let _ = used.forward(&tokens_b, None).unwrap();
+
+    used.reset().unwrap();
+    let after_reset = used.forward(&tokens_a, Some(mods)).unwrap();
+    assert_eq!(after_reset.fired_neurons, baseline.fired_neurons);
+    assert_eq!(after_reset.stimuli, baseline.stimuli);
+    assert_eq!(after_reset.global_step, baseline.global_step);
 }
 
 #[test]

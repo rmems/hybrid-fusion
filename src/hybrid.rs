@@ -243,8 +243,31 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         Ok(crate::plan::HybridExecutionPlan::from_hybrid_config(&cfg)?)
     }
 
-    pub fn reset(&mut self) {
+    /// Restore post-construction dynamic state for a new input sequence.
+    ///
+    /// Clears the host [`Self::global_step`] counter and, when the injected
+    /// [`SpikingNetwork`] advertises [`crate::BackendCapabilities::reset`],
+    /// delegates to [`SpikingNetwork::reset`] so membrane, refractory, trace,
+    /// and similar cross-tick state returns to its freshly constructed values.
+    /// Transformer and SNN **weights / parameters are not modified**.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`SpikingNetwork::reset`] when reset is advertised. If the SNN
+    /// reports [`crate::BackendCapabilities::stateful`] without reset, returns
+    /// an unsupported-operation error so dynamics cannot be silently leaked
+    /// across sequences.
+    pub fn reset(&mut self) -> Result<()> {
+        let caps = self.snn.capabilities();
+        if caps.reset {
+            self.snn.reset()?;
+        } else if caps.stateful {
+            return Err(HybridError::SnnStep(
+                "cannot reset HybridNetwork: SNN is stateful but does not implement reset".into(),
+            ));
+        }
         self.global_step = 0;
+        Ok(())
     }
 }
 
@@ -375,7 +398,7 @@ mod tests {
         net.forward(&[0, 1], None).unwrap();
         net.forward(&[0, 1], None).unwrap();
         assert_eq!(net.global_step(), 2);
-        net.reset();
+        net.reset().unwrap();
         assert_eq!(net.global_step(), 0);
     }
 
@@ -721,5 +744,85 @@ mod tests {
         let mut net = scripted_net(hidden, dim, channels);
         let out = net.forward(&[1, 2], None).expect("valid rank-2");
         assert_eq!(out.embedding, expected);
+    }
+
+    /// RM-1444: host `reset` must clear cross-tick SNN dynamics, not only `global_step`.
+    struct StatefulMembraneSnn {
+        channels: usize,
+        membrane: f32,
+    }
+
+    impl SpikingNetwork for StatefulMembraneSnn {
+        fn step(&mut self, stimuli: &[f32], _modulators: &NeuroModulators) -> Result<Vec<usize>> {
+            if stimuli.len() != self.channels {
+                return Err(HybridError::InputLengthMismatch {
+                    expected: self.channels,
+                    got: stimuli.len(),
+                });
+            }
+            self.membrane += stimuli.iter().sum::<f32>();
+            if self.membrane >= 1.0 {
+                self.membrane = 0.0;
+                Ok(vec![0])
+            } else {
+                Ok(vec![])
+            }
+        }
+
+        fn num_channels(&self) -> usize {
+            self.channels
+        }
+
+        fn reset(&mut self) -> Result<()> {
+            self.membrane = 0.0;
+            Ok(())
+        }
+
+        fn capabilities(&self) -> crate::BackendCapabilities {
+            use crate::capabilities::RequiredFeature;
+            crate::BackendCapabilities::snn(std::any::type_name::<Self>())
+                .with_channels(self.channels)
+                .with_reset(true)
+                .with_stateful(true)
+                .with_features([RequiredFeature::new("step")])
+        }
+    }
+
+    #[test]
+    fn reset_restores_forward_output_after_stateful_snn_epoch() {
+        let cfg = HybridConfig::tiny();
+        let build = || {
+            let t = MockTransformer {
+                dim: cfg.transformer.dim,
+                max_seq: cfg.transformer.max_seq_len,
+            };
+            HybridNetwork::try_new(
+                t,
+                StatefulMembraneSnn {
+                    channels: cfg.snn_input_channels,
+                    membrane: 0.0,
+                },
+                cfg.clone(),
+            )
+            .unwrap()
+        };
+        let tokens_a = [1u32, 2, 3, 4];
+        let tokens_b = [5u32, 6, 7, 8, 9, 10];
+
+        let mut fresh = build();
+        let baseline = fresh.forward(&tokens_a, None).unwrap();
+
+        let mut used = build();
+        let first = used.forward(&tokens_a, None).unwrap();
+        assert_eq!(first.fired_neurons, baseline.fired_neurons);
+        assert_eq!(first.stimuli, baseline.stimuli);
+
+        let _ = used.forward(&tokens_b, None).unwrap();
+
+        used.reset().unwrap();
+        let after_reset = used.forward(&tokens_a, None).unwrap();
+        assert_eq!(after_reset.fired_neurons, baseline.fired_neurons);
+        assert_eq!(after_reset.stimuli, baseline.stimuli);
+        assert_eq!(after_reset.global_step, baseline.global_step);
     }
 }
