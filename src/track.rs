@@ -5,7 +5,7 @@
 //!
 //! ANN, native-SNN, and hybrid results are kept in separate tracks so a number
 //! from one is never silently compared with a number from another. Every
-//! result record this crate emits carries a required [`ResultTrack`] field,
+//! result record the hybrid hosts emit carries a required [`ResultTrack`] field,
 //! set by the host (never by a backend):
 //!
 //! | Record | Emitted by | Track |
@@ -14,11 +14,14 @@
 //! | [`HybridOutput`](crate::HybridOutput) | [`ReverseHybridPath::forward_activity`](crate::ReverseHybridPath::forward_activity) | [`Hybrid`](ResultTrack::Hybrid) |
 //! | [`SpikingRouteOutput`](crate::SpikingRouteOutput) | [`SpikingExpertRouter::forward`](crate::SpikingExpertRouter::forward) / [`forward_frozen`](crate::SpikingExpertRouter::forward_frozen) | [`Hybrid`](ResultTrack::Hybrid) |
 //!
-//! Every host in this crate crosses the ANN/SNN boundary, so every record it
-//! emits today is `Hybrid`. [`Ann`](ResultTrack::Ann) and
-//! [`SnnNative`](ResultTrack::SnnNative) are the vocabulary for emitters
-//! outside this crate (for example a plain transformer run, or a
-//! Spikenaut-SNN / brainstem-daemon run that never calls a `Transformer`).
+//! These hosts cross the ANN/SNN boundary, so their records are `Hybrid`.
+//! A plain [`ExpertRouter::route`](crate::ExpertRouter::route) is semantically
+//! [`Ann`](ResultTrack::Ann), but its [`ExpertRouteOutput`](crate::ExpertRouteOutput)
+//! currently has no track field. That is a known gap, not a labelled result.
+//! The same type nested in `SpikingRouteOutput.route` is a component of the
+//! enclosing hybrid record, not a separately labelled ANN result (ADR 0001
+//! §5.1). [`SnnNative`](ResultTrack::SnnNative) is reserved for emitters such as
+//! Spikenaut-SNN / brainstem-daemon that never call a `Transformer`.
 //!
 //! # Compile-time guarantee
 //!
@@ -56,7 +59,7 @@
 //! ```
 //!
 //! Deserialization is equally strict: a record without a `track` key is
-//! rejected (`missing field `track``), and an unknown wire value is rejected
+//! rejected (`` missing field `track` ``), and an unknown wire value is rejected
 //! rather than mapped to a default.
 
 use std::fmt;

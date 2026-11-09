@@ -16,7 +16,8 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   `src/track.rs`, serialized as `ann` / `snn-native` / `hybrid`, plus
   `ResultTrack::require_same` and `HybridError::TrackMismatch { left, right }`
   for any API that combines two results. The track vocabulary is listed in
-  `docs/contracts.md` §4.
+  `docs/contracts.md` §4. **BREAKING (#62):** `HybridError` gains
+  `TrackMismatch` and is exhaustive, so downstream `match` arms must be updated.
 - **SNN step-contract sync with cortex-tensor** (Linear
   [RM-2360](https://linear.app/rpd-34/issue/RM-2360/snn-keep-cortex-tensors-snn-step-contract-in-sync-with-hybrid-fusions);
   design in [ADR 0002](docs/adr/0002-snn-step-contract-parity.md)):
