@@ -112,8 +112,13 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
         self.global_step
     }
 
-    /// Reset the global step counter to zero.
+    /// Restore post-construction dynamic state for a new activity sequence.
+    ///
+    /// Clears [`Self::global_step`] and calls [`ExpertRouter::reset`] so any
+    /// cross-call router epoch state is dropped. Router **weights / gate
+    /// parameters are not modified**.
     pub fn reset(&mut self) {
+        self.router.reset();
         self.global_step = 0;
     }
 
@@ -421,6 +426,95 @@ mod tests {
         path.forward_activity(&act).unwrap();
         path.reset();
         assert_eq!(path.global_step(), 0);
+    }
+
+    /// RM-1444: host `reset` must clear router epoch state, not only `global_step`.
+    #[derive(Debug)]
+    struct EpochRouter {
+        num_experts: usize,
+        top_k: usize,
+        calls: u32,
+    }
+
+    impl EpochRouter {
+        fn new(num_experts: usize, top_k: usize) -> Self {
+            Self {
+                num_experts,
+                top_k: top_k.min(num_experts).max(1),
+                calls: 0,
+            }
+        }
+    }
+
+    impl ExpertRouter for EpochRouter {
+        fn num_experts(&self) -> usize {
+            self.num_experts
+        }
+
+        fn top_k(&self) -> usize {
+            self.top_k
+        }
+
+        fn reset(&mut self) {
+            self.calls = 0;
+        }
+
+        fn route(&mut self, embedding: &[f32]) -> Result<ExpertRouteOutput> {
+            if embedding.is_empty() {
+                return Err(HybridError::InvalidConfig(
+                    "EpochRouter: empty embedding".into(),
+                ));
+            }
+            self.calls += 1;
+            let n = self.num_experts;
+            let k = self.top_k;
+            let skew = (self.calls as f32 * 0.08).min(0.35);
+            let mut expert_weights = vec![0.0f32; n];
+            let selected: Vec<usize> = (0..k).collect();
+            for (i, w) in expert_weights.iter_mut().enumerate().take(k) {
+                *w = 1.0 / k as f32 + if i == 0 { skew } else { 0.0 };
+            }
+            let sum: f32 = expert_weights.iter().sum();
+            for w in &mut expert_weights {
+                *w /= sum;
+            }
+            Ok(ExpertRouteOutput {
+                expert_weights,
+                selected_experts: selected,
+                routing_entropy: Some(0.5),
+            })
+        }
+    }
+
+    #[test]
+    fn reset_restores_forward_activity_after_router_epoch() {
+        let act_a = SpikeActivity::from_fired(&[0, 2], 4).unwrap();
+        let act_b = SpikeActivity::from_fired(&[1, 3], 4).unwrap();
+
+        let build = || {
+            ReverseHybridPath::new(ProjectionMode::RateSum, 4, 8, EpochRouter::new(4, 2)).unwrap()
+        };
+
+        let mut fresh = build();
+        let baseline = fresh.forward_activity(&act_a).unwrap();
+
+        let mut used = build();
+        let first = used.forward_activity(&act_a).unwrap();
+        assert_eq!(first.expert_weights, baseline.expert_weights);
+        assert_eq!(first.selected_experts, baseline.selected_experts);
+
+        let _ = used.forward_activity(&act_b).unwrap();
+        assert_ne!(
+            used.forward_activity(&act_a).unwrap().expert_weights,
+            baseline.expert_weights,
+            "router epoch must change MoE weights across calls"
+        );
+
+        used.reset();
+        let after_reset = used.forward_activity(&act_a).unwrap();
+        assert_eq!(after_reset.expert_weights, baseline.expert_weights);
+        assert_eq!(after_reset.selected_experts, baseline.selected_experts);
+        assert_eq!(after_reset.global_step, baseline.global_step);
     }
 
     #[test]
