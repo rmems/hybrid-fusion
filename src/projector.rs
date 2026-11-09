@@ -143,13 +143,7 @@ pub fn spike_activity_features(
     activity: &SpikeActivity,
     n_neurons: usize,
 ) -> Result<Vec<f32>> {
-    if n_neurons == 0 {
-        return Err(HybridError::InvalidConfig(
-            "spike_activity_features: n_neurons must be > 0".into(),
-        ));
-    }
-    validate_potential_vectors(activity, n_neurons)?;
-    validate_spike_train(activity, n_neurons)?;
+    validate_activity(activity, n_neurons)?;
 
     match mode {
         ProjectionMode::RateSum | ProjectionMode::SpikingTernary => {
@@ -163,6 +157,20 @@ pub fn spike_activity_features(
             .map(|&v| v.clamp(0.0, 1.0))
             .collect()),
     }
+}
+
+/// Full [`spike_activity_features`] input contract (everything under
+/// "Input contract" there): `n_neurons > 0`, potential vectors, spike train.
+/// Shared with the [`crate::DomainAdapter`] decode validation so both entry
+/// points reject exactly the same activity records.
+pub(crate) fn validate_activity(activity: &SpikeActivity, n_neurons: usize) -> Result<()> {
+    if n_neurons == 0 {
+        return Err(HybridError::InvalidConfig(
+            "spike_activity_features: n_neurons must be > 0".into(),
+        ));
+    }
+    validate_potential_vectors(activity, n_neurons)?;
+    validate_spike_train(activity, n_neurons)
 }
 
 /// Potential-vector half of the [`spike_activity_features`] input contract.

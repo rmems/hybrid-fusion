@@ -29,6 +29,7 @@ CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build
 ## Architecture map
 
 - `src/traits.rs`: pluggable surface (`Transformer`, `SpikingNetwork` incl. `step_frozen`, `ExpertRouter` incl. `gate_logits`, `SpikeActivity`, deprecated loader shims). `src/encoding.rs`: ANN↔SNN boundary adapters (`SpikeEncoder`, `SpikeDecoder`, `RateEncoder`, `SpikeCountDecoder`). `src/spiking_router.rs`: `SpikingExpertRouter` hybrid MoE routing host (the cortex-tensor `SpikingMoeRouter` port, issue #61).
+- `src/adapter.rs` + `src/adapter/conformance.rs`: `DomainAdapter` contract, validators, `PoolResizeTanhAdapter`, and the reusable conformance suite.
 - `src/hybrid.rs`: `HybridNetwork<T, S>` forward path. `src/projector.rs`: pool, resize, `tanh` into SNN stimuli.
 - `src/reverse.rs` + `src/routing.rs`: `ReverseHybridPath` (activity to embedding to MoE route) and pure routing math.
 - `src/topology.rs`, `src/plan.rs`, `src/capabilities.rs` + `src/capabilities/contract.rs`: neutral planning topology,
