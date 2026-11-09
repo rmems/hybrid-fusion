@@ -14,6 +14,10 @@ use crate::traits::{ExpertRouteOutput, ExpertRouter};
 pub struct StubExpertRouter {
     num_experts: usize,
     top_k: usize,
+    /// Uniform weights built once in [`Self::new`]; [`Self::route`] clones this.
+    uniform_weights: Vec<f32>,
+    selected_experts: Vec<usize>,
+    uniform_entropy: f32,
 }
 
 impl StubExpertRouter {
@@ -42,9 +46,15 @@ impl StubExpertRouter {
                 "StubExpertRouter: uniform weight underflow for num_experts={num_experts}"
             )));
         }
+        let top_k = top_k.min(num_experts);
+        let uniform_weights = vec![w; num_experts];
+        let uniform_entropy = routing_entropy(&uniform_weights);
         Ok(Self {
             num_experts,
-            top_k: top_k.min(num_experts),
+            top_k,
+            uniform_weights,
+            selected_experts: (0..top_k).collect(),
+            uniform_entropy,
         })
     }
 }
@@ -64,15 +74,10 @@ impl ExpertRouter for StubExpertRouter {
                 "StubExpertRouter::route: embedding must be non-empty".into(),
             ));
         }
-        let w = 1.0 / self.num_experts as f32;
-        let expert_weights = vec![w; self.num_experts];
-        let selected_experts: Vec<usize> = (0..self.top_k).collect();
-        // Normalized Shannon entropy ∈ [0, 1] (uniform → ~1).
-        let entropy = routing_entropy(&expert_weights);
         Ok(ExpertRouteOutput {
-            expert_weights,
-            selected_experts,
-            routing_entropy: Some(entropy),
+            expert_weights: self.uniform_weights.clone(),
+            selected_experts: self.selected_experts.clone(),
+            routing_entropy: Some(self.uniform_entropy),
         })
     }
 
