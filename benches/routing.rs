@@ -21,7 +21,7 @@ fn bench_scores(n: usize, seed: u64) -> Vec<f32> {
 
 fn bench_softmax(c: &mut Criterion) {
     let mut group = c.benchmark_group("softmax");
-    for &n in &[128usize, 4_096, 65_536] {
+    for &n in &[128usize, 4_096, 65_536, 100_000, 1_000_000] {
         let scores = bench_scores(n, 0x5EED);
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &scores, |b, scores| {
@@ -34,7 +34,7 @@ fn bench_softmax(c: &mut Criterion) {
 fn bench_top_k(c: &mut Criterion) {
     let mut group = c.benchmark_group("top_k_indices");
     const TOP_K: usize = 8;
-    for &n in &[128usize, 4_096, 65_536] {
+    for &n in &[128usize, 4_096, 65_536, 100_000, 1_000_000] {
         let weights = softmax(&bench_scores(n, 0xC0FF)).unwrap();
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::from_parameter(n), &weights, |b, weights| {

@@ -266,13 +266,8 @@ pub fn route_synthetic(
 mod tests {
     use super::*;
 
-    /// The pre-RM-1470 implementation: full stable sort.
-    ///
-    /// Deliberately has no index tie-break: it relies on `sort_by` being stable
-    /// (guaranteed by std) so equal weights keep input order, i.e. lower index
-    /// first. That is the independent oracle for the explicit tie-break in
-    /// `top_k_indices`; keep `weight_order` free of index logic.
-    /// Pre-RM-1470 softmax: separate `exp` buffer then a second output `Vec`.
+    /// Pre-RM-1470 softmax (separate `exp` buffer then second output `Vec`).
+    /// Used as the independent two-buffer reference for bit-identical parity.
     fn softmax_reference(scores: &[f32]) -> Result<Vec<f32>> {
         if let Some(index) = scores.iter().position(|s| s.is_nan()) {
             return Err(HybridError::InvalidConfig(format!(
@@ -308,6 +303,12 @@ mod tests {
             .collect())
     }
 
+    /// The pre-RM-1470 implementation: full stable sort.
+    ///
+    /// Deliberately has no index tie-break: it relies on `sort_by` being stable
+    /// (guaranteed by std) so equal weights keep input order, i.e. lower index
+    /// first. That is the independent oracle for the explicit tie-break in
+    /// `top_k_indices`; keep `weight_order` free of index logic.
     fn top_k_reference(weights: &[f32], top_k: usize) -> Vec<usize> {
         if top_k == 0 || weights.is_empty() {
             return Vec::new();
@@ -341,6 +342,7 @@ mod tests {
                         3..=5 => (lcg(&mut st) % 20) as f32 * 0.1 - 1.0,
                         6 => f32::NEG_INFINITY,
                         7 => f32::INFINITY,
+                        8 => f32::NAN,
                         _ => (lcg(&mut st) % 1000) as f32 / 100.0,
                     }
                 })
