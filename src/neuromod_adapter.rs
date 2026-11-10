@@ -878,7 +878,7 @@ mod tests {
     struct LastChannelTransformer(usize);
 
     impl Transformer for LastChannelTransformer {
-        fn hidden_states(&self, _: &[u32]) -> Tensor {
+        fn hidden_states(&self, _: &[u32]) -> Result<Tensor> {
             let mut hidden = vec![0.0; self.0];
             hidden[self.0 - 1] = 1.0; // tanh(1) ≈ 0.762, within stimulus bounds
             Tensor::from_vec(hidden, &[self.0])

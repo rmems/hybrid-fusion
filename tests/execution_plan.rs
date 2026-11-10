@@ -17,7 +17,7 @@ struct MockTransformer {
 }
 
 impl Transformer for MockTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> hybrid_fusion::Result<Tensor> {
         let seq = token_ids.len();
         Tensor::from_vec(vec![0.1; seq * self.dim], &[seq, self.dim])
     }

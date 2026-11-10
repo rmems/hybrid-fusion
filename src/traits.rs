@@ -27,7 +27,8 @@ use serde::{Deserialize, Serialize};
 /// layout product (`seq_len * dim` or `dim`). Every value must be finite
 /// (no NaN or ±Inf).
 pub trait Transformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor;
+    /// Produce hidden states or return a backend/validation error.
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor>;
     fn dim(&self) -> usize;
     fn max_seq_len(&self) -> usize;
     fn param_count(&self) -> usize;

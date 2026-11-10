@@ -109,7 +109,7 @@ mod tests {
 
     fn rank2_finite() -> Tensor {
         let data: Vec<f32> = (0..SEQ * DIM).map(|i| i as f32 * 0.01).collect();
-        Tensor::from_vec(data, &[SEQ, DIM])
+        Tensor::from_vec(data, &[SEQ, DIM]).unwrap()
     }
 
     fn deserialize_tensor(data: Vec<f32>, shape: Vec<usize>) -> Tensor {
@@ -123,13 +123,13 @@ mod tests {
 
     #[test]
     fn rank1_finite_ok() {
-        let t = Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[DIM]);
+        let t = Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[DIM]).unwrap();
         validate_hidden_state(&t, SEQ, DIM).unwrap();
     }
 
     #[test]
     fn rejects_rank0() {
-        let t = Tensor::from_vec(vec![1.0], &[]);
+        let t = deserialize_tensor(vec![1.0], vec![]);
         match validate_hidden_state(&t, SEQ, DIM).unwrap_err() {
             HybridError::HiddenStateRank { got: 0 } => {}
             other => panic!("unexpected {other:?}"),
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn rejects_rank3() {
-        let t = Tensor::from_vec(vec![0.0; SEQ * DIM * 2], &[SEQ, DIM, 2]);
+        let t = deserialize_tensor(vec![0.0; SEQ * DIM * 2], vec![SEQ, DIM, 2]);
         match validate_hidden_state(&t, SEQ, DIM).unwrap_err() {
             HybridError::HiddenStateRank { got: 3 } => {}
             other => panic!("unexpected {other:?}"),
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn rejects_rank4() {
-        let t = Tensor::from_vec(vec![1.0; 8], &[2, 2, 2, 1]);
+        let t = deserialize_tensor(vec![1.0; 8], vec![2, 2, 2, 1]);
         match validate_hidden_state(&t, SEQ, DIM).unwrap_err() {
             HybridError::HiddenStateRank { got: 4 } => {}
             other => panic!("unexpected {other:?}"),
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_sequence_length() {
-        let t = Tensor::from_vec(vec![0.0; (SEQ + 1) * DIM], &[SEQ + 1, DIM]);
+        let t = Tensor::from_vec(vec![0.0; (SEQ + 1) * DIM], &[SEQ + 1, DIM]).unwrap();
         match validate_hidden_state(&t, SEQ, DIM).unwrap_err() {
             HybridError::HiddenStateSeqLen { expected: SEQ, got } if got == SEQ + 1 => {}
             other => panic!("unexpected {other:?}"),
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_hidden_dim_rank2() {
-        let t = Tensor::from_vec(vec![0.0; SEQ * (DIM + 1)], &[SEQ, DIM + 1]);
+        let t = Tensor::from_vec(vec![0.0; SEQ * (DIM + 1)], &[SEQ, DIM + 1]).unwrap();
         match validate_hidden_state(&t, SEQ, DIM).unwrap_err() {
             HybridError::HiddenStateDim { expected: DIM, got } if got == DIM + 1 => {}
             other => panic!("unexpected {other:?}"),
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_hidden_dim_rank1() {
-        let t = Tensor::from_vec(vec![0.0; DIM + 2], &[DIM + 2]);
+        let t = Tensor::from_vec(vec![0.0; DIM + 2], &[DIM + 2]).unwrap();
         match validate_hidden_state(&t, SEQ, DIM).unwrap_err() {
             HybridError::HiddenStateDim { expected: DIM, got } if got == DIM + 2 => {}
             other => panic!("unexpected {other:?}"),
@@ -240,8 +240,8 @@ mod tests {
 
     #[test]
     fn rejects_zero_transformer_dim() {
-        // `Tensor::from_vec` panics on a zero-extent axis; serde can still
-        // materialize shape `[0]` that agrees with `dim() == 0`.
+        // The constructor rejects zero extents; serde can still materialize
+        // shape `[0]` that agrees with `dim() == 0`.
         let t = deserialize_tensor(vec![], vec![0]);
         match validate_hidden_state(&t, SEQ, 0).unwrap_err() {
             HybridError::HiddenStateDim {

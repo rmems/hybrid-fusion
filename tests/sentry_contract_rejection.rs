@@ -20,7 +20,7 @@ struct T {
 }
 
 impl Transformer for T {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> hybrid_fusion::Result<Tensor> {
         let n = token_ids.len() * self.dim;
         Tensor::from_vec(vec![0.1; n], &[token_ids.len(), self.dim])
     }

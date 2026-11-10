@@ -6,6 +6,7 @@
 //! linear projection to produce hidden states. It is useful for testing the
 //! hybrid forward pass without a real LLM backend.
 
+use crate::error::Result;
 use crate::tensor::Tensor;
 use crate::traits::Transformer;
 use crate::types::TransformerConfig;
@@ -75,7 +76,7 @@ impl SimpleTransformer {
 }
 
 impl Transformer for SimpleTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
         let seq = token_ids.len();
         let dim = self.dim;
         let mut data = Vec::with_capacity(seq * dim);
@@ -140,7 +141,7 @@ mod tests {
     #[test]
     fn hidden_states_shape() {
         let t = SimpleTransformer::new(tiny_config());
-        let hs = t.hidden_states(&[0, 1, 2]);
+        let hs = t.hidden_states(&[0, 1, 2]).unwrap();
         assert_eq!(hs.shape(), &[3, 4]);
     }
 
@@ -149,8 +150,8 @@ mod tests {
         let t1 = SimpleTransformer::new(tiny_config());
         let t2 = SimpleTransformer::new(tiny_config());
         assert_eq!(
-            t1.hidden_states(&[3, 5]).data(),
-            t2.hidden_states(&[3, 5]).data()
+            t1.hidden_states(&[3, 5]).unwrap().data(),
+            t2.hidden_states(&[3, 5]).unwrap().data()
         );
     }
 
@@ -161,6 +162,7 @@ mod tests {
         // should be positive (the previous bias pushed almost everything < 0).
         let positives = t
             .hidden_states(&[0, 1, 2, 3, 4, 5, 6, 7])
+            .unwrap()
             .data()
             .iter()
             .filter(|v| **v > 0.0)
@@ -180,8 +182,8 @@ mod tests {
     #[test]
     fn out_of_vocab_wraps() {
         let t = SimpleTransformer::new(tiny_config());
-        let hs_wrap = t.hidden_states(&[100]);
-        let hs_norm = t.hidden_states(&[4]);
+        let hs_wrap = t.hidden_states(&[100]).unwrap();
+        let hs_norm = t.hidden_states(&[4]).unwrap();
         assert_eq!(hs_wrap.data(), hs_norm.data());
     }
 

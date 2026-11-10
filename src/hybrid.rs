@@ -72,7 +72,7 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     /// }
     ///
     /// impl Transformer for TinyTransformer {
-    ///     fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    ///     fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
     ///         let seq = token_ids.len();
     ///         Tensor::from_vec(vec![0.1; seq * self.dim], &[seq, self.dim])
     ///     }
@@ -150,7 +150,7 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         let num_neurons = self.snn.num_neurons();
         validate::validate_snn_population(num_neurons)?;
 
-        let hidden = self.transformer.hidden_states(token_ids);
+        let hidden = self.transformer.hidden_states(token_ids)?;
         validate::validate_hidden_state(&hidden, token_ids.len(), self.transformer.dim())?;
 
         // One mean-pool feeds both the embedding (pre-tanh, `dim()` wide) and
@@ -298,7 +298,7 @@ mod tests {
     }
 
     impl Transformer for MockTransformer {
-        fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+        fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
             let seq = token_ids.len();
             let data: Vec<f32> = (0..seq * self.dim).map(|i| (i as f32) * 0.01).collect();
             Tensor::from_vec(data, &[seq, self.dim])
@@ -419,8 +419,8 @@ mod tests {
     }
 
     impl Transformer for ScriptedTransformer {
-        fn hidden_states(&self, _token_ids: &[u32]) -> Tensor {
-            self.hidden.clone()
+        fn hidden_states(&self, _token_ids: &[u32]) -> Result<Tensor> {
+            Ok(self.hidden.clone())
         }
         fn dim(&self) -> usize {
             self.dim
@@ -430,6 +430,31 @@ mod tests {
         }
         fn param_count(&self) -> usize {
             self.dim
+        }
+    }
+
+    struct FailingTransformer {
+        dim: usize,
+        max_seq: usize,
+    }
+
+    impl Transformer for FailingTransformer {
+        fn hidden_states(&self, _token_ids: &[u32]) -> Result<Tensor> {
+            Err(HybridError::InvalidConfig(
+                "transformer hidden-state failure".into(),
+            ))
+        }
+
+        fn dim(&self) -> usize {
+            self.dim
+        }
+
+        fn max_seq_len(&self) -> usize {
+            self.max_seq
+        }
+
+        fn param_count(&self) -> usize {
+            0
         }
     }
 
@@ -494,6 +519,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn forward_propagates_transformer_error_without_stepping() {
+        let cfg = HybridConfig::tiny();
+        let mut net = HybridNetwork::new(
+            FailingTransformer {
+                dim: cfg.transformer.dim,
+                max_seq: cfg.transformer.max_seq_len,
+            },
+            SpySnn {
+                channels: cfg.snn_input_channels,
+                step_calls: 0,
+                state: SPY_STATE,
+            },
+            cfg,
+        );
+
+        let err = net.forward(&[1, 2], None).unwrap_err();
+        assert!(matches!(
+            err,
+            HybridError::InvalidConfig(message) if message == "transformer hidden-state failure"
+        ));
+        assert_eq!(net.snn.step_calls, 0);
+        assert_eq!(net.global_step(), 0);
+    }
+
     fn tiny_dims() -> (usize, usize) {
         let cfg = HybridConfig::tiny();
         (cfg.transformer.dim, cfg.snn_input_channels)
@@ -501,13 +551,13 @@ mod tests {
 
     fn valid_rank2(seq: usize, dim: usize) -> Tensor {
         let data: Vec<f32> = (0..seq * dim).map(|i| (i as f32) * 0.01).collect();
-        Tensor::from_vec(data, &[seq, dim])
+        Tensor::from_vec(data, &[seq, dim]).unwrap()
     }
 
     #[test]
     fn preflight_rejects_rank0_without_stepping() {
         let (dim, channels) = tiny_dims();
-        let mut net = scripted_net(Tensor::from_vec(vec![1.0], &[]), dim, channels);
+        let mut net = scripted_net(tensor_parts(vec![1.0], vec![]), dim, channels);
         match net.forward(&[1, 2, 3], None).unwrap_err() {
             HybridError::HiddenStateRank { got: 0 } => {}
             other => panic!("unexpected {other:?}"),
@@ -519,7 +569,7 @@ mod tests {
     fn preflight_rejects_rank1_wrong_dim_without_stepping() {
         let (dim, channels) = tiny_dims();
         let mut net = scripted_net(
-            Tensor::from_vec(vec![0.1; dim + 1], &[dim + 1]),
+            Tensor::from_vec(vec![0.1; dim + 1], &[dim + 1]).unwrap(),
             dim,
             channels,
         );
@@ -533,7 +583,7 @@ mod tests {
     #[test]
     fn preflight_rejects_rank3_without_stepping() {
         let (dim, channels) = tiny_dims();
-        let mut net = scripted_net(Tensor::from_vec(vec![0.0; 8], &[2, 2, 2]), dim, channels);
+        let mut net = scripted_net(tensor_parts(vec![0.0; 8], vec![2, 2, 2]), dim, channels);
         match net.forward(&[1, 2], None).unwrap_err() {
             HybridError::HiddenStateRank { got: 3 } => {}
             other => panic!("unexpected {other:?}"),
@@ -640,7 +690,7 @@ mod tests {
     fn preflight_rejects_overflow_inf_embedding_without_stepping() {
         let (dim, channels) = tiny_dims();
         // Two finite f32::MAX rows sum to +Inf during mean-pool.
-        let hidden = Tensor::from_vec(vec![f32::MAX; 2 * dim], &[2, dim]);
+        let hidden = Tensor::from_vec(vec![f32::MAX; 2 * dim], &[2, dim]).unwrap();
         let mut net = scripted_net(hidden, dim, channels);
         match net.forward(&[1, 2], None).unwrap_err() {
             HybridError::NonFinite {
@@ -704,7 +754,11 @@ mod tests {
     fn valid_rank1_pooled_vector_steps_once() {
         let (dim, channels) = tiny_dims();
         let data: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.01).collect();
-        let mut net = scripted_net(Tensor::from_vec(data.clone(), &[dim]), dim, channels);
+        let mut net = scripted_net(
+            Tensor::from_vec(data.clone(), &[dim]).unwrap(),
+            dim,
+            channels,
+        );
         let out = net.forward(&[1, 2, 3], None).expect("valid rank-1");
         assert_eq!(out.embedding, data);
         assert_eq!(out.stimuli.len(), channels);
@@ -716,7 +770,7 @@ mod tests {
     fn embedding_equals_mean_pool_of_rank2_hidden() {
         let (dim, channels) = tiny_dims();
         let data: Vec<f32> = (0..2 * dim).map(|i| 0.01 * i as f32).collect();
-        let hidden = Tensor::from_vec(data, &[2, dim]);
+        let hidden = Tensor::from_vec(data, &[2, dim]).unwrap();
         let expected = crate::projector::mean_pool(&hidden);
         let mut net = scripted_net(hidden, dim, channels);
         let out = net.forward(&[1, 2], None).expect("valid rank-2");

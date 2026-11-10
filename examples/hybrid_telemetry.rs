@@ -10,7 +10,7 @@ struct DemoTransformer {
 }
 
 impl Transformer for DemoTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
         let seq = token_ids.len();
         let data: Vec<f32> = (0..seq * self.dim).map(|i| (i as f32) * 0.001).collect();
         Tensor::from_vec(data, &[seq, self.dim])

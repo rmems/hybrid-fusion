@@ -62,7 +62,7 @@ impl CountingTransformer {
 }
 
 impl Transformer for CountingTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> hybrid_fusion::Result<Tensor> {
         self.hidden_calls.set(self.hidden_calls.get() + 1);
         let seq = token_ids.len();
         Tensor::from_vec(vec![0.25; seq * self.dim], &[seq, self.dim])

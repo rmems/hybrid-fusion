@@ -36,14 +36,14 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 
 ```rust
 pub trait Transformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor;
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor>;
     fn dim(&self) -> usize;
     fn max_seq_len(&self) -> usize;
     fn param_count(&self) -> usize;
 }
 ```
 
-### `hidden_states(&self, token_ids: &[u32]) -> Tensor`
+### `hidden_states(&self, token_ids: &[u32]) -> Result<Tensor>`
 
 Returns the model's hidden-state representation for the given token sequence.
 
@@ -67,13 +67,13 @@ Returns the model's hidden-state representation for the given token sequence.
 - `dim()` must be `> 0`. A zero hidden dimension is rejected as
   `HiddenStateDim { expected: 1, got: 0 }` before pooling or `step`, even
   if a deserialized tensor uses a matching zero-extent axis.
-- All shape dimensions must be `> 0`. `Tensor::from_vec` panics on zero-dim
-  shapes.
+- All shape dimensions must be `> 0`. `Tensor::from_vec` and `Tensor::zeros`
+  return `HybridError::InvalidConfig` for zero-dim shapes.
 
 **Common implementation pattern:**
 
 ```rust
-fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
     let seq_len = token_ids.len();
     // ... run your transformer forward pass ...
     let data: Vec<f32> = /* fill with seq_len * dim values */;
@@ -938,9 +938,10 @@ should call `ResultTrack::require_same`, which returns
 ### Rules
 
 - **All dimensions must be `> 0`.** `Tensor::from_vec` and `Tensor::zeros`
-  panic on zero-dim shapes. This is a hard invariant.
+  return `HybridError::InvalidConfig` for zero-dim shapes. This is a hard
+  invariant.
 - **`data.len()` must equal the product of shape dimensions.** Mismatches
-  panic at construction time.
+  return `HybridError::InvalidConfig` at construction time.
 - **1-D tensors** `[d]` represent flat vectors. The projector uses them
   directly.
 - **2-D tensors** `[rows, cols]` represent matrix layouts. The projector
@@ -952,13 +953,13 @@ should call `ResultTrack::require_same`, which returns
 use hybrid_fusion::Tensor;
 
 // 1-D: a single embedding of dimension 128
-let t = Tensor::from_vec(vec![0.0; 128], &[128]);
+let t = Tensor::from_vec(vec![0.0; 128], &[128])?;
 
 // 2-D: 4 tokens, each with 128-dim hidden state
-let t = Tensor::from_vec(vec![0.0; 4 * 128], &[4, 128]);
+let t = Tensor::from_vec(vec![0.0; 4 * 128], &[4, 128])?;
 
 // Zeros (same rules apply)
-let t = Tensor::zeros(&[8, 256]);
+let t = Tensor::zeros(&[8, 256])?;
 ```
 
 ---
@@ -984,7 +985,7 @@ struct MyTransformer {
 }
 
 impl Transformer for MyTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
         let seq_len = token_ids.len();
         // Dummy: multiply each token id by a small float to fill the tensor.
         // A real backend would run attention, FFN layers, etc.
@@ -1157,13 +1158,13 @@ Rank 0 / 3+ is `HiddenStateRank`. NaN / ±Inf is `NonFinite`.
 **Fix:** Ensure `Tensor::from_vec(data, &[seq_len, self.dim])` uses the same
 `dim` value as `fn dim(&self) -> usize`, and `seq_len == token_ids.len()`.
 
-### Zero-dim tensors panic
+### Zero-dim tensors return errors
 
-`Tensor::from_vec` and `Tensor::zeros` **panic** (not error) if any shape
-dimension is `0`:
+`Tensor::from_vec` and `Tensor::zeros` return
+`HybridError::InvalidConfig` if any shape dimension is `0`:
 
 ```
-Tensor::from_vec: shape dimensions must be > 0, got [0]
+invalid configuration: Tensor::from_vec: shape dimensions must be > 0, got zero dimension 0 in [0]
 ```
 
 **Fix:** Never return a tensor with a zero-length dimension. If your

@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_embed_to_stimuli_1d_bounded() {
-        let t = Tensor::from_vec(vec![100.0, -100.0, 0.0, 50.0], &[4]);
+        let t = Tensor::from_vec(vec![100.0, -100.0, 0.0, 50.0], &[4]).unwrap();
         let out = embed_to_stimuli(&t);
         assert_eq!(out.len(), 4);
         for v in &out {
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_embed_to_stimuli_2d_mean_pool() {
-        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 3.0, 4.0, 5.0], &[2, 3]);
+        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0, 3.0, 4.0, 5.0], &[2, 3]).unwrap();
         let out = embed_to_stimuli(&t);
         assert_eq!(out.len(), 3);
         assert!((out[0] - 2.0f32.tanh()).abs() < 1e-5);
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_embed_to_stimuli_with_width_downsamples() {
-        let t = Tensor::from_vec(vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0], &[8]);
+        let t = Tensor::from_vec(vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0], &[8]).unwrap();
         let out = embed_to_stimuli_with_width(&t, 4);
         assert_eq!(out.len(), 4);
         assert!((out[0] - 0.0f32.tanh()).abs() < 1e-5);
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_embed_to_stimuli_with_width_pads() {
-        let t = Tensor::from_vec(vec![0.5, -0.5], &[2]);
+        let t = Tensor::from_vec(vec![0.5, -0.5], &[2]).unwrap();
         let out = embed_to_stimuli_with_width(&t, 5);
         assert_eq!(out.len(), 5);
         assert!((out[0] - 0.5f32.tanh()).abs() < 1e-5);
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_embed_to_stimuli_with_width_strictly_bounded_after_resize() {
-        let t = Tensor::from_vec(vec![500.0; 128], &[128]);
+        let t = Tensor::from_vec(vec![500.0; 128], &[128]).unwrap();
         let out = embed_to_stimuli_with_width(&t, 16);
         assert_eq!(out.len(), 16);
         for v in &out {
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_empty_width_returns_empty() {
-        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]);
+        let t = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap();
         let out = embed_to_stimuli_with_width(&t, 0);
         assert!(out.is_empty());
     }
