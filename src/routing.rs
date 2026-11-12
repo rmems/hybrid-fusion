@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn softmax_matches_two_buffer_reference_on_random_finite_inputs() {
+    fn softmax_matches_two_buffer_reference_on_random_finite_and_non_finite_inputs() {
         let mut st = 0x1470_u64 ^ 0xBEEF_u64;
         for _ in 0..2_000 {
             let n = (lcg(&mut st) % 48) as usize + 1;
