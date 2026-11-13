@@ -21,8 +21,8 @@ use crate::error::{HybridError, Result};
 ///   round-off for any `n` up to this bound (see `softmax`); past it nothing
 ///   here has been validated.
 /// - **Memory and time per route:** every route materializes all `n` weights.
-///   `softmax` holds the input scores, an `exp` buffer and the output at once,
-///   about `8n` bytes of extra peak memory (about 8 MB at this bound), and
+///   `softmax` materializes one `n`-element weight buffer (about 4n bytes peak
+///   beyond the input slice, about 4 MB at this bound), and
 ///   `top_k_indices` builds `n` `(usize, f32)` pairs (16 bytes each on 64-bit).
 ///   Softmax costs about 5 ms at this bound on a desktop CPU (order of
 ///   magnitude, single run). This is a sanity bound, not a latency budget.
@@ -110,10 +110,8 @@ pub fn softmax(scores: &[f32]) -> Result<Vec<f32>> {
         let u = (1.0 / scores.len() as f64) as f32;
         return Ok(vec![u; scores.len()]);
     }
-    let exp_scores: Vec<f32> = scores
-        .iter()
-        .map(|&score| (score - max_score).exp())
-        .collect();
+    let mut weights: Vec<f32> = Vec::with_capacity(scores.len());
+    weights.extend(scores.iter().map(|&score| (score - max_score).exp()));
     // The normalizer MUST be accumulated in f64. Naive f32 summation of `n`
     // non-negative terms carries relative error up to `n * u` (u = 2^-24), and
     // that error lands on the denominator, so it passes essentially undivided
@@ -126,12 +124,12 @@ pub fn softmax(scores: &[f32]) -> Result<Vec<f32>> {
     //
     // With a finite max, the max term is exp(0) = 1 and every term lies in
     // [0, 1], so 1 <= sum_exp <= n. No fallback is needed.
-    let sum_exp: f64 = exp_scores.iter().map(|&v| f64::from(v)).sum();
+    let sum_exp: f64 = weights.iter().map(|&v| f64::from(v)).sum();
     debug_assert!(sum_exp >= 1.0 && sum_exp.is_finite());
-    Ok(exp_scores
-        .into_iter()
-        .map(|v| (f64::from(v) / sum_exp) as f32)
-        .collect())
+    for w in &mut weights {
+        *w = (f64::from(*w) / sum_exp) as f32;
+    }
+    Ok(weights)
 }
 
 /// Indices of the `top_k` largest weights (descending). NaN weights sort last.
@@ -268,6 +266,43 @@ pub fn route_synthetic(
 mod tests {
     use super::*;
 
+    /// Pre-RM-1470 softmax (separate `exp` buffer then second output `Vec`).
+    /// Used as the independent two-buffer reference for bit-identical parity.
+    fn softmax_reference(scores: &[f32]) -> Result<Vec<f32>> {
+        if let Some(index) = scores.iter().position(|s| s.is_nan()) {
+            return Err(HybridError::InvalidConfig(format!(
+                "softmax: score[{index}] is NaN (of {} scores); NaN scores are rejected, not \
+                 sanitized",
+                scores.len()
+            )));
+        }
+        if scores.is_empty() {
+            return Ok(Vec::new());
+        }
+        let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        if max_score == f32::INFINITY {
+            let k = scores.iter().filter(|&&s| s == f32::INFINITY).count();
+            let share = (1.0 / k as f64) as f32;
+            return Ok(scores
+                .iter()
+                .map(|&s| if s == f32::INFINITY { share } else { 0.0 })
+                .collect());
+        }
+        if max_score == f32::NEG_INFINITY {
+            let u = (1.0 / scores.len() as f64) as f32;
+            return Ok(vec![u; scores.len()]);
+        }
+        let exp_scores: Vec<f32> = scores
+            .iter()
+            .map(|&score| (score - max_score).exp())
+            .collect();
+        let sum_exp: f64 = exp_scores.iter().map(|&v| f64::from(v)).sum();
+        Ok(exp_scores
+            .into_iter()
+            .map(|v| (f64::from(v) / sum_exp) as f32)
+            .collect())
+    }
+
     /// The pre-RM-1470 implementation: full stable sort.
     ///
     /// Deliberately has no index tie-break: it relies on `sort_by` being stable
@@ -292,6 +327,56 @@ mod tests {
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         *state >> 33
+    }
+
+    #[test]
+    fn softmax_matches_two_buffer_reference_on_random_finite_and_non_finite_inputs() {
+        let mut st = 0x1470_u64 ^ 0xBEEF_u64;
+        for _ in 0..2_000 {
+            let n = (lcg(&mut st) % 48) as usize + 1;
+            let scores: Vec<f32> = (0..n)
+                .map(|_| {
+                    let kind = lcg(&mut st) % 12;
+                    match kind {
+                        0..=2 => 0.0,
+                        3..=5 => (lcg(&mut st) % 20) as f32 * 0.1 - 1.0,
+                        6 => f32::NEG_INFINITY,
+                        7 => f32::INFINITY,
+                        8 => f32::NAN,
+                        _ => (lcg(&mut st) % 1000) as f32 / 100.0,
+                    }
+                })
+                .collect();
+            if scores.iter().any(|s| s.is_nan()) {
+                assert_eq!(
+                    softmax(&scores).map_err(|e| e.to_string()),
+                    softmax_reference(&scores).map_err(|e| e.to_string())
+                );
+                continue;
+            }
+            let got = softmax(&scores).unwrap();
+            let expect = softmax_reference(&scores).unwrap();
+            assert_eq!(got, expect, "scores={scores:?}");
+        }
+    }
+
+    #[test]
+    fn softmax_matches_reference_on_fixed_non_finite_cases() {
+        for scores in [
+            vec![] as Vec<f32>,
+            vec![1.0, 2.0, 3.0],
+            vec![f32::INFINITY, 0.0, 0.0],
+            vec![f32::INFINITY, f32::INFINITY, 1.0],
+            vec![f32::NEG_INFINITY; 4],
+            vec![f32::NEG_INFINITY, 0.0, 0.0],
+            vec![0.0, 1e30, -1e30],
+        ] {
+            assert_eq!(
+                softmax(&scores).unwrap(),
+                softmax_reference(&scores).unwrap(),
+                "{scores:?}"
+            );
+        }
     }
 
     #[test]
