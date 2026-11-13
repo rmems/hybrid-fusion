@@ -10,6 +10,20 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- **`DomainAdapter` contract** (Linear [RM-1811](https://linear.app/rpd-34/issue/RM-1811)):
+  new `src/adapter.rs` defines the ANN↔SNN representation boundary as a trait
+  (`encode_stimuli` hidden state → stimuli, `decode_activity` activity →
+  embedding) with the contract written in rustdoc: shapes, `f32` dtype,
+  bitwise determinism, statefulness (failure-atomic, `reset`), and error
+  conditions. Non-panicking validators (`validate_encode_input`,
+  `validate_stimuli`, `validate_decode_input`, `validate_embedding`) back the
+  provided `*_checked` host entry points; widths are capped at
+  `MAX_ADAPTER_WIDTH`. `PoolResizeTanhAdapter` is the reference
+  implementation (the existing mean-pool → resize → `tanh` path and the pure
+  `ProjectionMode` reverse path, bit-identical). `adapter::conformance`
+  exports a reusable suite (`assert_domain_adapter_contract(factory)`) that
+  every implementation must pass. Additive only: `HybridNetwork` and
+  `ReverseHybridPath` are not routed through adapters yet.
 - **`ResultTrack` on every emitted result** ([#62](https://github.com/rmems/hybrid-fusion/issues/62),
   Linear [RM-2207](https://linear.app/rpd-34/issue/RM-2207); shape from ADR 0001 §5.1):
   new `#[non_exhaustive]` `ResultTrack { Ann, SnnNative, Hybrid }` in
