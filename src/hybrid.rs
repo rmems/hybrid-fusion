@@ -2,6 +2,7 @@
 
 //! ANN → SNN forward-path host: transformer hidden states → bounded SNN stimuli.
 
+use crate::adapter::{DomainAdapter, PoolResizeTanhAdapter, encode_stimuli_checked};
 use crate::error::{ForwardValueStage, HybridError, Result};
 use crate::projector;
 use crate::telemetry;
@@ -16,11 +17,20 @@ use crate::validate;
 /// and SNN input width are checked against the injected backends before the
 /// first [`Self::forward`] call. [`Self::new`] remains as an unvalidated
 /// pre-1.0 compatibility constructor.
+///
+/// The ANN→SNN representation change (hidden state → bounded stimuli) is
+/// delegated to the injected [`DomainAdapter`]: [`PoolResizeTanhAdapter`] is
+/// the default and is bit-identical to the original in-line
+/// pool → resize → `tanh` path for all inputs that do not overflow the
+/// pool/resize summation — overflowing windows are rejected as
+/// [`HybridError::NonFinite`] rather than squashed to `1.0`/`NaN` by `tanh`
+/// (RM-1811; intentional contract hardening from #76).
 pub struct HybridNetwork<T: Transformer, S: SpikingNetwork> {
     pub transformer: T,
     pub snn: S,
     config: HybridConfig,
     global_step: u64,
+    adapter: Box<dyn DomainAdapter>,
 }
 
 impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
@@ -32,12 +42,32 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     /// This infallible constructor is retained as a pre-1.0 compatibility path
     /// so existing callers keep compiling without handling [`Result`]. It does
     /// not call [`Transformer::hidden_states`] or [`SpikingNetwork::step`].
+    ///
+    /// Uses the default [`PoolResizeTanhAdapter`].
     pub fn new(transformer: T, snn: S, config: HybridConfig) -> Self {
+        Self::with_adapter(
+            transformer,
+            snn,
+            config,
+            Box::new(PoolResizeTanhAdapter::default()),
+        )
+    }
+
+    /// Construct with an injected [`DomainAdapter`] for the ANN→SNN
+    /// representation change — the unvalidated counterpart of
+    /// [`Self::try_with_adapter`], mirroring [`Self::new`].
+    pub fn with_adapter(
+        transformer: T,
+        snn: S,
+        config: HybridConfig,
+        adapter: Box<dyn DomainAdapter>,
+    ) -> Self {
         Self {
             transformer,
             snn,
             config,
             global_step: 0,
+            adapter,
         }
     }
 
@@ -122,6 +152,50 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         Ok(Self::new(transformer, snn, config))
     }
 
+    /// Validated [`Self::with_adapter`]: the same construction checks as
+    /// [`Self::try_new`] plus the injected [`DomainAdapter`].
+    pub fn try_with_adapter(
+        transformer: T,
+        snn: S,
+        config: HybridConfig,
+        adapter: Box<dyn DomainAdapter>,
+    ) -> Result<Self> {
+        validate_construction(&transformer, &snn, &config)?;
+        Ok(Self::with_adapter(transformer, snn, config, adapter))
+    }
+
+    /// The adapter performing the ANN→SNN representation change.
+    pub fn adapter(&self) -> &dyn DomainAdapter {
+        &*self.adapter
+    }
+
+    /// Mutable access to the adapter (e.g. for direct [`DomainAdapter::reset`]).
+    pub fn adapter_mut(&mut self) -> &mut dyn DomainAdapter {
+        &mut *self.adapter
+    }
+
+    /// Replace the adapter. The new one takes effect on the next
+    /// [`Self::forward`]; it is not reset implicitly.
+    pub fn set_adapter(&mut self, adapter: Box<dyn DomainAdapter>) {
+        self.adapter = adapter;
+    }
+
+    /// Run one ANN→SNN tick: token IDs → hidden states → adapter stimuli →
+    /// SNN step.
+    ///
+    /// A stateful adapter commits its streaming state once
+    /// [`DomainAdapter::encode_stimuli`] accepts the input; if the SNN step
+    /// then fails, the adapter has still consumed that tick — the contract's
+    /// failure-atomicity guarantee covers the adapter's own errors, not the
+    /// host's downstream failures. [`Self::reset`] is the way to drop such
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Validation failures (empty/oversized `token_ids`, malformed hidden
+    /// states, non-finite intermediates, out-of-domain fired IDs) and adapter
+    /// or backend errors are returned without advancing `global_step`. Backend
+    /// failures are reported to Sentry when the `sentry` feature is on.
     pub fn forward(
         &mut self,
         token_ids: &[u32],
@@ -153,15 +227,19 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         let hidden = self.transformer.hidden_states(token_ids);
         validate::validate_hidden_state(&hidden, token_ids.len(), self.transformer.dim())?;
 
-        // One mean-pool feeds both the embedding (pre-tanh, `dim()` wide) and
-        // the stimuli (resized, then tanh).
+        // The mean-pool feeds the embedding (pre-tanh, `dim()` wide); the
+        // adapter re-derives what it needs from `hidden` per its contract.
         let pooled = projector::mean_pool(&hidden);
         let mut embedding = pooled.clone();
         embedding.truncate(self.transformer.dim());
         validate::validate_finite(&embedding, ForwardValueStage::Embedding)?;
 
-        let stimuli = projector::pooled_to_stimuli(&pooled, snn_width);
-        validate::validate_finite(&stimuli, ForwardValueStage::Stimuli)?;
+        // The ANN→SNN representation change runs through the injected
+        // DomainAdapter (default: pool → resize → tanh, bit-identical to the
+        // former in-line path). The checked entry point runs the contract's
+        // input and output validation, so a non-finite or out-of-bound
+        // stimulus cannot reach the backend.
+        let stimuli = encode_stimuli_checked(&mut *self.adapter, &hidden, snn_width)?;
 
         let modulators = modulators.unwrap_or_default();
         // Backend/runtime failures are reported when the `sentry` feature is on.
@@ -233,14 +311,20 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     /// `Transformer::max_seq_len`, `SpikingNetwork::num_channels`,
     /// `SpikingNetwork::num_neurons`) — the same
     /// values `forward` validates against — so the plan matches the runnable
-    /// pipeline even when `config` disagrees.
+    /// pipeline even when `config` disagrees. The adaptation port records the
+    /// injected adapter's declared [`DomainAdapter::encoding`].
     pub fn execution_plan(&self) -> Result<crate::plan::HybridExecutionPlan> {
         let mut cfg = self.config.clone();
         cfg.transformer.dim = self.transformer.dim();
         cfg.transformer.max_seq_len = self.transformer.max_seq_len();
         cfg.snn_input_channels = self.snn.num_channels();
         cfg.snn_lif_neurons = self.snn.num_neurons();
-        Ok(crate::plan::HybridExecutionPlan::from_hybrid_config(&cfg)?)
+        Ok(
+            crate::plan::HybridExecutionPlan::from_hybrid_config_with_encoding(
+                &cfg,
+                self.adapter.encoding(),
+            )?,
+        )
     }
 
     /// Restore post-construction dynamic state for a new input sequence.
@@ -265,7 +349,9 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     ///
     /// Propagates [`SpikingNetwork::reset`] when reset is advertised, and fails
     /// closed when the SNN reports `stateful` without reset so dynamics cannot
-    /// be silently leaked across sequences.
+    /// be silently leaked across sequences. On success the injected
+    /// [`DomainAdapter`] is reset too, so its streaming state (phase
+    /// accumulators, temporal windows) is not leaked either.
     pub fn reset(&mut self) -> Result<()> {
         let caps = self.snn.capabilities();
         match self.snn.reset() {
@@ -278,6 +364,7 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
             }
             Err(err) => return Err(err),
         }
+        self.adapter.reset();
         self.global_step = 0;
         Ok(())
     }

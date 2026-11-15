@@ -8,10 +8,11 @@ use hybrid_fusion::adapter::conformance::{
     ConformanceDims, assert_domain_adapter_contract, check_domain_adapter_contract_with,
 };
 use hybrid_fusion::{
-    DomainAdapter, HybridConfig, HybridError, HybridNetwork, NeuroModulators,
-    PoolResizeTanhAdapter, ProjectionMode, Result, SpikeActivity, SpikeEncoding, SpikeEncodingKind,
-    SpikingNetwork, Tensor, Transformer, decode_activity_checked, encode_stimuli_checked,
-    validate_decode_input, validate_embedding, validate_encode_input, validate_stimuli,
+    DomainAdapter, ExpertRouteOutput, ExpertRouter, HybridConfig, HybridError, HybridNetwork,
+    NeuroModulators, PoolResizeTanhAdapter, ProjectionMode, Result, ReverseHybridPath,
+    SpikeActivity, SpikeDecoding, SpikeEncoding, SpikeEncodingKind, SpikingNetwork, StageKind,
+    Tensor, Transformer, decode_activity_checked, encode_stimuli_checked, validate_decode_input,
+    validate_embedding, validate_encode_input, validate_stimuli,
 };
 
 /// Stateful adapter: stimuli are an exponential moving average of the
@@ -226,4 +227,308 @@ fn reference_encode_is_bitwise_identical_to_the_forward_host() {
             .map(|v| v.to_bits())
             .collect::<Vec<_>>()
     );
+}
+
+// ── Host wiring (RM-1811 follow-up) ─────────────────────────────────────────
+
+/// Adapter emitting a fixed stimulus vector, no matter the input.
+struct ConstantAdapter {
+    value: f32,
+}
+
+impl DomainAdapter for ConstantAdapter {
+    fn encode_stimuli(&mut self, hidden: &Tensor, snn_width: usize) -> Result<Vec<f32>> {
+        validate_encode_input(hidden, snn_width)?;
+        let out = vec![self.value; snn_width];
+        validate_stimuli(&out, snn_width)?;
+        Ok(out)
+    }
+
+    fn decode_activity(
+        &mut self,
+        activity: &SpikeActivity,
+        num_neurons: usize,
+        embed_dim: usize,
+    ) -> Result<Vec<f32>> {
+        validate_decode_input(activity, num_neurons, embed_dim)?;
+        let out = vec![self.value; embed_dim];
+        validate_embedding(&out, embed_dim)?;
+        Ok(out)
+    }
+}
+
+/// Adapter whose hooks always fail, to prove errors propagate.
+struct FailingAdapter;
+
+impl DomainAdapter for FailingAdapter {
+    fn encode_stimuli(&mut self, _hidden: &Tensor, _snn_width: usize) -> Result<Vec<f32>> {
+        Err(HybridError::InvalidConfig(
+            "FailingAdapter::encode_stimuli".into(),
+        ))
+    }
+
+    fn decode_activity(
+        &mut self,
+        _activity: &SpikeActivity,
+        _num_neurons: usize,
+        _embed_dim: usize,
+    ) -> Result<Vec<f32>> {
+        Err(HybridError::InvalidConfig(
+            "FailingAdapter::decode_activity".into(),
+        ))
+    }
+}
+
+/// SNN that counts how often it is stepped.
+struct CountingSnn {
+    channels: usize,
+    steps: u32,
+}
+
+impl SpikingNetwork for CountingSnn {
+    fn step(&mut self, _stimuli: &[f32], _modulators: &NeuroModulators) -> Result<Vec<usize>> {
+        self.steps += 1;
+        Ok(Vec::new())
+    }
+    fn num_channels(&self) -> usize {
+        self.channels
+    }
+}
+
+/// `forward` produces stimuli through the injected adapter, not the in-line
+/// projector path.
+#[test]
+fn hybrid_network_forward_uses_the_injected_adapter() {
+    let config = HybridConfig::tiny();
+    let channels = config.snn_input_channels;
+    let mut net = HybridNetwork::try_with_adapter(
+        PatternTransformer {
+            dim: config.transformer.dim,
+        },
+        CountingSnn { channels, steps: 0 },
+        config,
+        Box::new(ConstantAdapter { value: 0.25 }),
+    )
+    .unwrap();
+    let out = net.forward(&[1, 2, 3], None).unwrap();
+    assert_eq!(out.stimuli, vec![0.25; channels]);
+    assert_eq!(net.snn.steps, 1);
+    assert_eq!(net.global_step(), 1);
+}
+
+/// An adapter error propagates: the SNN is never stepped and `global_step`
+/// does not advance.
+#[test]
+fn hybrid_network_forward_propagates_adapter_errors_without_stepping() {
+    let config = HybridConfig::tiny();
+    let channels = config.snn_input_channels;
+    let mut net = HybridNetwork::try_with_adapter(
+        PatternTransformer {
+            dim: config.transformer.dim,
+        },
+        CountingSnn { channels, steps: 0 },
+        config,
+        Box::new(FailingAdapter),
+    )
+    .unwrap();
+    match net.forward(&[1, 2, 3], None) {
+        Err(HybridError::InvalidConfig(msg)) => {
+            assert!(msg.contains("FailingAdapter"), "{msg}")
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.steps, 0);
+    assert_eq!(net.global_step(), 0);
+}
+
+/// `reset()` clears injected adapter state, so a stateful adapter replays its
+/// fresh outputs after reset.
+#[test]
+fn hybrid_network_reset_clears_adapter_state() {
+    let config = HybridConfig::tiny();
+    let channels = config.snn_input_channels;
+    let mut net = HybridNetwork::try_with_adapter(
+        PatternTransformer {
+            dim: config.transformer.dim,
+        },
+        CountingSnn { channels, steps: 0 },
+        config,
+        Box::new(SmoothingAdapter::new()),
+    )
+    .unwrap();
+    let first = net.forward(&[4, 2], None).unwrap().stimuli;
+    let second = net.forward(&[4, 2], None).unwrap().stimuli;
+    assert_ne!(first, second, "smoothing adapter must be stateful");
+    net.reset().unwrap();
+    assert_eq!(
+        net.forward(&[4, 2], None).unwrap().stimuli,
+        first,
+        "after reset the adapter must replay its first output"
+    );
+}
+
+/// Router that records the embedding it was given.
+#[derive(Debug, Default)]
+struct RecordingRouter {
+    last: Vec<f32>,
+}
+
+impl ExpertRouter for RecordingRouter {
+    fn num_experts(&self) -> usize {
+        2
+    }
+    fn top_k(&self) -> usize {
+        1
+    }
+    fn route(&mut self, embedding: &[f32]) -> Result<ExpertRouteOutput> {
+        self.last = embedding.to_vec();
+        Ok(ExpertRouteOutput {
+            expert_weights: vec![0.5, 0.5],
+            selected_experts: vec![0],
+            routing_entropy: None,
+        })
+    }
+}
+
+/// `forward_activity` produces the embedding through the injected adapter and
+/// hands it to the router.
+#[test]
+fn reverse_path_uses_the_injected_adapter() {
+    let act = SpikeActivity::from_fired(&[0], 4).unwrap();
+    let mut path = ReverseHybridPath::with_adapter(
+        ProjectionMode::RateSum,
+        4,
+        6,
+        RecordingRouter::default(),
+        Box::new(ConstantAdapter { value: 0.75 }),
+    )
+    .unwrap();
+    let out = path.forward_activity(&act).unwrap();
+    assert_eq!(out.embedding, vec![0.75; 6]);
+    assert_eq!(path.router().last, vec![0.75; 6]);
+    assert_eq!(path.mode(), ProjectionMode::RateSum);
+}
+
+/// Decode errors propagate before routing, without advancing `global_step`.
+#[test]
+fn reverse_path_propagates_adapter_errors() {
+    let act = SpikeActivity::from_fired(&[0], 4).unwrap();
+    let mut path = ReverseHybridPath::with_adapter(
+        ProjectionMode::RateSum,
+        4,
+        6,
+        RecordingRouter::default(),
+        Box::new(FailingAdapter),
+    )
+    .unwrap();
+    assert!(path.forward_activity(&act).is_err());
+    assert_eq!(path.global_step(), 0);
+    assert!(path.router().last.is_empty(), "router must not be reached");
+}
+
+/// `reset()` clears injected decode-adapter state (a decode that depends on
+/// call count must replay its fresh output).
+#[test]
+fn reverse_path_reset_clears_adapter_state() {
+    struct CountingDecoder {
+        calls: u32,
+    }
+    impl DomainAdapter for CountingDecoder {
+        fn encode_stimuli(&mut self, hidden: &Tensor, snn_width: usize) -> Result<Vec<f32>> {
+            validate_encode_input(hidden, snn_width)?;
+            Ok(vec![0.0; snn_width])
+        }
+        fn decode_activity(
+            &mut self,
+            activity: &SpikeActivity,
+            num_neurons: usize,
+            embed_dim: usize,
+        ) -> Result<Vec<f32>> {
+            validate_decode_input(activity, num_neurons, embed_dim)?;
+            self.calls += 1;
+            Ok(vec![self.calls as f32; embed_dim])
+        }
+        fn reset(&mut self) {
+            self.calls = 0;
+        }
+    }
+
+    let act = SpikeActivity::from_fired(&[0], 4).unwrap();
+    let mut path = ReverseHybridPath::with_adapter(
+        ProjectionMode::RateSum,
+        4,
+        6,
+        RecordingRouter::default(),
+        Box::new(CountingDecoder { calls: 0 }),
+    )
+    .unwrap();
+    assert_eq!(path.forward_activity(&act).unwrap().embedding, vec![1.0; 6]);
+    assert_eq!(path.forward_activity(&act).unwrap().embedding, vec![2.0; 6]);
+    path.reset();
+    assert_eq!(
+        path.forward_activity(&act).unwrap().embedding,
+        vec![1.0; 6],
+        "after reset the adapter must replay its first output"
+    );
+}
+
+/// `execution_plan` records the injected adapter's declared encoding/decoding
+/// on the adaptation port, not the reference path's metadata.
+#[test]
+fn execution_plan_records_the_injected_adapter_metadata() {
+    let config = HybridConfig::tiny();
+    let net = HybridNetwork::try_with_adapter(
+        PatternTransformer {
+            dim: config.transformer.dim,
+        },
+        SilentSnn {
+            channels: config.snn_input_channels,
+        },
+        config,
+        // ConstantAdapter overrides no metadata: encoding() is the trait
+        // default, which the plan must report verbatim.
+        Box::new(ConstantAdapter { value: 0.25 }),
+    )
+    .unwrap();
+    let plan = net.execution_plan().unwrap();
+    let adapt = plan
+        .stages()
+        .iter()
+        .find(|s| s.kind == StageKind::Adaptation)
+        .expect("adaptation stage");
+    assert_eq!(
+        adapt.output.encoding,
+        Some(SpikeEncoding::default()),
+        "plan must carry the injected adapter's declared encoding"
+    );
+
+    let path = ReverseHybridPath::with_adapter(
+        ProjectionMode::MembraneSnapshot,
+        4,
+        6,
+        RecordingRouter::default(),
+        Box::new(ConstantAdapter { value: 0.75 }),
+    )
+    .unwrap();
+    let plan = path.execution_plan().unwrap();
+    let adapt = plan
+        .stages()
+        .iter()
+        .find(|s| s.kind == StageKind::Adaptation)
+        .expect("adaptation stage");
+    assert_eq!(
+        adapt.output.decoding,
+        Some(SpikeDecoding::default()),
+        "plan must carry the injected adapter's declared decoding"
+    );
+}
+
+/// `DomainAdapter: Send` keeps the hosts `Send` whenever their backends are —
+/// an injected `Box<dyn DomainAdapter>` must not strip the auto-trait.
+#[test]
+fn hosts_stay_send_with_an_injected_adapter() {
+    fn is_send<T: Send>() {}
+    is_send::<Box<dyn DomainAdapter>>();
+    is_send::<HybridNetwork<PatternTransformer, SilentSnn>>();
+    is_send::<ReverseHybridPath<RecordingRouter>>();
 }
