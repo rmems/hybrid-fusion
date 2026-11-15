@@ -103,11 +103,12 @@ pub trait SpikingNetwork {
     /// Restore pre-step dynamics when the backend supports reset.
     ///
     /// Backends that advertise `BackendCapabilities::reset` must override this
-    /// method. The default is an explicit unsupported-operation error.
+    /// method. The default is the
+    /// [`crate::HybridError::SnnUnsupported`] sentinel, which lets hosts
+    /// distinguish "no reset implementation" from a failed reset override —
+    /// overrides reporting real failures must not return that variant.
     fn reset(&mut self) -> Result<()> {
-        Err(crate::HybridError::SnnStep(
-            "reset is not supported by this backend".into(),
-        ))
+        Err(crate::HybridError::SnnUnsupported("reset"))
     }
 
     /// Side-effect-free capability report.
@@ -545,6 +546,14 @@ pub trait ExpertRouter {
     ///
     /// Returns [`Err`] for empty embeddings or backend-specific validation failures.
     fn route(&mut self, embedding: &[f32]) -> Result<ExpertRouteOutput>;
+
+    /// Restore cross-call routing dynamics while keeping router parameters.
+    ///
+    /// The default is a no-op for stateless routers. Stateful checkpoint-backed
+    /// routers should clear caches, gating memory, or other epoch state here;
+    /// hosts such as [`crate::ReverseHybridPath::reset`] call this whenever
+    /// reset is invoked, regardless of whether a forward call succeeded.
+    fn reset(&mut self) {}
 
     /// Pre-softmax gate logits for `embedding`: the raw, unnormalized scores
     /// whose softmax is [`ExpertRouteOutput::expert_weights`].

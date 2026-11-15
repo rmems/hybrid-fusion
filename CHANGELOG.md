@@ -336,6 +336,24 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Fixed
 
+- **`HybridNetwork::reset` / `ReverseHybridPath::reset` (RM-1444):** host
+  `reset()` now restores post-construction **dynamic** state, not only
+  `global_step`. `HybridNetwork::reset` delegates to
+  [`SpikingNetwork::reset`] unconditionally (honoring backends that override it
+  without advertising the capability), fails closed when the SNN reports
+  `stateful` without reset, and ignores the unsupported-operation default on
+  stateless backends that have nothing to leak; `ReverseHybridPath::reset`
+  also calls the new default [`ExpertRouter::reset`] hook for cross-call
+  router epoch state. The `SpikingNetwork::reset` default now returns the new
+  [`HybridError::SnnUnsupported`] sentinel instead of `SnnStep`, so hosts can
+  distinguish "not implemented" from a failed reset override. **BREAKING:**
+  `HybridError` gains `SnnUnsupported` and is exhaustive, so downstream
+  `match` arms must be updated. Host transformer weights and gate parameters are
+  unchanged; backend-specific SNN reset semantics apply (`NeuromodSnn::reset`
+  restores its construction-time weights and thresholds).
+  **Behavior change:** `HybridNetwork::reset` now returns [`Result<()>`] and
+  propagates SNN reset errors instead of silently ignoring membrane / trace
+  leakage across input sequences.
 - **BREAKING (reverse path / RM-1445):** a `SpikeActivity` timestep is
   defined as a **set**, matching the forward host's at-most-once fired-ID
   contract from [#61](https://github.com/rmems/hybrid-fusion/issues/61)

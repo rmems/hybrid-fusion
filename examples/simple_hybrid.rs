@@ -38,7 +38,7 @@ fn main() {
     println!("Fired neurons: {:?}", output.fired_neurons);
     println!("Global step:   {}", output.global_step);
 
-    // Second pass -- global_step should increment and membrane state carries over.
+    // Second pass — global_step increments; membrane carries over until `reset()`.
     let output2 = network
         .forward(&[1, 2, 3], None)
         .expect("second forward pass failed");

@@ -71,6 +71,12 @@ impl SimpleSnn {
     pub fn reset(&mut self) {
         self.membrane_potentials.fill(0.0);
     }
+
+    /// Current membrane potentials, for diagnostics and tests observing
+    /// cross-call state (e.g. host `reset` delegation).
+    pub fn membrane_potentials(&self) -> &[f32] {
+        &self.membrane_potentials
+    }
 }
 
 impl SpikingNetwork for SimpleSnn {
@@ -251,12 +257,7 @@ mod tests {
         assert!(!caps.reset);
         let err = <NoReset as SpikingNetwork>::reset(&mut NoReset).unwrap_err();
         match err {
-            HybridError::SnnStep(message) => {
-                assert!(
-                    message.contains("not supported"),
-                    "default reset did not report itself unsupported: {message}"
-                );
-            }
+            HybridError::SnnUnsupported(op) => assert_eq!(op, "reset"),
             other => panic!("expected unsupported reset, got {other:?}"),
         }
     }

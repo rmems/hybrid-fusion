@@ -243,8 +243,43 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         Ok(crate::plan::HybridExecutionPlan::from_hybrid_config(&cfg)?)
     }
 
-    pub fn reset(&mut self) {
+    /// Restore post-construction dynamic state for a new input sequence.
+    ///
+    /// Clears the host [`Self::global_step`] counter and delegates to
+    /// [`SpikingNetwork::reset`] so membrane, refractory, trace, and similar
+    /// cross-tick state returns to its freshly constructed values. The host
+    /// does not touch transformer weights; SNN-side reset semantics are
+    /// backend-defined — `NeuromodSnn::reset`, for example, also restores its
+    /// construction-time weights and thresholds.
+    ///
+    /// The backend call is unconditional so an implementation that overrides
+    /// [`SpikingNetwork::reset`] without advertising
+    /// [`crate::BackendCapabilities::reset`] is still honored. A backend
+    /// reporting neither `reset` nor [`crate::BackendCapabilities::stateful`]
+    /// may keep the trait default: its
+    /// [`HybridError::SnnUnsupported`] sentinel is ignored because there is no
+    /// cross-call state to leak. Any other error propagates — a failing
+    /// override is never mistaken for "nothing to reset".
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`SpikingNetwork::reset`] when reset is advertised, and fails
+    /// closed when the SNN reports `stateful` without reset so dynamics cannot
+    /// be silently leaked across sequences.
+    pub fn reset(&mut self) -> Result<()> {
+        let caps = self.snn.capabilities();
+        match self.snn.reset() {
+            Ok(()) => {}
+            Err(HybridError::SnnUnsupported(_)) if !caps.reset && !caps.stateful => {}
+            Err(err) if !caps.reset && caps.stateful => {
+                return Err(HybridError::SnnStep(format!(
+                    "cannot reset HybridNetwork: SNN is stateful but does not implement reset ({err})"
+                )));
+            }
+            Err(err) => return Err(err),
+        }
         self.global_step = 0;
+        Ok(())
     }
 }
 
@@ -375,7 +410,7 @@ mod tests {
         net.forward(&[0, 1], None).unwrap();
         net.forward(&[0, 1], None).unwrap();
         assert_eq!(net.global_step(), 2);
-        net.reset();
+        net.reset().unwrap();
         assert_eq!(net.global_step(), 0);
     }
 
@@ -721,5 +756,262 @@ mod tests {
         let mut net = scripted_net(hidden, dim, channels);
         let out = net.forward(&[1, 2], None).expect("valid rank-2");
         assert_eq!(out.embedding, expected);
+    }
+
+    /// RM-1444: host `reset` must clear cross-tick SNN dynamics, not only `global_step`.
+    struct StatefulMembraneSnn {
+        channels: usize,
+        membrane: f32,
+    }
+
+    impl SpikingNetwork for StatefulMembraneSnn {
+        fn step(&mut self, stimuli: &[f32], _modulators: &NeuroModulators) -> Result<Vec<usize>> {
+            if stimuli.len() != self.channels {
+                return Err(HybridError::InputLengthMismatch {
+                    expected: self.channels,
+                    got: stimuli.len(),
+                });
+            }
+            // Normalized by channel count so a single forward stays
+            // subthreshold: state must accumulate across calls to fire, and
+            // subtracting the threshold leaves a residual that only `reset`
+            // can clear — the carry this test exists to observe.
+            self.membrane += stimuli.iter().sum::<f32>() / self.channels as f32;
+            if self.membrane >= 1.0 {
+                self.membrane -= 1.0;
+                Ok(vec![0])
+            } else {
+                Ok(vec![])
+            }
+        }
+
+        fn num_channels(&self) -> usize {
+            self.channels
+        }
+
+        fn reset(&mut self) -> Result<()> {
+            self.membrane = 0.0;
+            Ok(())
+        }
+
+        fn capabilities(&self) -> crate::BackendCapabilities {
+            use crate::capabilities::RequiredFeature;
+            crate::BackendCapabilities::snn(std::any::type_name::<Self>())
+                .with_channels(self.channels)
+                .with_reset(true)
+                .with_stateful(true)
+                .with_features([RequiredFeature::new("step")])
+        }
+    }
+
+    #[test]
+    fn reset_restores_forward_output_after_stateful_snn_epoch() {
+        let cfg = HybridConfig::tiny();
+        let build = || {
+            let t = MockTransformer {
+                dim: cfg.transformer.dim,
+                max_seq: cfg.transformer.max_seq_len,
+            };
+            HybridNetwork::try_new(
+                t,
+                StatefulMembraneSnn {
+                    channels: cfg.snn_input_channels,
+                    membrane: 0.0,
+                },
+                cfg.clone(),
+            )
+            .unwrap()
+        };
+        let tokens_a = [1u32, 2, 3, 4];
+        let tokens_b = [5u32, 6, 7, 8, 9, 10];
+
+        let mut fresh = build();
+        let baseline = fresh.forward(&tokens_a, None).unwrap();
+
+        let mut used = build();
+        let first = used.forward(&tokens_a, None).unwrap();
+        assert_eq!(first.fired_neurons, baseline.fired_neurons);
+        assert_eq!(first.stimuli, baseline.stimuli);
+
+        let _ = used.forward(&tokens_b, None).unwrap();
+        assert!(
+            used.snn.membrane != 0.0,
+            "epoch must leave carried membrane state for reset to clear"
+        );
+
+        used.reset().unwrap();
+        assert_eq!(used.snn.membrane, 0.0, "host reset must zero the membrane");
+        let after_reset = used.forward(&tokens_a, None).unwrap();
+        assert_eq!(after_reset.fired_neurons, baseline.fired_neurons);
+        assert_eq!(after_reset.stimuli, baseline.stimuli);
+        assert_eq!(after_reset.global_step, baseline.global_step);
+    }
+
+    /// SNN with configurable reset capability / failure for host reset branches.
+    struct CapsSnn {
+        channels: usize,
+        stateful: bool,
+        reset_capable: bool,
+        reset_err: Option<fn() -> HybridError>,
+    }
+
+    impl SpikingNetwork for CapsSnn {
+        fn step(&mut self, _stimuli: &[f32], _modulators: &NeuroModulators) -> Result<Vec<usize>> {
+            Ok(Vec::new())
+        }
+        fn num_channels(&self) -> usize {
+            self.channels
+        }
+        fn reset(&mut self) -> Result<()> {
+            match self.reset_err {
+                Some(err) => Err(err()),
+                None => Ok(()),
+            }
+        }
+        fn capabilities(&self) -> crate::BackendCapabilities {
+            use crate::capabilities::RequiredFeature;
+            crate::BackendCapabilities::snn(std::any::type_name::<Self>())
+                .with_channels(self.channels)
+                .with_reset(self.reset_capable)
+                .with_stateful(self.stateful)
+                .with_features([RequiredFeature::new("step")])
+        }
+    }
+
+    fn caps_net<S: SpikingNetwork>(snn: S) -> HybridNetwork<MockTransformer, S> {
+        let cfg = HybridConfig::tiny();
+        HybridNetwork::new(
+            MockTransformer {
+                dim: cfg.transformer.dim,
+                max_seq: cfg.transformer.max_seq_len,
+            },
+            snn,
+            cfg,
+        )
+    }
+
+    #[test]
+    fn reset_fails_closed_on_stateful_backend_without_reset() {
+        let channels = HybridConfig::tiny().snn_input_channels;
+        let mut net = caps_net(CapsSnn {
+            channels,
+            stateful: true,
+            reset_capable: false,
+            reset_err: Some(|| HybridError::SnnUnsupported("reset")),
+        });
+        net.forward(&[0, 1], None).unwrap();
+        let err = net.reset().unwrap_err();
+        match err {
+            HybridError::SnnStep(msg) => assert!(msg.contains("stateful")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(net.global_step(), 1, "failed reset must keep global_step");
+    }
+
+    #[test]
+    fn reset_propagates_advertised_backend_failure() {
+        let channels = HybridConfig::tiny().snn_input_channels;
+        let mut net = caps_net(CapsSnn {
+            channels,
+            stateful: true,
+            reset_capable: true,
+            reset_err: Some(|| HybridError::SnnStep("backend reset exploded".into())),
+        });
+        net.forward(&[0, 1], None).unwrap();
+        match net.reset().unwrap_err() {
+            HybridError::SnnStep(msg) => assert!(msg.contains("exploded")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(net.global_step(), 1, "failed reset must keep global_step");
+    }
+
+    #[test]
+    fn reset_succeeds_on_stateless_backend_with_default_reset() {
+        let channels = HybridConfig::tiny().snn_input_channels;
+        let mut net = caps_net(CapsSnn {
+            channels,
+            stateful: false,
+            reset_capable: false,
+            reset_err: Some(|| HybridError::SnnUnsupported("reset")),
+        });
+        net.forward(&[0, 1], None).unwrap();
+        net.reset().unwrap();
+        assert_eq!(net.global_step(), 0);
+    }
+
+    #[test]
+    fn reset_propagates_snn_step_failure_on_stateless_backend() {
+        // A *real* `SnnStep` failure from an unadvertised override must not be
+        // mistaken for the `SnnUnsupported` default sentinel.
+        let channels = HybridConfig::tiny().snn_input_channels;
+        let mut net = caps_net(CapsSnn {
+            channels,
+            stateful: false,
+            reset_capable: false,
+            reset_err: Some(|| HybridError::SnnStep("membrane voltage rail dropped".into())),
+        });
+        net.forward(&[0, 1], None).unwrap();
+        match net.reset().unwrap_err() {
+            HybridError::SnnStep(msg) => assert!(msg.contains("voltage rail")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(net.global_step(), 1, "failed reset must keep global_step");
+    }
+
+    #[test]
+    fn reset_propagates_real_failure_on_unadvertised_backend() {
+        // An unadvertised override that fails with something other than the
+        // trait-default `SnnUnsupported` sentinel must surface the failure;
+        // only the sentinel may be ignored on a stateless backend.
+        let channels = HybridConfig::tiny().snn_input_channels;
+        let mut net = caps_net(CapsSnn {
+            channels,
+            stateful: false,
+            reset_capable: false,
+            reset_err: Some(|| HybridError::InvalidConfig("reset hardware fault".into())),
+        });
+        net.forward(&[0, 1], None).unwrap();
+        match net.reset().unwrap_err() {
+            HybridError::InvalidConfig(msg) => assert!(msg.contains("hardware fault")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(net.global_step(), 1, "failed reset must keep global_step");
+    }
+
+    #[test]
+    fn reset_honors_backend_override_without_capability() {
+        // Backend implements reset() but reports default capabilities
+        // (stateful=false, reset=false): the host must still call it rather
+        // than silently skipping a real reset implementation.
+        let channels = HybridConfig::tiny().snn_input_channels;
+        struct QuietResetSnn {
+            channels: usize,
+            resets: u32,
+        }
+        impl SpikingNetwork for QuietResetSnn {
+            fn step(
+                &mut self,
+                _stimuli: &[f32],
+                _modulators: &NeuroModulators,
+            ) -> Result<Vec<usize>> {
+                Ok(Vec::new())
+            }
+            fn num_channels(&self) -> usize {
+                self.channels
+            }
+            fn reset(&mut self) -> Result<()> {
+                self.resets += 1;
+                Ok(())
+            }
+        }
+        let mut net = caps_net(QuietResetSnn {
+            channels,
+            resets: 0,
+        });
+        net.reset().unwrap();
+        assert_eq!(
+            net.snn.resets, 1,
+            "host must delegate even without with_reset(true)"
+        );
     }
 }
