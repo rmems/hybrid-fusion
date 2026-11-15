@@ -23,8 +23,14 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   implementation (the existing mean-pool → resize → `tanh` path and the pure
   `ProjectionMode` reverse path, bit-identical). `adapter::conformance`
   exports a reusable suite (`assert_domain_adapter_contract(factory)`) that
-  every implementation must pass. Additive only: `HybridNetwork` and
-  `ReverseHybridPath` are not routed through adapters yet.
+  every implementation must pass. `HybridNetwork` gained
+  `with_adapter`/`try_with_adapter` plus `adapter`/`adapter_mut`/`set_adapter`
+  accessors and routes hidden state → stimuli through
+  `encode_stimuli_checked`; `ReverseHybridPath` gained `with_adapter` and the
+  same accessors and routes activity → embedding through
+  `decode_activity_checked`. Both hosts reset adapter state in `reset()`.
+  `new`/`try_new` keep their signatures and default to
+  `PoolResizeTanhAdapter`, so existing behavior is unchanged.
 - **`ResultTrack` on every emitted result** ([#62](https://github.com/rmems/hybrid-fusion/issues/62),
   Linear [RM-2207](https://linear.app/rpd-34/issue/RM-2207); shape from ADR 0001 §5.1):
   new `#[non_exhaustive]` `ResultTrack { Ann, SnnNative, Hybrid }` in

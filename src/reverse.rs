@@ -6,8 +6,8 @@
 //! `forward_activity`). Does not own neuron dynamics or checkpoint I/O.
 //! Dual host alongside [`crate::HybridNetwork`] (ANN → SNN).
 
+use crate::adapter::{DomainAdapter, PoolResizeTanhAdapter, decode_activity_checked};
 use crate::error::{HybridError, Result};
-use crate::projector::project_spike_activity;
 use crate::track::ResultTrack;
 use crate::traits::{ExpertRouter, SpikeActivity};
 use crate::types::{HybridOutput, ProjectionMode};
@@ -44,24 +44,65 @@ pub const WEIGHT_SUM_TOLERANCE: f64 = 8.0 * f32::EPSILON as f64; // ~= 9.54e-7
 ///
 /// Extracted from corinth-canal `Model` (`projector` + `router` half of
 /// `forward_activity`). Does not own neuron dynamics or checkpoint I/O.
-#[derive(Debug)]
+///
+/// The SNN→ANN representation change (spike activity → embedding) is
+/// delegated to the injected [`DomainAdapter`]: [`PoolResizeTanhAdapter`] is
+/// the default and is bit-identical to the original in-line
+/// [`ProjectionMode`] path (RM-1811).
 pub struct ReverseHybridPath<R: ExpertRouter> {
     mode: ProjectionMode,
     n_neurons: usize,
     embed_dim: usize,
     router: R,
     global_step: u64,
+    adapter: Box<dyn DomainAdapter>,
+}
+
+impl<R: ExpertRouter + std::fmt::Debug> std::fmt::Debug for ReverseHybridPath<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReverseHybridPath")
+            .field("mode", &self.mode)
+            .field("n_neurons", &self.n_neurons)
+            .field("embed_dim", &self.embed_dim)
+            .field("router", &self.router)
+            .field("global_step", &self.global_step)
+            .field("adapter_encoding", &self.adapter.encoding())
+            .field("adapter_decoding", &self.adapter.decoding())
+            .finish()
+    }
 }
 
 impl<R: ExpertRouter> ReverseHybridPath<R> {
     /// Rejects `n_neurons == 0` or `embed_dim == 0`.
     /// `n_neurons` is the SNN OUTPUT population (`SpikingNetwork::num_neurons`),
     /// not its input width. `embed_dim` is an independent projection choice.
+    /// Uses the default [`PoolResizeTanhAdapter`] built on `mode`.
     pub fn new(
         mode: ProjectionMode,
         n_neurons: usize,
         embed_dim: usize,
         router: R,
+    ) -> Result<Self> {
+        Self::with_adapter(
+            mode,
+            n_neurons,
+            embed_dim,
+            router,
+            Box::new(PoolResizeTanhAdapter::new(mode)),
+        )
+    }
+
+    /// [`Self::new`] with an injected [`DomainAdapter`] for the SNN→ANN
+    /// representation change. `mode` remains the declared projection mode
+    /// used by [`Self::execution_plan`] and [`Self::mode`]; the adapter
+    /// performs the actual decode in [`Self::forward_activity`]. With the
+    /// default adapter the two coincide.
+    pub fn with_adapter(
+        mode: ProjectionMode,
+        n_neurons: usize,
+        embed_dim: usize,
+        router: R,
+        adapter: Box<dyn DomainAdapter>,
     ) -> Result<Self> {
         if n_neurons == 0 {
             return Err(HybridError::InvalidConfig(
@@ -79,6 +120,7 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
             embed_dim,
             router,
             global_step: 0,
+            adapter,
         })
     }
 
@@ -107,6 +149,22 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
         &mut self.router
     }
 
+    /// The adapter performing the SNN→ANN representation change.
+    pub fn adapter(&self) -> &dyn DomainAdapter {
+        &*self.adapter
+    }
+
+    /// Mutable access to the adapter (e.g. for direct [`DomainAdapter::reset`]).
+    pub fn adapter_mut(&mut self) -> &mut dyn DomainAdapter {
+        &mut *self.adapter
+    }
+
+    /// Replace the adapter. The new one takes effect on the next
+    /// [`Self::forward_activity`]; it is not reset implicitly.
+    pub fn set_adapter(&mut self, adapter: Box<dyn DomainAdapter>) {
+        self.adapter = adapter;
+    }
+
     /// Current global step counter.
     pub fn global_step(&self) -> u64 {
         self.global_step
@@ -114,11 +172,13 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
 
     /// Restore post-construction dynamic state for a new activity sequence.
     ///
-    /// Clears [`Self::global_step`] and calls [`ExpertRouter::reset`] so any
-    /// cross-call router epoch state is dropped. Router **weights / gate
-    /// parameters are not modified**.
+    /// Clears [`Self::global_step`], calls [`ExpertRouter::reset`] so any
+    /// cross-call router epoch state is dropped, and calls
+    /// [`DomainAdapter::reset`] so adapter streaming state is dropped too.
+    /// Router **weights / gate parameters are not modified**.
     pub fn reset(&mut self) {
         self.router.reset();
+        self.adapter.reset();
         self.global_step = 0;
     }
 
@@ -141,7 +201,10 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
     /// Project activity, route through MoE, return `HybridOutput` with MoE fields set.
     ///
     /// Semantics match corinth-canal `Model::forward_activity` (projector + router half):
-    /// 1. `embedding = project_spike_activity(...)`
+    /// 1. `embedding = adapter.decode_activity(...)` — the injected
+    ///    [`DomainAdapter`] (default: the pure [`ProjectionMode`] path,
+    ///    bit-identical to `project_spike_activity`) through the checked
+    ///    entry point
     /// 2. `route = router.route(&embedding)` — **no Sentry capture** on reverse v1
     /// 3. Validate [`ExpertRouteOutput`](crate::ExpertRouteOutput) invariants,
     ///    including that `expert_weights` sums to `1.0` within
@@ -153,14 +216,14 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
     /// 5. Build `HybridOutput` (empty `stimuli`; `fired_neurons` = last non-empty spike step)
     pub fn forward_activity(&mut self, activity: &SpikeActivity) -> Result<HybridOutput> {
         let embedding =
-            project_spike_activity(self.mode, activity, self.n_neurons, self.embed_dim)?;
+            decode_activity_checked(&mut *self.adapter, activity, self.n_neurons, self.embed_dim)?;
 
         // v1: propagate router errors without Sentry (validation-heavy path;
         // avoid flooding on bad activity / empty embeddings).
         let route = self.router.route(&embedding)?;
 
-        // Spike indices are already validated by `spike_activity_features` inside
-        // `project_spike_activity`; `last_fired` is only called after that succeeds.
+        // Spike indices are already validated by `validate_decode_input` inside
+        // `decode_activity_checked`; `last_fired` is only called after that succeeds.
         let fired_neurons = last_fired(&activity.spike_train);
 
         // Defensive validation of the ExpertRouter contract from `src/traits.rs`.
