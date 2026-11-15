@@ -10,6 +10,21 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- **Stage-graph / capability conformance matrix** (Linear
+  [RM-1813](https://linear.app/rpd-34/issue/RM-1813)):
+  `docs/conformance-matrix.md` maps every `StageKind` to its domain contract,
+  the negotiation outcome for each scenario, and the test covering the row —
+  including the ANN↔SNN step contract (issue #61 / PR #65), in-tree report
+  fidelity, and the RM-1421 acceptance list. `tests/conformance_matrix.rs`
+  is the executable side: a total table over `StageKind` (a new variant fails
+  compilation until a row is added), line-for-line golden `describe()` renders
+  of the forward, reverse, and feedback plans, the step-contract fail-closed
+  defaults and `frozen_evaluation` feature gate, and — under
+  `neuromod backends` — a `SimpleSnn`/`NeuromodSnn` report-fidelity check that
+  pins the documented feature gap. It also covers previously untested
+  rejection paths: `UnknownStage` on missing edge endpoints and negotiation
+  requirements, ambiguous unpreferred compatible offers, and an absent
+  preferred backend with no named fallback.
 - **`DomainAdapter` contract** (Linear [RM-1811](https://linear.app/rpd-34/issue/RM-1811)):
   new `src/adapter.rs` defines the ANN↔SNN representation boundary as a trait
   (`encode_stimuli` hidden state → stimuli, `decode_activity` activity →
