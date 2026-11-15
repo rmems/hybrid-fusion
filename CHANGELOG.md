@@ -25,6 +25,23 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   rejection paths: `UnknownStage` on missing edge endpoints and negotiation
   requirements, ambiguous unpreferred compatible offers, and an absent
   preferred backend with no named fallback.
+- **`AxonEncoderAdapter<E>`** (Linear [RM-1811](https://linear.app/rpd-34/issue/RM-1811),
+  feature `axon-encoder`): a `DomainAdapter` whose ANN→SNN encode advances a
+  wrapped `axon_encoder::Encoder` by one `encode_step` tick per call — the
+  crate-adoption path for rate/temporal coding, so no encoders are written
+  in-tree. The mean-pool → resize → `tanh` signal is shared with the
+  reference adapter; each spike contributes `±1.0` to its channel's stimulus
+  with saturation at `±STIMULUS_BOUND`. Convenience constructors cover
+  `RateEncoder` (`rate`), `EmbeddingRateEncoder` (`embedding_rate`), and
+  `TemporalEncoder` (`temporal`, declared `Other("axon_temporal")`);
+  `with_encoder` wraps any configured `Encoder` with a caller-declared
+  `SpikeEncodingKind`. `PopulationEncoder` is rejected at construction (its
+  per-input fan-out can never fit `snn_width`), and `snn_width` above the
+  u16 spike-channel space is a typed error rather than an encoder panic —
+  all rejections run before `encode_step`, so failed calls leave encoder
+  state untouched. SNN→ANN decode stays in-tree via
+  `PoolResizeTanhAdapter`; modulated (`EncodingGains`) paths stay outside
+  the `DomainAdapter` signature and are reachable through `encoder_mut()`.
 - **`DomainAdapter` contract** (Linear [RM-1811](https://linear.app/rpd-34/issue/RM-1811)):
   new `src/adapter.rs` defines the ANN↔SNN representation boundary as a trait
   (`encode_stimuli` hidden state → stimuli, `decode_activity` activity →

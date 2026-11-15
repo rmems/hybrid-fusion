@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 pub mod adapter;
+#[cfg(feature = "axon-encoder")]
+pub mod axon_adapter;
 #[cfg(feature = "backends")]
 pub mod backends;
 pub mod capabilities;
@@ -87,3 +89,9 @@ pub use backends::synthetic_router::SyntheticExpertRouter;
 /// `neuromod` feature. No `neuromod` type crosses this boundary.
 #[cfg(feature = "neuromod")]
 pub use neuromod_adapter::NeuromodSnn;
+
+/// `DomainAdapter` backed by `axon-encoder` sensory encoders, enabled by the
+/// optional `axon-encoder` feature. Encoding is owned by that crate; SNN→ANN
+/// decoding stays in-tree via `PoolResizeTanhAdapter`.
+#[cfg(feature = "axon-encoder")]
+pub use axon_adapter::AxonEncoderAdapter;
