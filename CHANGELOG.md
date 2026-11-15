@@ -23,7 +23,7 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   `neuromod backends` — a `SimpleSnn`/`NeuromodSnn` report-fidelity check that
   pins the documented feature gap. It also covers previously untested
   rejection paths: `UnknownStage` on missing edge endpoints and negotiation
-  requirements, ambiguous unprefered compatible offers, and an absent
+  requirements, ambiguous unpreferred compatible offers, and an absent
   preferred backend with no named fallback.
 - **`DomainAdapter` contract** (Linear [RM-1811](https://linear.app/rpd-34/issue/RM-1811)):
   new `src/adapter.rs` defines the ANN↔SNN representation boundary as a trait

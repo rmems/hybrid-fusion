@@ -96,6 +96,22 @@ fn single_stage_plan(kind: StageKind) -> (HybridExecutionPlan, StageId) {
 
 #[test]
 fn stage_domain_matrix_is_total() {
+    // There is no stable enum iteration (`std::mem::variant_count` is
+    // unstable, issue #73662), so completeness is enforced in two steps:
+    // `expected_domains` fails to compile the moment a `StageKind` variant
+    // appears (exhaustive match — add the row and this constant in the same
+    // edit), and the count + uniqueness check below then rejects a stale or
+    // duplicated `ALL_KINDS` row.
+    const STAGE_KIND_COUNT: usize = 9; // number of `StageKind` variants
+    assert_eq!(
+        ALL_KINDS.len(),
+        STAGE_KIND_COUNT,
+        "a StageKind variant is missing its matrix row"
+    );
+    for (i, kind) in ALL_KINDS.iter().enumerate() {
+        assert!(!ALL_KINDS[..i].contains(kind), "duplicate {kind:?} row");
+    }
+
     for kind in ALL_KINDS {
         let (default, allowed) = expected_domains(kind);
         assert_eq!(kind.default_domain(), default, "{kind:?} default_domain");
@@ -218,7 +234,7 @@ fn requirement_domain_must_equal_the_resolved_domain() {
         if let Some(&alt) = allowed.iter().find(|d| **d != default) {
             let mut graph = StageGraph::new();
             let stage = graph.add_stage("s", kind, PortSpec::any(), PortSpec::any());
-            graph.set_domain(stage, alt);
+            assert!(graph.set_domain(stage, alt), "{kind:?} must pin to {alt:?}");
             let plan = graph.compile().unwrap();
             let err = CapabilityNegotiation::new(FallbackPolicy::Forbid)
                 .offer(BackendId::new("b"), caps_for("b", default))
@@ -521,11 +537,28 @@ impl ExpertRouter for GateRouter {
     }
 }
 
+/// SNN that records how many times `step` ran, so the test can prove the
+/// frozen gate rejects before any backend work advances.
+struct GateSnn {
+    steps: usize,
+}
+
+impl SpikingNetwork for GateSnn {
+    fn step(&mut self, _stimuli: &[f32], _modulators: &NeuroModulators) -> Result<Vec<usize>> {
+        self.steps += 1;
+        Ok(Vec::new())
+    }
+
+    fn num_channels(&self) -> usize {
+        4
+    }
+}
+
 #[test]
 fn frozen_evaluation_is_a_capability_gate_not_a_fallback() {
     let mut router = SpikingExpertRouter::new(
         GateRouter,
-        BareSnn,
+        GateSnn { steps: 0 },
         RateEncoder::default(),
         SpikeCountDecoder,
     )
@@ -540,10 +573,17 @@ fn frozen_evaluation_is_a_capability_gate_not_a_fallback() {
         }
         other => panic!("expected InvalidConfig, got {other:?}"),
     }
+    // The rejection is a pre-step capability gate: the backend never ticked.
+    assert_eq!(
+        router.snn().steps,
+        0,
+        "frozen rejection must precede any backend work"
+    );
     // The same backend's learning path is unaffected.
     router
         .forward(&embedding, &NeuroModulators::default())
         .unwrap();
+    assert_eq!(router.snn().steps, 1);
 }
 
 // ---------------------------------------------------------------------------

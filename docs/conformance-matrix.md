@@ -27,13 +27,13 @@ Legend for the file a covering test lives in:
 
 | StageKind | Default domain | Also allowed | Structural coverage | Negotiation coverage |
 |---|---|---|---|---|
-| `Embedding` | `Ann` | — | cm `stage_domain_matrix_is_total` | cm `negotiation_outcome_matrix`; cn `embedding_requirement_uses_activation_not_token_id_dtype`, `token_width_is_transient_and_never_declared` |
+| `Embedding` | `Ann` | — | cm `stage_domain_matrix_is_total` | cm `negotiation_outcome_matrix`; cn `embedding_requirement_uses_activation_not_token_id_dtype` |
 | `Attention` | `Ann` | — | cm | cm; cn `every_stage_kind_validates_its_numerical_port_dtype` |
 | `DenseMlp` | `Ann` | — | cm | cm; cn `every_stage_kind_validates_its_numerical_port_dtype`, `numerical_stage_width_does_not_match_an_unrelated_axis` |
-| `Transformer` | `Ann` | — | cm; plan `compat_plan_represents_ann_to_snn`; ep `hybrid_network_execution_plan_matches_forward_flow`; tp `compatible_ann_dimensions_tie_forced_architecture` | cm; cn `canonical_plan_metadata_constrains_backend_dimensions`, `canonical_plan_checks_backend_dtype_on_numerical_ports`, `canonical_transformer_requires_its_configured_sequence_capacity`, `canonical_transformer_accepts_a_shorter_declared_window`, `requirement_must_match_fixed_transformer_output_port` |
+| `Transformer` | `Ann` | — | cm; plan `compat_plan_represents_ann_to_snn`; ep `hybrid_network_execution_plan_matches_forward_flow`; tp `programmatic_topology_matches_hybrid_config_plan` | cm; cn `canonical_plan_metadata_constrains_backend_dimensions`, `canonical_plan_checks_backend_dtype_on_numerical_ports`, `canonical_transformer_requires_its_configured_sequence_capacity`, `requirement_must_match_fixed_transformer_output_port` |
 | `MoeRouter` | `Moe` | `Ann` | cm; plan `compat_plan_represents_reverse_flow`; ep `reverse_path_execution_plan_without_new_host` | cm; cn `every_stage_kind_validates_its_numerical_port_dtype` |
 | `MoeExperts` | `Moe` | `Ann` | cm | cm; cn `every_stage_kind_validates_its_numerical_port_dtype` |
-| `Adaptation` | `Adapter` | `Ann` | cm; plan `compat_plan_domain_overrides_from_topology`, `adapter_width_is_checked_before_contract` | cm; cn `canonical_forward_projector_requires_transformer_hidden_width`, `canonical_reverse_projector_requires_activity_population`, `dtype_conversion_requires_backend_support_for_both_ports`, `resolved_symbolic_width_constrains_negotiation` |
+| `Adaptation` | `Adapter` | `Ann` | cm; plan `compat_plan_represents_ann_to_snn`, `compat_plan_represents_reverse_flow` | cm; cn `canonical_forward_projector_requires_transformer_hidden_width`, `canonical_reverse_projector_requires_activity_population`, `dtype_conversion_requires_backend_support_for_both_ports`, `resolved_symbolic_width_constrains_negotiation` |
 | `SpikingBlock` | `Snn` | — | cm; plan `rejects_incompatible_contract` | cm; cn `requirement_must_match_fixed_snn_input_port`, `channel_width_mismatch_names_both_sides`, `output_population_is_checked_apart_from_stimulus_width`, `reverse_path_neuron_metadata_constrains_negotiation` |
 | `Readout` | `Ann` | `Adapter` | cm; plan `domain_hook_allows_permitted_override` | cm; cn `every_stage_kind_validates_its_numerical_port_dtype` |
 
