@@ -143,13 +143,7 @@ pub fn spike_activity_features(
     activity: &SpikeActivity,
     n_neurons: usize,
 ) -> Result<Vec<f32>> {
-    if n_neurons == 0 {
-        return Err(HybridError::InvalidConfig(
-            "spike_activity_features: n_neurons must be > 0".into(),
-        ));
-    }
-    validate_potential_vectors(activity, n_neurons)?;
-    validate_spike_train(activity, n_neurons)?;
+    validate_activity(activity, n_neurons, "spike_activity_features")?;
 
     match mode {
         ProjectionMode::RateSum | ProjectionMode::SpikingTernary => {
@@ -165,6 +159,25 @@ pub fn spike_activity_features(
     }
 }
 
+/// Full [`spike_activity_features`] input contract (everything under
+/// "Input contract" there): `n_neurons > 0`, potential vectors, spike train.
+/// Shared with the [`crate::DomainAdapter`] decode validation so both entry
+/// points reject exactly the same activity records. `api` is the caller's
+/// name; it prefixes every error message so each entry point names itself.
+pub(crate) fn validate_activity(
+    activity: &SpikeActivity,
+    n_neurons: usize,
+    api: &str,
+) -> Result<()> {
+    if n_neurons == 0 {
+        return Err(HybridError::InvalidConfig(format!(
+            "{api}: n_neurons must be > 0"
+        )));
+    }
+    validate_potential_vectors(activity, n_neurons, api)?;
+    validate_spike_train(activity, n_neurons, api)
+}
+
 /// Potential-vector half of the [`spike_activity_features`] input contract.
 ///
 /// `potentials` must be exactly `n_neurons` long and finite. `iz_potentials`,
@@ -172,8 +185,8 @@ pub fn spike_activity_features(
 /// `n_neurons` long and finite — a documented ignore kept for trace/serde
 /// fidelity. Rejecting a malformed length here (rather than ignoring it) is
 /// what keeps the "silently ignored 99-element vector" case impossible.
-/// Error messages name the public entry point, [`spike_activity_features`].
-fn validate_potential_vectors(activity: &SpikeActivity, n_neurons: usize) -> Result<()> {
+/// Error messages are prefixed with `api`, the calling entry point's name.
+fn validate_potential_vectors(activity: &SpikeActivity, n_neurons: usize, api: &str) -> Result<()> {
     if activity.potentials.len() != n_neurons {
         return Err(HybridError::InputLengthMismatch {
             expected: n_neurons,
@@ -183,7 +196,7 @@ fn validate_potential_vectors(activity: &SpikeActivity, n_neurons: usize) -> Res
     for (i, &v) in activity.potentials.iter().enumerate() {
         if !v.is_finite() {
             return Err(HybridError::InvalidConfig(format!(
-                "spike_activity_features: non-finite potential at index {i}"
+                "{api}: non-finite potential at index {i}"
             )));
         }
     }
@@ -197,7 +210,7 @@ fn validate_potential_vectors(activity: &SpikeActivity, n_neurons: usize) -> Res
         for (i, &v) in activity.iz_potentials.iter().enumerate() {
             if !v.is_finite() {
                 return Err(HybridError::InvalidConfig(format!(
-                    "spike_activity_features: non-finite iz_potential at index {i}"
+                    "{api}: non-finite iz_potential at index {i}"
                 )));
             }
         }
@@ -212,20 +225,20 @@ fn validate_potential_vectors(activity: &SpikeActivity, n_neurons: usize) -> Res
 /// `InvalidConfig` naming the neuron and step — never collapsed — mirroring
 /// the forward host's at-most-once-per-tick rule
 /// ([`HybridError::SnnDuplicateSpike`], RM-2205), so a multiset cannot be
-/// recorded as a faithful tick (RM-1445). Error messages name the public
-/// entry point, [`spike_activity_features`].
-fn validate_spike_train(activity: &SpikeActivity, n_neurons: usize) -> Result<()> {
+/// recorded as a faithful tick (RM-1445). Error messages are prefixed with
+/// `api`, the calling entry point's name.
+fn validate_spike_train(activity: &SpikeActivity, n_neurons: usize, api: &str) -> Result<()> {
     for (t, step) in activity.spike_train.iter().enumerate() {
         if let Some(&idx) = step.iter().find(|&&i| i >= n_neurons) {
             return Err(HybridError::InvalidConfig(format!(
-                "spike_activity_features: spike index {idx} out of range at step {t} (n_neurons={n_neurons})"
+                "{api}: spike index {idx} out of range at step {t} (n_neurons={n_neurons})"
             )));
         }
         let mut seen = std::collections::HashSet::with_capacity(step.len());
         for &idx in step {
             if !seen.insert(idx) {
                 return Err(HybridError::InvalidConfig(format!(
-                    "spike_activity_features: spike index {idx} appears more than once at \
+                    "{api}: spike index {idx} appears more than once at \
                      step {t} (a timestep is a set; a neuron fires at most once per tick)"
                 )));
             }

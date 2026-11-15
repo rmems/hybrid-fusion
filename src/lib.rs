@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+pub mod adapter;
 #[cfg(feature = "backends")]
 pub mod backends;
 pub mod capabilities;
@@ -22,6 +23,11 @@ pub mod traits;
 pub mod types;
 mod validate;
 
+pub use adapter::{
+    DomainAdapter, MAX_ADAPTER_WIDTH, PoolResizeTanhAdapter, STIMULUS_BOUND,
+    decode_activity_checked, encode_stimuli_checked, validate_decode_input, validate_embedding,
+    validate_encode_input, validate_stimuli, validate_stimulus_range,
+};
 pub use capabilities::{
     BackendCapabilities, BackendId, CapabilityNegotiation, DeviceHint, FallbackPolicy,
     NegotiationOutcome, NegotiationReport, RequiredFeature, StageRequirement,
