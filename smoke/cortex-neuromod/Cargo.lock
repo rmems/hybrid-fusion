@@ -9,6 +9,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "axon-encoder"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9a7cc719717f712b69baf57edb06c056b390a5a23c3fdca39d6e35f9ff59733"
+dependencies = [
+ "rand",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -36,6 +45,7 @@ name = "cortex-tensor"
 version = "0.1.0"
 source = "git+https://github.com/rmems/cortex-tensor?rev=74d63ee0430bcc11486ceff302e0816a9628559f#74d63ee0430bcc11486ceff302e0816a9628559f"
 dependencies = [
+ "axon-encoder",
  "engram-parser",
  "neuromod",
  "rand",
@@ -120,6 +130,7 @@ dependencies = [
 name = "hybrid-fusion"
 version = "0.3.0"
 dependencies = [
+ "axon-encoder",
  "neuromod",
  "serde",
  "serde_json",
@@ -130,6 +141,7 @@ dependencies = [
 name = "hybrid-fusion-cortex-neuromod-smoke"
 version = "0.0.0"
 dependencies = [
+ "axon-encoder",
  "cortex-tensor",
  "hybrid-fusion",
  "neuromod",

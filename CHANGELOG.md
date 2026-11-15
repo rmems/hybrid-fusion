@@ -35,11 +35,20 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   `RateEncoder` (`rate`), `EmbeddingRateEncoder` (`embedding_rate`), and
   `TemporalEncoder` (`temporal`, declared `Other("axon_temporal")`);
   `with_encoder` wraps any configured `Encoder` with a caller-declared
-  `SpikeEncodingKind`. `PopulationEncoder` is rejected at construction (its
-  per-input fan-out can never fit `snn_width`), and `snn_width` above the
-  u16 spike-channel space is a typed error rather than an encoder panic —
-  all rejections run before `encode_step`, so failed calls leave encoder
-  state untouched. SNN→ANN decode stays in-tree via
+  `SpikeEncodingKind`. Construction rejects a multi-neuron
+  `PopulationEncoder` (its per-input fan-out can never fit `snn_width`; a
+  single-neuron population maps channels 1:1 and is accepted) and any
+  encoder whose `time_model` spans more than one tick per call, since
+  intra-call spike timing cannot survive the stimulus representation.
+  `encode_stimuli` rejects `snn_width` above the u16 spike-channel space
+  and, for channel-fixed encoders, a `snn_width` that differs from the
+  configured channel count — a typed error rather than an encoder panic or
+  silently dropped lanes. `E: Clone` lets the adapter snapshot the encoder
+  before `encode_step` and restore it on the one post-encode rejection
+  (an out-of-range spike channel from a misbehaving `Encoder`), so every
+  failed call leaves encoder state untouched; spike contributions are
+  netted per channel and clamped once at `±STIMULUS_BOUND`, making the
+  result order-independent. SNN→ANN decode stays in-tree via
   `PoolResizeTanhAdapter`; modulated (`EncodingGains`) paths stay outside
   the `DomainAdapter` signature and are reachable through `encoder_mut()`.
 - **`DomainAdapter` contract** (Linear [RM-1811](https://linear.app/rpd-34/issue/RM-1811)):

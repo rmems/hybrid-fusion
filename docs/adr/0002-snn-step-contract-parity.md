@@ -92,7 +92,7 @@ Drift is prevented mechanically, not by prose:
 | `DEFAULT_SPIKE_BOOST = 1.0`, `with_spike_boost` (finite, ≥ 0) | `DEFAULT_SPIKE_BOOST = 1.0`, `with_spike_boost` (finite, ≥ 0) | identical |
 | `MoeOutput { expert_weights, selected_experts, hidden: Vec<f32> }` | `SpikingRouteOutput { route: ExpertRouteOutput, fired_neurons, num_neurons, hidden_gain: f32 }` | same boosted softmax weights and selection; hidden state vs scalar gain (§4.4), plus entropy + fired IDs on the hybrid-fusion side |
 | `NeuromodNetwork` (`new(num_lif, num_izh, num_channels)`, `from_network`, `with_seed`) | `NeuromodSnn` (`with_seed(channels, neurons, seed)`, `identity_wired(channels, seed)`, `reseed`) | both wrap `neuromod::SpikingNetwork`; wiring and reset semantics differ (§4.3, §4.5) |
-| `src/snn/axon_adapter.rs` (`AxonEncoder` over `axon-encoder`, feature `axon-encoder`) | — | no hybrid-fusion counterpart; cortex-tensor-only adapter, out of this mapping's parity scope |
+| `src/snn/axon_adapter.rs` (`AxonEncoder<E: SnnEncoder-facing axon_encoder::Encoder>`, feature `axon-encoder`) | `src/axon_adapter.rs` (`AxonEncoderAdapter<E: axon_encoder::Encoder>` as `DomainAdapter`, feature `axon-encoder`) | same bridge — one `encode_step` per call, `±1.0` per spike into a per-channel stimulus, `reset` delegates. Layer differences: the cortex side takes a ready `ann_signal`, while the hybrid side's `DomainAdapter` input is a hidden `Tensor` it pools, resizes, and `tanh`s first (the parity test feeds the tanh'd signal so both steps see identical input); the hybrid side nets contributions then clamps at `±STIMULUS_BOUND` (identical while the net stays in bounds), snapshots encoder state for failure atomicity, and rejects a multi-neuron `PopulationEncoder`, multi-tick `time_model`s, and channel-count mismatches that the cortex side reports at encode time |
 | `CortexError::{SnnBackend, SnnChannelMismatch, SnnNan, SnnInvalidStimulus, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnReadoutLength, SnnInvalidReadout}` | `HybridError::{SnnStep, ConfigMismatch, NonFinite, SnnSpikeOutOfRange, SnnDuplicateSpike, InputLengthMismatch, SnnInvalidReadout}` | same failure conditions except the ±Inf stimulus policy (§4.6); both hosts reject NaN before the tick and validate spikes/readouts after it. `neuromod::StepError` mapping: cortex-tensor maps `InputLenMismatch` → `InputLengthMismatch` and `NonFiniteStimulus` → `SnnInvalidStimulus`, the rest stay `SnnBackend` (RM-2364); hybrid-fusion maps `InputLenMismatch` → `InputLengthMismatch` and every other variant, `NonFiniteStimulus` included, to `SnnStep` |
 
 ## 4. Intentional differences
@@ -222,6 +222,10 @@ All four fixes exist on **both** sides; the parity tests keep it that way:
   rule postdates it; this series performs the catch-up. Future pin bumps
   must keep the parity tests green, and a green gate against a stale pin
   only proves agreement with the pinned tree, not with cortex-tensor `main`.
-- `AxonEncoder` (cortex-tensor, `axon-encoder` feature) has no
-  hybrid-fusion counterpart and is out of parity scope; if it ever grows one,
-  extend §3 and the parity tests in the same PR.
+- `AxonEncoder` (cortex-tensor, `axon-encoder` feature) now has a
+  hybrid-fusion counterpart, `AxonEncoderAdapter` (`axon-encoder` feature),
+  added with RM-1811. §3 carries the row and
+  `smoke/cortex-neuromod/tests/snn_contract_parity.rs` replays identical
+  `EmbeddingRateEncoder` instances through both adapters, pinning the shared
+  `encode_step` → `±1.0`-per-channel bridge across streaming ticks and
+  `reset`.

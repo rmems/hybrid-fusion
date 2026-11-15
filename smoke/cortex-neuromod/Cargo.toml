@@ -19,7 +19,7 @@ license = "MIT OR Apache-2.0"
 [workspace]
 
 [dependencies]
-hybrid-fusion = { path = "../..", features = ["neuromod"] }
+hybrid-fusion = { path = "../..", features = ["neuromod", "axon-encoder"] }
 # cortex-tensor 0.1.0 is not on crates.io (index 404 as of 2026-10-02).
 # Authorized by issue #45 as a test-only harness, not a library dependency.
 # The `neuromod` feature turns on `snn::NeuromodNetwork` for the parity
@@ -34,7 +34,12 @@ hybrid-fusion = { path = "../..", features = ["neuromod"] }
 # (RM-2208's bump and its RM-2364 follow-up, landed with RM-2360).
 cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", rev = "74d63ee0430bcc11486ceff302e0816a9628559f", features = [
     "neuromod",
+    "axon-encoder",
 ] }
+# Direct test-only dependency for the encoder-adapter parity test: both
+# crates' axon adapters wrap the same published axon-encoder 0.6 Encoder
+# type, so constructing encoders here feeds identical instances to each side.
+axon-encoder = "0.6"
 # Direct test-only dependency for the parity tests: constructing a blank
 # `neuromod::SpikingNetwork` proves cortex-tensor's public #91 rejection.
 # Resolves to the same published neuromod 0.7 both crates already depend on.

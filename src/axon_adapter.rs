@@ -24,23 +24,39 @@
 //!   `encode_step`, so stateful encoders (membrane potentials, phase
 //!   accumulators, history windows) carry across calls — this is what makes
 //!   the adapter stateful rather than a per-call projection.
-//! - **Failure atomicity.** Every validation that can reject the call runs
-//!   *before* `encode_step`, because encoder state is not snapshotable: a
-//!   rejected call leaves the encoder exactly as it was. The single
-//!   post-encode error — a spike channel outside `0..snn_width` — cannot be
-//!   produced by any conforming `axon-encoder` encoder (channels are input
-//!   indices, and the input is exactly `snn_width` wide); it exists to keep a
-//!   misbehaving out-of-crate [`Encoder`] from corrupting the stimulus width
-//!   silently, and it is the one path on which adapter state may have moved.
+//! - **Failure atomicity.** The adapter requires `E: Clone` and takes one
+//!   snapshot of the encoder before `encode_step`; every rejection — input
+//!   validation, the `snn_width` checks, and the post-encode spike-channel
+//!   check — either runs before the step or restores the snapshot, so a call
+//!   that returns `Err` leaves the encoder exactly as it was. (The
+//!   spike-channel error cannot be produced by any conforming `axon-encoder`
+//!   encoder — channels are input indices, and the input is exactly
+//!   `snn_width` wide; it exists to keep a misbehaving out-of-crate
+//!   [`Encoder`] from corrupting the stimulus width silently.) A *successful*
+//!   encode is different: if a host call fails later — say the SNN `step`
+//!   rejects — the consumed encoder tick stays consumed, since there is no
+//!   adapter-level way to know the step failed. Hosts that need an all-or-
+//!   nothing forward can `reset()` or re-create the adapter.
 //! - **Panics avoided.** `axon-encoder` 0.6 panics on two input shapes that
 //!   this adapter rejects first with [`HybridError::InvalidConfig`]:
 //!   `EmbeddingRateEncoder` and `DerivativeEncoder` `expect` a `u16` channel
 //!   index, so `snn_width` is capped at
 //!   [`MAX_ENCODER_CHANNEL_INPUTS`]; and [`PopulationEncoder`] fans each input
-//!   out to `num_neurons` spike channels, which can never fit the
-//!   `snn_width`-wide stimulus, so wrapping one is rejected at construction
-//!   (the [`Encoder`] trait does not report widths, so the check downcasts —
-//!   the same approach cortex-tensor's `AxonEncoder` takes).
+//!   out to `num_neurons` spike channels, which cannot fit the
+//!   `snn_width`-wide stimulus unless `num_neurons == 1`, so only a
+//!   multi-neuron population is rejected at construction (the [`Encoder`]
+//!   trait does not report widths, so the check downcasts — the same approach
+//!   cortex-tensor's `AxonEncoder` takes). The downcast sees through exactly
+//!   one layer: a caller can wrap a `PopulationEncoder` in a delegating
+//!   newtype and bypass the guard — its out-of-range spikes are then caught
+//!   by the post-encode channel check (still a typed error, still atomic via
+//!   the snapshot), just not refused up front.
+//! - **Spike timing.** This adapter accumulates spikes into a stimulus
+//!   vector, which has no place to carry [`SpikeEvent::timestamp`]. An
+//!   encoder whose [`Encoder::time_model`] spans more than one tick per call
+//!   (`LatencyEncoder`, say) emits intra-call timing this representation
+//!   cannot preserve, so `with_encoder` rejects it at construction rather
+//!   than silently flattening a latency-coded signal.
 //! - **Modulated paths.** [`ModulatedEncoder`] gain calls are not part of the
 //!   [`DomainAdapter`] signature (the hooks carry no neuromodulator state), so
 //!   this adapter never calls them. Callers that need gain modulation drive
@@ -94,6 +110,13 @@ pub struct AxonEncoderAdapter<E> {
     encoder: E,
     kind: SpikeEncodingKind,
     decode: PoolResizeTanhAdapter,
+    /// Channel-fixed encoders (`EmbeddingRateEncoder`, `TemporalEncoder`)
+    /// silently drop signal lanes past their configured count, so those
+    /// constructors record the count here and `encode_stimuli` rejects a
+    /// mismatched `snn_width`. `None` for width-agnostic encoders
+    /// (`RateEncoder` sizes itself to the input) and `with_encoder`, whose
+    /// caller owns the width contract.
+    channels: Option<usize>,
 }
 
 impl<E: Encoder + 'static> AxonEncoderAdapter<E> {
@@ -101,20 +124,44 @@ impl<E: Encoder + 'static> AxonEncoderAdapter<E> {
     /// plan-visible [`SpikeEncodingKind`]. `mode` selects the in-tree
     /// decode path (see [`PoolResizeTanhAdapter`]).
     ///
-    /// Rejects [`PopulationEncoder`]: it fans each input out to `num_neurons`
-    /// spike channels (`input_index * num_neurons + neuron`), so its channel
-    /// space can never fit inside the `snn_width`-wide stimulus a
-    /// [`DomainAdapter`] must emit.
+    /// Rejects a [`PopulationEncoder`] with `num_neurons > 1`: it fans each
+    /// input out to `num_neurons` spike channels
+    /// (`input_index * num_neurons + neuron`), which cannot fit the
+    /// `snn_width`-wide stimulus a [`DomainAdapter`] must emit. A
+    /// single-neuron population maps channels 1:1 and is accepted.
+    ///
+    /// Also rejects an encoder whose [`Encoder::time_model`] spans more than
+    /// one tick per call: its spikes carry intra-call timing the stimulus
+    /// representation cannot preserve (see the module docs).
     pub fn with_encoder(encoder: E, kind: SpikeEncodingKind, mode: ProjectionMode) -> Result<Self> {
-        if (&encoder as &dyn Any)
-            .downcast_ref::<PopulationEncoder>()
-            .is_some()
+        Self::with_channels(encoder, kind, mode, None)
+    }
+
+    /// Shared constructor. `channels` is the encoder's fixed channel count
+    /// when the caller configured one; `encode_stimuli` then requires
+    /// `snn_width == channels` rather than letting lanes drop silently.
+    fn with_channels(
+        encoder: E,
+        kind: SpikeEncodingKind,
+        mode: ProjectionMode,
+        channels: Option<usize>,
+    ) -> Result<Self> {
+        if let Some(population) = (&encoder as &dyn Any).downcast_ref::<PopulationEncoder>()
+            && population.num_neurons() > 1
         {
+            return Err(HybridError::InvalidConfig(format!(
+                "axon-encoder PopulationEncoder maps each input to {} spike \
+                     channels, which cannot fit the snn_width-wide DomainAdapter \
+                     stimulus; wrap a single-channel encoder (RateEncoder, \
+                     TemporalEncoder, EmbeddingRateEncoder, …)",
+                population.num_neurons()
+            )));
+        }
+        if encoder.time_model().span_ticks() > 1 {
             return Err(HybridError::InvalidConfig(
-                "axon-encoder PopulationEncoder maps each input to num_neurons spike \
-                 channels, which cannot fit the snn_width-wide DomainAdapter stimulus; \
-                 wrap a single-channel encoder (RateEncoder, LatencyEncoder, \
-                 TemporalEncoder, EmbeddingRateEncoder, …)"
+                "axon-encoder encoder emits spikes at intra-call tick offsets the \
+                 DomainAdapter stimulus vector cannot preserve (e.g. LatencyEncoder); \
+                 wrap an encoder whose time_model spans a single tick per call"
                     .into(),
             ));
         }
@@ -122,6 +169,7 @@ impl<E: Encoder + 'static> AxonEncoderAdapter<E> {
             encoder,
             kind,
             decode: PoolResizeTanhAdapter::new(mode),
+            channels,
         })
     }
 
@@ -175,26 +223,27 @@ impl AxonEncoderAdapter<AxonRateEncoder> {
 impl AxonEncoderAdapter<EmbeddingRateEncoder> {
     /// Integrate-and-fire rate adapter over [`EmbeddingRateEncoder`]: each
     /// channel accumulates its input into a persistent membrane potential and
-    /// emits a step-start spike when it crosses `v_th`. `num_channels` bounds
-    /// which of the `snn_width` signal lanes can ever fire; a `snn_width`
-    /// larger than `num_channels` leaves the tail channels silent (the
-    /// encoder ignores inputs past its channel count — this adapter does not
-    /// error on the mismatch, since silence is representable, but callers
-    /// normally size `num_channels == snn_width`).
+    /// emits a step-start spike when it crosses `v_th`. `num_channels` is the
+    /// encoder's fixed channel count; `encode_stimuli` then requires
+    /// `snn_width == num_channels` — a mismatch is a typed error, not silent
+    /// lanes.
     pub fn embedding_rate(num_channels: usize, v_th: f32, mode: ProjectionMode) -> Result<Self> {
         let encoder = EmbeddingRateEncoder::try_new(num_channels, EmbeddingEncoderConfig { v_th })
             .map_err(|e| HybridError::InvalidConfig(e.to_string()))?;
-        Self::with_encoder(encoder, SpikeEncodingKind::Rate, mode)
+        Self::with_channels(encoder, SpikeEncodingKind::Rate, mode, Some(num_channels))
     }
 }
 
 impl AxonEncoderAdapter<TemporalEncoder> {
     /// Change-threshold temporal adapter over [`TemporalEncoder`]: a channel
-    /// fires when its recent signal history crosses a `change_threshold`, at
-    /// the latency that threshold carries. `history_depth` must be `>= 6`;
-    /// `change_thresholds` are `(threshold, tick)` pairs; `num_channels`
-    /// bounds which signal lanes carry history (same sizing rule as
-    /// [`embedding_rate`](Self::embedding_rate)).
+    /// fires at step start when its recent signal history crosses a
+    /// `change_threshold`. `history_depth` must be `>= 6`;
+    /// `change_thresholds` are `(threshold, spike_value)` pairs — note the
+    /// second member is unused by axon-encoder 0.6 (`_spike_val` in the
+    /// crate's emit loop), so only the thresholds have an effect.
+    /// `num_channels` is the encoder's fixed channel count; `encode_stimuli`
+    /// then requires `snn_width == num_channels` — a mismatch is a typed
+    /// error, not silent lanes.
     ///
     /// Declared kind is `Other("axon_temporal")`: the scheme is
     /// change/threshold-driven, not the signal-proportional latency coding
@@ -207,20 +256,28 @@ impl AxonEncoderAdapter<TemporalEncoder> {
     ) -> Result<Self> {
         let encoder = TemporalEncoder::try_new(history_depth, change_thresholds, num_channels)
             .map_err(|e| HybridError::InvalidConfig(e.to_string()))?;
-        Self::with_encoder(
+        Self::with_channels(
             encoder,
             SpikeEncodingKind::Other("axon_temporal".into()),
             mode,
+            Some(num_channels),
         )
     }
 }
 
-impl<E: Encoder + Send + 'static> DomainAdapter for AxonEncoderAdapter<E> {
+impl<E: Encoder + Send + Clone + 'static> DomainAdapter for AxonEncoderAdapter<E> {
     fn encode_stimuli(&mut self, hidden: &Tensor, snn_width: usize) -> Result<Vec<f32>> {
         validate_encode_input(hidden, snn_width)?;
         if snn_width > MAX_ENCODER_CHANNEL_INPUTS {
             return Err(HybridError::InvalidConfig(format!(
                 "snn_width {snn_width} exceeds axon-encoder's {MAX_ENCODER_CHANNEL_INPUTS}-channel u16 spike-id space"
+            )));
+        }
+        if let Some(channels) = self.channels
+            && channels != snn_width
+        {
+            return Err(HybridError::InvalidConfig(format!(
+                "snn_width {snn_width} does not match the encoder's {channels}-channel configuration"
             )));
         }
         let pooled = projector::mean_pool(hidden);
@@ -231,17 +288,26 @@ impl<E: Encoder + Send + 'static> DomainAdapter for AxonEncoderAdapter<E> {
             *v = v.tanh();
         }
         // Commit point: every check above ran before encoder state advances.
+        // The snapshot restores state if the spike-channel check below fails,
+        // so the whole call stays failure-atomic.
+        let snapshot = self.encoder.clone();
         let output = self.encoder.encode_step(&signal);
-        let mut stimuli = vec![0.0f32; snn_width];
+        let mut net = vec![0i64; snn_width];
         for spike in &output.spikes {
             let index = usize::from(spike.channel);
             if index >= snn_width {
+                self.encoder = snapshot;
                 return Err(HybridError::InvalidConfig(format!(
                     "axon-encoder emitted spike channel {index} outside the {snn_width}-wide stimulus"
                 )));
             }
-            stimuli[index] = (stimuli[index] + if spike.polarity { 1.0 } else { -1.0 })
-                .clamp(-STIMULUS_BOUND, STIMULUS_BOUND);
+            net[index] += if spike.polarity { 1 } else { -1 };
+        }
+        // Net first, then clamp once: per-spike clamping would make a
+        // channel's stimulus depend on spike order.
+        let mut stimuli = vec![0.0f32; snn_width];
+        for (stimulus, count) in stimuli.iter_mut().zip(&net) {
+            *stimulus = (*count).clamp(-1, 1) as f32;
         }
         validate_stimuli(&stimuli, snn_width)?;
         Ok(stimuli)
@@ -278,6 +344,7 @@ impl<E: Encoder + Send + 'static> DomainAdapter for AxonEncoderAdapter<E> {
 mod tests {
     use super::*;
     use crate::adapter::conformance::check_domain_adapter_contract;
+    use axon_encoder::prelude::{EncodedOutput, LatencyEncoder, SpikeEvent};
 
     fn hidden() -> Tensor {
         Tensor::from_vec(vec![0.2, -0.4, 0.7, -0.1, 0.9, 0.0], &[2, 3])
@@ -293,8 +360,9 @@ mod tests {
 
     #[test]
     fn embedding_rate_adapter_passes_the_conformance_suite() {
+        // The suite's default snn_width is 8, matching num_channels = 8.
         check_domain_adapter_contract(|| {
-            AxonEncoderAdapter::embedding_rate(4, 0.4, ProjectionMode::RateSum)
+            AxonEncoderAdapter::embedding_rate(8, 0.4, ProjectionMode::RateSum)
                 .expect("embedding rate adapter")
         })
         .unwrap_or_else(|v| panic!("{v}"));
@@ -303,7 +371,7 @@ mod tests {
     #[test]
     fn temporal_adapter_passes_the_conformance_suite() {
         check_domain_adapter_contract(|| {
-            AxonEncoderAdapter::temporal(6, vec![(0.1, 0), (0.5, 3)], 4, ProjectionMode::RateSum)
+            AxonEncoderAdapter::temporal(6, vec![(0.1, 0), (0.5, 3)], 8, ProjectionMode::RateSum)
                 .expect("temporal adapter")
         })
         .unwrap_or_else(|v| panic!("{v}"));
@@ -356,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn population_encoder_is_rejected_at_construction() {
+    fn population_encoder_fanout_above_one_is_rejected_at_construction() {
         let encoder = PopulationEncoder::try_new(2, (0.0, 1.0), 0.5).expect("population encoder");
         let result = AxonEncoderAdapter::with_encoder(
             encoder,
@@ -368,6 +436,48 @@ mod tests {
             Err(other) => panic!("expected InvalidConfig, got {other}"),
             Ok(_) => panic!("PopulationEncoder must be rejected at construction"),
         }
+    }
+
+    #[test]
+    fn single_neuron_population_encoder_maps_channels_one_to_one() {
+        let encoder = PopulationEncoder::try_new(1, (0.0, 1.0), 0.5).expect("population encoder");
+        let mut adapter = AxonEncoderAdapter::with_encoder(
+            encoder,
+            SpikeEncodingKind::Population,
+            ProjectionMode::RateSum,
+        )
+        .expect("num_neurons == 1 maps channels 1:1");
+        let stimuli = adapter.encode_stimuli(&hidden(), 3).unwrap();
+        assert_eq!(stimuli.len(), 3);
+        assert!(stimuli.iter().all(|v| v.abs() <= STIMULUS_BOUND));
+    }
+
+    #[test]
+    fn latency_encoder_is_rejected_for_its_discarded_timing() {
+        let encoder = LatencyEncoder::try_new(9, (-1.0, 1.0)).expect("latency encoder");
+        let result = AxonEncoderAdapter::with_encoder(
+            encoder,
+            SpikeEncodingKind::Latency,
+            ProjectionMode::RateSum,
+        );
+        match result {
+            Err(HybridError::InvalidConfig(_)) => {}
+            Err(other) => panic!("expected InvalidConfig, got {other}"),
+            Ok(_) => panic!("multi-tick time models must be rejected at construction"),
+        }
+    }
+
+    #[test]
+    fn snn_width_must_match_a_channel_fixed_encoder() {
+        let mut adapter =
+            AxonEncoderAdapter::embedding_rate(4, 0.4, ProjectionMode::RateSum).unwrap();
+        for width in [3usize, 5] {
+            let err = adapter
+                .encode_stimuli(&hidden(), width)
+                .expect_err("channel mismatch must error");
+            assert!(matches!(err, HybridError::InvalidConfig(_)));
+        }
+        assert!(adapter.encode_stimuli(&hidden(), 4).is_ok());
     }
 
     #[test]
@@ -393,5 +503,72 @@ mod tests {
             SpikeEncodingKind::Other("axon_temporal".into())
         );
         assert_eq!(adapter.decoding(), adapter.decode.decoding());
+    }
+
+    /// Emits fixed mixed-polarity spikes on channel 0 regardless of input.
+    #[derive(Clone)]
+    struct MixedSpikeEncoder;
+
+    impl Encoder for MixedSpikeEncoder {
+        fn encode(&mut self, _input: &[f32]) -> EncodedOutput {
+            let mut output = EncodedOutput::new();
+            for polarity in [true, true, false] {
+                output.spikes.push(SpikeEvent::new(0, 0u64, polarity));
+            }
+            output
+        }
+
+        fn reset(&mut self) {}
+    }
+
+    #[test]
+    fn mixed_polarity_spikes_net_before_clamping() {
+        let mut adapter = AxonEncoderAdapter::with_encoder(
+            MixedSpikeEncoder,
+            SpikeEncodingKind::Rate,
+            ProjectionMode::RateSum,
+        )
+        .unwrap();
+        let stimuli = adapter.encode_stimuli(&hidden(), 3).unwrap();
+        // +1 +1 -1 nets to +1; clamping each spike in order would give 0.
+        assert_eq!(stimuli[0], 1.0);
+    }
+
+    /// Counts calls and emits an out-of-range spike once `calls` reaches 2.
+    #[derive(Clone)]
+    struct CountingRogueEncoder {
+        calls: usize,
+    }
+
+    impl Encoder for CountingRogueEncoder {
+        fn encode(&mut self, _input: &[f32]) -> EncodedOutput {
+            self.calls += 1;
+            let mut output = EncodedOutput::new();
+            let channel = if self.calls >= 2 { u16::MAX } else { 0 };
+            output.spikes.push(SpikeEvent::new(channel, 0u64, true));
+            output
+        }
+
+        fn reset(&mut self) {
+            self.calls = 0;
+        }
+    }
+
+    #[test]
+    fn out_of_range_channel_restores_pre_step_encoder_state() {
+        let mut adapter = AxonEncoderAdapter::with_encoder(
+            CountingRogueEncoder { calls: 0 },
+            SpikeEncodingKind::Rate,
+            ProjectionMode::RateSum,
+        )
+        .unwrap();
+        adapter.encode_stimuli(&hidden(), 3).unwrap();
+        assert_eq!(adapter.encoder().calls, 1);
+        let err = adapter
+            .encode_stimuli(&hidden(), 3)
+            .expect_err("out-of-range channel must error");
+        assert!(matches!(err, HybridError::InvalidConfig(_)));
+        // The failed call must not have consumed a tick: state rolled back.
+        assert_eq!(adapter.encoder().calls, 1);
     }
 }
