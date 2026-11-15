@@ -28,7 +28,13 @@
 //!   snapshot of the encoder before `encode_step`; every rejection — input
 //!   validation, the `snn_width` checks, and the post-encode spike-channel
 //!   check — either runs before the step or restores the snapshot, so a call
-//!   that returns `Err` leaves the encoder exactly as it was. (The
+//!   that returns `Err` leaves the encoder exactly as it was. The bound
+//!   cannot express *deep* clone: it relies on `clone()` producing an
+//!   independent copy of observable encoding state, which every
+//!   axon-encoder 0.6 encoder satisfies (owned `Vec`/`VecDeque` state). An
+//!   `Encoder` that hides state behind shared ownership (`Arc`, `Rc`) would
+//!   clone the handle, not the state, and cannot honor the contract.
+//!   (The
 //!   spike-channel error cannot be produced by any conforming `axon-encoder`
 //!   encoder — channels are input indices, and the input is exactly
 //!   `snn_width` wide; it exists to keep a misbehaving out-of-crate
@@ -133,8 +139,28 @@ impl<E: Encoder + 'static> AxonEncoderAdapter<E> {
     /// Also rejects an encoder whose [`Encoder::time_model`] spans more than
     /// one tick per call: its spikes carry intra-call timing the stimulus
     /// representation cannot preserve (see the module docs).
+    ///
+    /// This constructor treats the encoder as width-agnostic: a caller that
+    /// wraps a channel-fixed encoder (`EmbeddingRateEncoder`,
+    /// `TemporalEncoder`, …) through it gets no `snn_width` check, and
+    /// excess signal lanes are silently dropped by the encoder. Prefer
+    /// [`with_encoder_channels`](Self::with_encoder_channels) — or the
+    /// dedicated constructors — so a width mismatch is a typed error.
     pub fn with_encoder(encoder: E, kind: SpikeEncodingKind, mode: ProjectionMode) -> Result<Self> {
         Self::with_channels(encoder, kind, mode, None)
+    }
+
+    /// [`with_encoder`](Self::with_encoder) for an encoder with a fixed
+    /// configured channel count: `encode_stimuli` then requires
+    /// `snn_width == channels` rather than letting excess lanes drop
+    /// silently.
+    pub fn with_encoder_channels(
+        encoder: E,
+        kind: SpikeEncodingKind,
+        mode: ProjectionMode,
+        channels: usize,
+    ) -> Result<Self> {
+        Self::with_channels(encoder, kind, mode, Some(channels))
     }
 
     /// Shared constructor. `channels` is the encoder's fixed channel count
@@ -265,6 +291,14 @@ impl AxonEncoderAdapter<TemporalEncoder> {
     }
 }
 
+// The `Clone` bound is the snapshot mechanism behind failure atomicity: it
+// must produce an *independent* copy of everything that affects future
+// `encode_step` output. Every axon-encoder 0.6 encoder satisfies this (its
+// derives clone owned `Vec`/`VecDeque` state). An `Encoder` that keeps
+// observable state behind shared ownership (`Arc<AtomicUsize>`, `Rc`, …)
+// would clone the handle, not the state, and could not honor this
+// contract — the bound cannot express "deep clone", so the requirement
+// lives here and in the module docs.
 impl<E: Encoder + Send + Clone + 'static> DomainAdapter for AxonEncoderAdapter<E> {
     fn encode_stimuli(&mut self, hidden: &Tensor, snn_width: usize) -> Result<Vec<f32>> {
         validate_encode_input(hidden, snn_width)?;

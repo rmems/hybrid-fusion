@@ -41,9 +41,12 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   encoder whose `time_model` spans more than one tick per call, since
   intra-call spike timing cannot survive the stimulus representation.
   `encode_stimuli` rejects `snn_width` above the u16 spike-channel space
-  and, for channel-fixed encoders, a `snn_width` that differs from the
-  configured channel count — a typed error rather than an encoder panic or
-  silently dropped lanes. `E: Clone` lets the adapter snapshot the encoder
+  and, for adapters built with a configured channel count (the
+  `embedding_rate`/`temporal` constructors and `with_encoder_channels`), a
+  `snn_width` that differs from it — a typed error rather than an encoder
+  panic or silently dropped lanes (`with_encoder` is the width-agnostic
+  escape hatch and documents that its caller owns the width contract).
+  `E: Clone` lets the adapter snapshot the encoder
   before `encode_step` and restore it on the one post-encode rejection
   (an out-of-range spike channel from a misbehaving `Encoder`), so every
   failed call leaves encoder state untouched; spike contributions are
