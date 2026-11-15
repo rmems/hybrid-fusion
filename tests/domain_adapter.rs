@@ -10,8 +10,8 @@ use hybrid_fusion::adapter::conformance::{
 use hybrid_fusion::{
     DomainAdapter, HybridConfig, HybridError, HybridNetwork, NeuroModulators,
     PoolResizeTanhAdapter, ProjectionMode, Result, SpikeActivity, SpikeEncoding, SpikeEncodingKind,
-    SpikingNetwork, Tensor, Transformer, validate_decode_input, validate_embedding,
-    validate_encode_input, validate_stimuli,
+    SpikingNetwork, Tensor, Transformer, decode_activity_checked, encode_stimuli_checked,
+    validate_decode_input, validate_embedding, validate_encode_input, validate_stimuli,
 };
 
 /// Stateful adapter: stimuli are an exponential moving average of the
@@ -109,22 +109,25 @@ fn stateful_third_party_adapter_conforms() {
 fn smoothing_adapter_really_is_stateful() {
     let hidden = Tensor::from_vec(vec![2.0; 4], &[4]);
     let mut adapter = SmoothingAdapter::new();
-    let first = adapter.encode_stimuli_checked(&hidden, 4).unwrap();
-    let second = adapter.encode_stimuli_checked(&hidden, 4).unwrap();
+    let first = encode_stimuli_checked(&mut adapter, &hidden, 4).unwrap();
+    let second = encode_stimuli_checked(&mut adapter, &hidden, 4).unwrap();
     assert_ne!(first, second, "history must change the output");
     adapter.reset();
-    assert_eq!(adapter.encode_stimuli_checked(&hidden, 4).unwrap(), first);
+    assert_eq!(
+        encode_stimuli_checked(&mut adapter, &hidden, 4).unwrap(),
+        first
+    );
 
     // A rejected call must not advance the state.
     let bad = Tensor::from_vec(vec![f32::NAN; 4], &[4]);
-    adapter.encode_stimuli_checked(&hidden, 4).unwrap();
-    assert!(adapter.encode_stimuli_checked(&bad, 4).is_err());
+    encode_stimuli_checked(&mut adapter, &hidden, 4).unwrap();
+    assert!(encode_stimuli_checked(&mut adapter, &bad, 4).is_err());
     let mut twin = SmoothingAdapter::new();
-    twin.encode_stimuli_checked(&hidden, 4).unwrap();
-    twin.encode_stimuli_checked(&hidden, 4).unwrap();
+    encode_stimuli_checked(&mut twin, &hidden, 4).unwrap();
+    encode_stimuli_checked(&mut twin, &hidden, 4).unwrap();
     assert_eq!(
-        adapter.encode_stimuli_checked(&hidden, 4).unwrap(),
-        twin.encode_stimuli_checked(&hidden, 4).unwrap()
+        encode_stimuli_checked(&mut adapter, &hidden, 4).unwrap(),
+        encode_stimuli_checked(&mut twin, &hidden, 4).unwrap()
     );
 }
 
@@ -133,14 +136,14 @@ fn hostile_inputs_return_errors_instead_of_panicking() {
     let mut adapter = PoolResizeTanhAdapter::default();
     let rank3 = Tensor::from_vec(vec![0.0; 8], &[2, 2, 2]);
     assert!(matches!(
-        adapter.encode_stimuli_checked(&rank3, 4),
+        encode_stimuli_checked(&mut adapter, &rank3, 4),
         Err(HybridError::HiddenStateRank { got: 3 })
     ));
     let inconsistent: Tensor =
         serde_json::from_str(r#"{"data":[0.1,0.2,0.3],"shape":[2,3]}"#).unwrap();
     for result in [
         adapter.encode_stimuli(&inconsistent, 4),
-        adapter.encode_stimuli_checked(&inconsistent, 4),
+        encode_stimuli_checked(&mut adapter, &inconsistent, 4),
     ] {
         assert!(matches!(
             result,
@@ -155,7 +158,7 @@ fn hostile_inputs_return_errors_instead_of_panicking() {
         potentials: vec![0.0; 4],
         iz_potentials: vec![],
     };
-    assert!(adapter.decode_activity_checked(&activity, 4, 3).is_err());
+    assert!(decode_activity_checked(&mut adapter, &activity, 4, 3).is_err());
     assert!(adapter.decode_activity(&activity, 4, 3).is_err());
 }
 
@@ -214,7 +217,7 @@ fn reference_encode_is_bitwise_identical_to_the_forward_host() {
     let forward = net.forward(&tokens, None).unwrap();
 
     let mut adapter = PoolResizeTanhAdapter::default();
-    let stimuli = adapter.encode_stimuli_checked(&hidden, channels).unwrap();
+    let stimuli = encode_stimuli_checked(&mut adapter, &hidden, channels).unwrap();
     assert_eq!(
         stimuli.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
         forward

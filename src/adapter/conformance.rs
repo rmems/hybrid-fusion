@@ -22,12 +22,12 @@
 //! |---|---|
 //! | `harness_dims` | the suite's own [`ConformanceDims`] are usable |
 //! | `declared_metadata` | `encoding()` / `decoding()` are well formed |
-//! | `invalid_input_rejected` | every malformed call returns the documented error from the `*_checked` entry point, without panicking |
-//! | `hook_does_not_panic` | the raw hooks never panic on malformed input, and any `Ok` they return still satisfies the output contract |
+//! | `invalid_input_rejected` | every malformed call returns the documented error — from the `*_checked` entry point and from the raw hook — without panicking |
+//! | `hook_does_not_panic` | the raw hooks never panic on malformed input |
 //! | `valid_input_accepted` | well-formed calls succeed with correctly shaped, finite (and, for stimuli, bounded and in-range) output |
 //! | `deterministic` | two fresh adapters fed the same calls agree bitwise |
 //! | `reset_restores_initial_state` | after `reset()` the adapter replays a fresh adapter's outputs |
-//! | `failure_atomic` | rejected calls (checked entry points, and raw hooks that return `Err`) leave no trace in later outputs |
+//! | `failure_atomic` | rejected calls (checked entry points, and raw hooks that return `Err`) leave no trace in later outputs — on fresh adapters and on adapters warmed by successful calls |
 //!
 //! Not checked, because a black-box suite cannot observe it: that the adapter
 //! never retains its arguments, and that encode and decode state stay
@@ -37,7 +37,8 @@ use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::{
-    DomainAdapter, MAX_ADAPTER_WIDTH, STIMULUS_BOUND, validate_embedding, validate_stimuli,
+    DomainAdapter, MAX_ADAPTER_WIDTH, STIMULUS_BOUND, decode_activity_checked,
+    encode_stimuli_checked, validate_stimuli,
 };
 use crate::error::{ForwardValueStage, HybridError, Result};
 use crate::tensor::Tensor;
@@ -136,8 +137,8 @@ where
     }
 
     check_declared_metadata(&make())?;
-    let invalid = invalid_calls(dims);
-    check_invalid_rejected(&make, &invalid)?;
+    let invalid = invalid_calls();
+    check_invalid_rejected(&make, &invalid, dims)?;
 
     let fresh = trace(&mut make(), dims, None)?;
     let again = trace(&mut make(), dims, None)?;
@@ -199,10 +200,12 @@ fn check_declared_metadata<A: DomainAdapter>(
     Ok(())
 }
 
-/// One malformed call and the error its `*_checked` entry point must return.
+/// One malformed call — built lazily so a `ConformanceDims` at
+/// [`MAX_ADAPTER_WIDTH`] does not keep nine `n`-sized activities alive at
+/// once — and the error its entry point must return.
 struct InvalidCall {
     name: &'static str,
-    call: Call,
+    make: fn(ConformanceDims) -> Call,
     expect: fn(&HybridError) -> bool,
 }
 
@@ -211,10 +214,10 @@ enum Call {
     Decode(SpikeActivity, usize, usize),
 }
 
-fn apply_checked<A: DomainAdapter>(adapter: &mut A, call: &Call) -> Result<Vec<f32>> {
+fn apply_checked<A: DomainAdapter + ?Sized>(adapter: &mut A, call: &Call) -> Result<Vec<f32>> {
     match call {
-        Call::Encode(hidden, width) => adapter.encode_stimuli_checked(hidden, *width),
-        Call::Decode(activity, n, d) => adapter.decode_activity_checked(activity, *n, *d),
+        Call::Encode(hidden, width) => encode_stimuli_checked(adapter, hidden, *width),
+        Call::Decode(activity, n, d) => decode_activity_checked(adapter, activity, *n, *d),
     }
 }
 
@@ -225,68 +228,45 @@ fn apply_hook<A: DomainAdapter>(adapter: &mut A, call: &Call) -> Result<Vec<f32>
     }
 }
 
-fn validate_output(call: &Call, output: &[f32]) -> Result<()> {
-    match call {
-        Call::Encode(_, width) => validate_stimuli(output, *width),
-        Call::Decode(_, _, dim) => validate_embedding(output, *dim),
-    }
-}
-
 /// Tensor whose `shape` and data are set independently, as serde allows.
 fn raw_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor {
     serde_json::from_value(serde_json::json!({ "data": data, "shape": shape }))
         .expect("Tensor deserializes any finite data with any shape")
 }
 
-fn invalid_calls(dims: ConformanceDims) -> Vec<InvalidCall> {
-    let ConformanceDims {
-        snn_width: w,
-        num_neurons: n,
-        embed_dim: d,
-    } = dims;
-    let ok_hidden = || Tensor::from_vec(vec![0.1; 6], &[2, 3]);
-    let ok_activity = || SpikeActivity::from_fired(&[0], n).expect("n >= 1");
+fn ok_hidden() -> Tensor {
+    Tensor::from_vec(vec![0.1; 6], &[2, 3])
+}
 
-    let mut nan_hidden = ok_hidden();
-    nan_hidden.data_mut()[4] = f32::NAN;
-    let mut inf_hidden = ok_hidden();
-    inf_hidden.data_mut()[0] = f32::NEG_INFINITY;
+fn ok_activity(n: usize) -> SpikeActivity {
+    SpikeActivity::from_fired(&[0], n).expect("n >= 1")
+}
 
-    let mut nan_potential = ok_activity();
-    nan_potential.potentials[0] = f32::NAN;
-    let mut out_of_range = ok_activity();
-    out_of_range.spike_train = vec![vec![n]];
-    let mut repeated = ok_activity();
-    repeated.spike_train = vec![vec![0, 0]];
-    let mut short_potentials = ok_activity();
-    short_potentials.potentials.pop();
-    let mut bad_iz = ok_activity();
-    bad_iz.iz_potentials = vec![0.0; n + 1];
-
+fn invalid_calls() -> Vec<InvalidCall> {
     vec![
         InvalidCall {
             name: "encode: zero snn_width",
-            call: Call::Encode(ok_hidden(), 0),
+            make: |_| Call::Encode(ok_hidden(), 0),
             expect: |e| matches!(e, HybridError::ZeroSnnChannels),
         },
         InvalidCall {
             name: "encode: snn_width above MAX_ADAPTER_WIDTH",
-            call: Call::Encode(ok_hidden(), MAX_ADAPTER_WIDTH + 1),
+            make: |_| Call::Encode(ok_hidden(), MAX_ADAPTER_WIDTH + 1),
             expect: |e| matches!(e, HybridError::InvalidConfig(_)),
         },
         InvalidCall {
             name: "encode: rank 0",
-            call: Call::Encode(Tensor::from_vec(vec![1.0], &[]), w),
+            make: |d| Call::Encode(Tensor::from_vec(vec![1.0], &[]), d.snn_width),
             expect: |e| matches!(e, HybridError::HiddenStateRank { got: 0 }),
         },
         InvalidCall {
             name: "encode: rank 3",
-            call: Call::Encode(Tensor::from_vec(vec![0.1; 8], &[2, 2, 2]), w),
+            make: |d| Call::Encode(Tensor::from_vec(vec![0.1; 8], &[2, 2, 2]), d.snn_width),
             expect: |e| matches!(e, HybridError::HiddenStateRank { got: 3 }),
         },
         InvalidCall {
             name: "encode: zero sequence axis",
-            call: Call::Encode(raw_tensor(vec![], &[0, 4]), w),
+            make: |d| Call::Encode(raw_tensor(vec![], &[0, 4]), d.snn_width),
             expect: |e| {
                 matches!(
                     e,
@@ -299,7 +279,7 @@ fn invalid_calls(dims: ConformanceDims) -> Vec<InvalidCall> {
         },
         InvalidCall {
             name: "encode: zero dim axis",
-            call: Call::Encode(raw_tensor(vec![], &[3, 0]), w),
+            make: |d| Call::Encode(raw_tensor(vec![], &[3, 0]), d.snn_width),
             expect: |e| {
                 matches!(
                     e,
@@ -312,7 +292,7 @@ fn invalid_calls(dims: ConformanceDims) -> Vec<InvalidCall> {
         },
         InvalidCall {
             name: "encode: data shorter than shape",
-            call: Call::Encode(raw_tensor(vec![0.1; 5], &[2, 3]), w),
+            make: |d| Call::Encode(raw_tensor(vec![0.1; 5], &[2, 3]), d.snn_width),
             expect: |e| {
                 matches!(
                     e,
@@ -325,7 +305,7 @@ fn invalid_calls(dims: ConformanceDims) -> Vec<InvalidCall> {
         },
         InvalidCall {
             name: "encode: data longer than shape",
-            call: Call::Encode(raw_tensor(vec![0.1; 7], &[2, 3]), w),
+            make: |d| Call::Encode(raw_tensor(vec![0.1; 7], &[2, 3]), d.snn_width),
             expect: |e| {
                 matches!(
                     e,
@@ -338,12 +318,16 @@ fn invalid_calls(dims: ConformanceDims) -> Vec<InvalidCall> {
         },
         InvalidCall {
             name: "encode: shape product overflows usize",
-            call: Call::Encode(raw_tensor(vec![], &[usize::MAX, 2]), w),
+            make: |d| Call::Encode(raw_tensor(vec![], &[usize::MAX, 2]), d.snn_width),
             expect: |e| matches!(e, HybridError::HiddenStateDataLen { .. }),
         },
         InvalidCall {
             name: "encode: NaN hidden state",
-            call: Call::Encode(nan_hidden, w),
+            make: |d| {
+                let mut t = ok_hidden();
+                t.data_mut()[4] = f32::NAN;
+                Call::Encode(t, d.snn_width)
+            },
             expect: |e| {
                 matches!(
                     e,
@@ -356,7 +340,11 @@ fn invalid_calls(dims: ConformanceDims) -> Vec<InvalidCall> {
         },
         InvalidCall {
             name: "encode: -Inf hidden state",
-            call: Call::Encode(inf_hidden, w),
+            make: |d| {
+                let mut t = ok_hidden();
+                t.data_mut()[0] = f32::NEG_INFINITY;
+                Call::Encode(t, d.snn_width)
+            },
             expect: |e| {
                 matches!(
                     e,
@@ -367,49 +355,71 @@ fn invalid_calls(dims: ConformanceDims) -> Vec<InvalidCall> {
                 )
             },
         },
+        // These four fail before the activity record is inspected, so they
+        // use a compact `n = 1` activity rather than an `n`-sized one.
         InvalidCall {
             name: "decode: zero embed_dim",
-            call: Call::Decode(ok_activity(), n, 0),
+            make: |d| Call::Decode(ok_activity(1), d.num_neurons, 0),
             expect: |e| matches!(e, HybridError::InvalidConfig(_)),
         },
         InvalidCall {
             name: "decode: embed_dim above MAX_ADAPTER_WIDTH",
-            call: Call::Decode(ok_activity(), n, MAX_ADAPTER_WIDTH + 1),
+            make: |d| Call::Decode(ok_activity(1), d.num_neurons, MAX_ADAPTER_WIDTH + 1),
             expect: |e| matches!(e, HybridError::InvalidConfig(_)),
         },
         InvalidCall {
             name: "decode: zero num_neurons",
-            call: Call::Decode(ok_activity(), 0, d),
+            make: |d| Call::Decode(ok_activity(1), 0, d.embed_dim),
             expect: |e| matches!(e, HybridError::InvalidConfig(_)),
         },
         InvalidCall {
             name: "decode: num_neurons above MAX_ADAPTER_WIDTH",
-            call: Call::Decode(ok_activity(), MAX_ADAPTER_WIDTH + 1, d),
+            make: |d| Call::Decode(ok_activity(1), MAX_ADAPTER_WIDTH + 1, d.embed_dim),
             expect: |e| matches!(e, HybridError::InvalidConfig(_)),
         },
         InvalidCall {
             name: "decode: potentials shorter than num_neurons",
-            call: Call::Decode(short_potentials, n, d),
+            make: |d| {
+                let mut a = ok_activity(d.num_neurons);
+                a.potentials.pop();
+                Call::Decode(a, d.num_neurons, d.embed_dim)
+            },
             expect: |e| matches!(e, HybridError::InputLengthMismatch { .. }),
         },
         InvalidCall {
             name: "decode: non-finite potential",
-            call: Call::Decode(nan_potential, n, d),
+            make: |d| {
+                let mut a = ok_activity(d.num_neurons);
+                a.potentials[0] = f32::NAN;
+                Call::Decode(a, d.num_neurons, d.embed_dim)
+            },
             expect: |e| matches!(e, HybridError::InvalidConfig(_)),
         },
         InvalidCall {
             name: "decode: spike index out of range",
-            call: Call::Decode(out_of_range, n, d),
+            make: |d| {
+                let mut a = ok_activity(d.num_neurons);
+                a.spike_train = vec![vec![d.num_neurons]];
+                Call::Decode(a, d.num_neurons, d.embed_dim)
+            },
             expect: |e| matches!(e, HybridError::InvalidConfig(_)),
         },
         InvalidCall {
             name: "decode: repeated spike index in one step",
-            call: Call::Decode(repeated, n, d),
+            make: |d| {
+                let mut a = ok_activity(d.num_neurons);
+                a.spike_train = vec![vec![0, 0]];
+                Call::Decode(a, d.num_neurons, d.embed_dim)
+            },
             expect: |e| matches!(e, HybridError::InvalidConfig(_)),
         },
         InvalidCall {
             name: "decode: iz_potentials of the wrong length",
-            call: Call::Decode(bad_iz, n, d),
+            make: |d| {
+                let mut a = ok_activity(d.num_neurons);
+                a.iz_potentials = vec![0.0; d.num_neurons + 1];
+                Call::Decode(a, d.num_neurons, d.embed_dim)
+            },
             expect: |e| matches!(e, HybridError::InputLengthMismatch { .. }),
         },
     ]
@@ -418,6 +428,7 @@ fn invalid_calls(dims: ConformanceDims) -> Vec<InvalidCall> {
 fn check_invalid_rejected<A, F>(
     make: &F,
     invalid: &[InvalidCall],
+    dims: ConformanceDims,
 ) -> std::result::Result<(), ContractViolation>
 where
     A: DomainAdapter,
@@ -425,7 +436,8 @@ where
 {
     for case in invalid {
         let mut adapter = make();
-        let outcome = catch_unwind(AssertUnwindSafe(|| apply_checked(&mut adapter, &case.call)));
+        let call = (case.make)(dims);
+        let outcome = catch_unwind(AssertUnwindSafe(|| apply_checked(&mut adapter, &call)));
         match outcome {
             Err(_) => {
                 return Err(violation(
@@ -451,9 +463,13 @@ where
     Ok(())
 }
 
-/// Raw hooks, called directly with malformed input: they must not panic, any
-/// `Ok` must still satisfy the output contract, and an `Err` must leave the
-/// adapter indistinguishable from a fresh one (compared against `fresh`).
+/// Raw hooks, called directly with malformed input: they must not panic and
+/// must return the documented error — the contract requires hooks to run the
+/// same validators so direct callers get host guarantees. The `Err` must
+/// leave the adapter indistinguishable: the fresh probe compares the
+/// post-error trace against `fresh`, and the warmed probe compares a
+/// successful-call-warmed adapter against an untouched twin, so an `Err` that
+/// resets or corrupts accumulated state is caught too.
 fn check_hooks<A, F>(
     make: &F,
     dims: ConformanceDims,
@@ -466,32 +482,87 @@ where
 {
     for case in invalid {
         let mut adapter = make();
-        let outcome = catch_unwind(AssertUnwindSafe(|| apply_hook(&mut adapter, &case.call)));
-        match outcome {
+        let call = (case.make)(dims);
+        match catch_unwind(AssertUnwindSafe(|| apply_hook(&mut adapter, &call))) {
             Err(_) => {
                 return Err(violation(
                     "hook_does_not_panic",
                     format!("{}: the implementation hook panicked", case.name),
                 ));
             }
-            Ok(Ok(output)) => {
-                if let Err(err) = validate_output(&case.call, &output) {
+            Ok(Ok(_)) => {
+                return Err(violation(
+                    "invalid_input_rejected",
+                    format!(
+                        "{}: the raw hook accepted malformed input; hooks must run the \
+                         same input validation so direct callers get host guarantees",
+                        case.name
+                    ),
+                ));
+            }
+            Ok(Err(err)) => {
+                if !(case.expect)(&err) {
                     return Err(violation(
-                        "hook_does_not_panic",
+                        "invalid_input_rejected",
                         format!(
-                            "{}: hook returned Ok with an out-of-contract output: {err}",
+                            "{}: raw hook returned wrong error variant: {err:?}",
                             case.name
                         ),
                     ));
                 }
-            }
-            Ok(Err(_)) => {
                 let after = trace(&mut adapter, dims, None)?;
                 if let Some(i) = first_difference(fresh, &after) {
                     return Err(violation(
                         "failure_atomic",
                         format!(
                             "{}: hook returned Err but call #{i} afterwards differs from a fresh adapter",
+                            case.name
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Warmed probe: warm two adapters identically, run the failing raw
+        // hook on one, then require identical continuations.
+        let mut warmed = make();
+        let mut twin = make();
+        trace(&mut warmed, dims, None)?;
+        trace(&mut twin, dims, None)?;
+        let call = (case.make)(dims);
+        match catch_unwind(AssertUnwindSafe(|| apply_hook(&mut warmed, &call))) {
+            Err(_) => {
+                return Err(violation(
+                    "hook_does_not_panic",
+                    format!(
+                        "{}: the implementation hook panicked on a warmed adapter",
+                        case.name
+                    ),
+                ));
+            }
+            Ok(Ok(_)) => {
+                return Err(violation(
+                    "invalid_input_rejected",
+                    format!("{}: the raw hook accepted malformed input", case.name),
+                ));
+            }
+            Ok(Err(err)) => {
+                if !(case.expect)(&err) {
+                    return Err(violation(
+                        "invalid_input_rejected",
+                        format!(
+                            "{}: raw hook returned wrong error variant: {err:?}",
+                            case.name
+                        ),
+                    ));
+                }
+                let after = trace(&mut warmed, dims, None)?;
+                let twin_after = trace(&mut twin, dims, None)?;
+                if let Some(i) = first_difference(&after, &twin_after) {
+                    return Err(violation(
+                        "failure_atomic",
+                        format!(
+                            "{}: hook returned Err but call #{i} afterwards differs from an untouched twin",
                             case.name
                         ),
                     ));
@@ -569,7 +640,8 @@ fn trace<A: DomainAdapter>(
 
     let reject_noise = |adapter: &mut A| -> std::result::Result<(), ContractViolation> {
         for case in noise.unwrap_or_default() {
-            let outcome = catch_unwind(AssertUnwindSafe(|| apply_checked(adapter, &case.call)));
+            let call = (case.make)(dims);
+            let outcome = catch_unwind(AssertUnwindSafe(|| apply_checked(adapter, &call)));
             if !matches!(outcome, Ok(Err(_))) {
                 return Err(violation(
                     "failure_atomic",
@@ -584,8 +656,13 @@ fn trace<A: DomainAdapter>(
     let encode_order: Vec<&Tensor> = hidden.iter().chain(std::iter::once(&hidden[0])).collect();
     for (i, h) in encode_order.into_iter().enumerate() {
         reject_noise(adapter)?;
+        // The raw hook plus the same output checks `encode_stimuli_checked`
+        // runs, so a declared-range breach is attributed to
+        // `declared_metadata` rather than lumped into `valid_input_accepted`.
         let stimuli = adapter
-            .encode_stimuli_checked(h, dims.snn_width)
+            .encode_stimuli(h, dims.snn_width)
+            .map_err(|e| violation("valid_input_accepted", format!("encode sample {i}: {e}")))?;
+        validate_stimuli(&stimuli, dims.snn_width)
             .map_err(|e| violation("valid_input_accepted", format!("encode sample {i}: {e}")))?;
         if let Some((lo, hi)) = range
             && let Some(v) = stimuli.iter().find(|v| **v < lo || **v > hi)
@@ -600,9 +677,10 @@ fn trace<A: DomainAdapter>(
     }
     for (i, activity) in activities.iter().enumerate() {
         reject_noise(adapter)?;
-        let embedding = adapter
-            .decode_activity_checked(activity, dims.num_neurons, dims.embed_dim)
-            .map_err(|e| violation("valid_input_accepted", format!("decode sample {i}: {e}")))?;
+        let embedding =
+            decode_activity_checked(adapter, activity, dims.num_neurons, dims.embed_dim).map_err(
+                |e| violation("valid_input_accepted", format!("decode sample {i}: {e}")),
+            )?;
         out.push(bits(&embedding));
     }
     Ok(out)
@@ -614,10 +692,16 @@ mod tests {
     use crate::adapter::PoolResizeTanhAdapter;
     use crate::error::HybridError;
     use crate::types::ProjectionMode;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     /// Reference adapter with one knob per contract clause to break.
-    #[derive(Clone, Copy, Default)]
+    ///
+    /// `ticks` models an external source of nondeterminism (a process-global
+    /// RNG): clones of one `Faulty` share it, so a factory built from one
+    /// value produces adapters that diverge — while separate test cases keep
+    /// separate counters and cannot race in parallel runs.
+    #[derive(Clone, Default)]
     struct Faulty {
         inner: PoolResizeTanhAdapter,
         panic_on_bad_rank: bool,
@@ -629,9 +713,8 @@ mod tests {
         advances_on_failure: bool,
         state: u32,
         bad_range: bool,
+        ticks: Rc<Cell<u32>>,
     }
-
-    static GLOBAL_TICKS: AtomicU32 = AtomicU32::new(0);
 
     impl DomainAdapter for Faulty {
         fn encode_stimuli(&mut self, hidden: &Tensor, snn_width: usize) -> Result<Vec<f32>> {
@@ -649,7 +732,9 @@ mod tests {
                 out.pop();
             }
             if self.non_deterministic {
-                out[0] = (GLOBAL_TICKS.fetch_add(1, Ordering::Relaxed) % 7) as f32 / 10.0;
+                let tick = self.ticks.get();
+                self.ticks.set(tick + 1);
+                out[0] = (tick % 7) as f32 / 10.0;
             }
             if self.reset_is_noop || self.advances_on_failure {
                 // Output depends on call history through `state`.
@@ -689,8 +774,11 @@ mod tests {
         }
     }
 
+    /// Every adapter the factory builds shares this `Faulty`'s `ticks`, so a
+    /// nondeterministic adapter diverges from its "fresh" twin the way a
+    /// process-global RNG would.
     fn violation_of(faulty: Faulty) -> ContractViolation {
-        check_domain_adapter_contract(|| faulty).expect_err("adapter must be rejected")
+        check_domain_adapter_contract(move || faulty.clone()).expect_err("adapter must be rejected")
     }
 
     #[test]
@@ -742,7 +830,7 @@ mod tests {
             ..Faulty::default()
         };
         assert!(matches!(
-            a.encode_stimuli_checked(&hidden, 4),
+            encode_stimuli_checked(&mut a, &hidden, 4),
             Err(HybridError::InvalidConfig(_))
         ));
         let mut a = Faulty {
@@ -750,7 +838,7 @@ mod tests {
             ..Faulty::default()
         };
         assert!(matches!(
-            a.encode_stimuli_checked(&hidden, 4),
+            encode_stimuli_checked(&mut a, &hidden, 4),
             Err(HybridError::InputLengthMismatch {
                 expected: 4,
                 got: 3
@@ -762,7 +850,7 @@ mod tests {
         };
         let act = SpikeActivity::from_fired(&[0], 2).unwrap();
         assert!(matches!(
-            a.decode_activity_checked(&act, 2, 3),
+            decode_activity_checked(&mut a, &act, 2, 3),
             Err(HybridError::NonFinite {
                 stage: ForwardValueStage::Embedding,
                 index: 0
@@ -842,9 +930,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "DomainAdapter contract violation: [deterministic]")]
     fn assert_helper_panics_with_the_violation() {
-        assert_domain_adapter_contract(|| Faulty {
+        let faulty = Faulty {
             non_deterministic: true,
             ..Faulty::default()
-        });
+        };
+        assert_domain_adapter_contract(move || faulty.clone());
     }
 }

@@ -33,9 +33,10 @@
 //! - **Inputs** are checked by [`validate_encode_input`] /
 //!   [`validate_decode_input`].
 //! - **Outputs** are checked by [`validate_stimuli`] / [`validate_embedding`].
-//! - Hosts call the provided [`DomainAdapter::encode_stimuli_checked`] /
-//!   [`DomainAdapter::decode_activity_checked`], which run input validation,
-//!   the implementation hook, then output validation.
+//! - Hosts call the provided [`encode_stimuli_checked`] /
+//!   [`decode_activity_checked`] free functions, which run input validation,
+//!   the implementation hook, then output validation. They are functions, not
+//!   trait methods, so no implementation can override or bypass them.
 //! - [`conformance`] is a reusable test helper every implementation must pass.
 
 pub mod conformance;
@@ -133,16 +134,18 @@ pub const STIMULUS_BOUND: f32 = 1.0;
 /// Neither hook may panic on *any* argument, including malformed tensors
 /// (a [`Tensor`] deserialized from JSON can carry a `shape` that disagrees
 /// with its data) and hostile activities. Hooks defend themselves; hosts
-/// additionally go through the `*_checked` methods.
+/// additionally go through the `*_checked` functions.
 ///
 /// # Implementing
 ///
 /// Implement [`encode_stimuli`](Self::encode_stimuli) and
 /// [`decode_activity`](Self::decode_activity); call
 /// [`validate_encode_input`] / [`validate_decode_input`] first and
-/// [`validate_stimuli`] / [`validate_embedding`] on the result so direct
-/// callers get the same guarantees as hosts. Do not override the `*_checked`
-/// methods. Then prove the implementation with
+/// [`validate_stimuli`] / [`validate_embedding`] (plus
+/// [`validate_stimulus_range`] when [`encoding`](Self::encoding) declares a
+/// range) on the result so direct callers get the same guarantees as hosts. The `*_checked` entry points are
+/// free functions — they cannot be overridden, so the validation boundary
+/// holds for every implementation. Then prove the implementation with
 /// [`conformance::assert_domain_adapter_contract`] (it takes a factory so it can
 /// build fresh instances to compare against):
 ///
@@ -171,41 +174,56 @@ pub trait DomainAdapter {
     /// Declared encoding scheme and stimulus range, for plan ports
     /// ([`crate::PortSpec::encoding`]). Default: rate, one timestep,
     /// unbounded; override it. A declared `range` must contain every encoded
-    /// stimulus ([`conformance`] verifies this).
+    /// stimulus — enforced by [`encode_stimuli_checked`] at runtime and by
+    /// [`conformance`].
     fn encoding(&self) -> SpikeEncoding {
         SpikeEncoding::default()
     }
 
     /// Declared decoding scheme, for plan ports ([`crate::PortSpec::decoding`]).
-    /// Default: count over a one-tick window; override it.
+    /// Default: count over a one-tick window; override it. A `window` of
+    /// `usize::MAX` declares "the whole recorded activity" — the honest value
+    /// for a decoder that aggregates every step it is handed.
     fn decoding(&self) -> SpikeDecoding {
         SpikeDecoding::default()
     }
+}
 
-    /// Host entry point for encoding: validates the input, runs
-    /// [`encode_stimuli`](Self::encode_stimuli), then validates the output.
-    /// Do not override.
-    fn encode_stimuli_checked(&mut self, hidden: &Tensor, snn_width: usize) -> Result<Vec<f32>> {
-        validate_encode_input(hidden, snn_width)?;
-        let stimuli = self.encode_stimuli(hidden, snn_width)?;
-        validate_stimuli(&stimuli, snn_width)?;
-        Ok(stimuli)
+/// Host entry point for encoding: validates the input, runs the
+/// [`DomainAdapter::encode_stimuli`] hook, then validates the output against
+/// [`validate_stimuli`] and the adapter's declared [`SpikeEncoding::range`].
+///
+/// A free function, not a trait method: the validation boundary cannot be
+/// overridden or bypassed by an implementation.
+pub fn encode_stimuli_checked<A: DomainAdapter + ?Sized>(
+    adapter: &mut A,
+    hidden: &Tensor,
+    snn_width: usize,
+) -> Result<Vec<f32>> {
+    validate_encode_input(hidden, snn_width)?;
+    let stimuli = adapter.encode_stimuli(hidden, snn_width)?;
+    validate_stimuli(&stimuli, snn_width)?;
+    if let Some(range) = adapter.encoding().range {
+        validate_stimulus_range(&stimuli, range)?;
     }
+    Ok(stimuli)
+}
 
-    /// Host entry point for decoding: validates the input, runs
-    /// [`decode_activity`](Self::decode_activity), then validates the output.
-    /// Do not override.
-    fn decode_activity_checked(
-        &mut self,
-        activity: &SpikeActivity,
-        num_neurons: usize,
-        embed_dim: usize,
-    ) -> Result<Vec<f32>> {
-        validate_decode_input(activity, num_neurons, embed_dim)?;
-        let embedding = self.decode_activity(activity, num_neurons, embed_dim)?;
-        validate_embedding(&embedding, embed_dim)?;
-        Ok(embedding)
-    }
+/// Host entry point for decoding: validates the input, runs the
+/// [`DomainAdapter::decode_activity`] hook, then validates the output.
+///
+/// A free function, not a trait method: the validation boundary cannot be
+/// overridden or bypassed by an implementation.
+pub fn decode_activity_checked<A: DomainAdapter + ?Sized>(
+    adapter: &mut A,
+    activity: &SpikeActivity,
+    num_neurons: usize,
+    embed_dim: usize,
+) -> Result<Vec<f32>> {
+    validate_decode_input(activity, num_neurons, embed_dim)?;
+    let embedding = adapter.decode_activity(activity, num_neurons, embed_dim)?;
+    validate_embedding(&embedding, embed_dim)?;
+    Ok(embedding)
 }
 
 /// Reject an encode call that breaks the [`DomainAdapter`] input contract.
@@ -284,6 +302,31 @@ pub fn validate_stimuli(stimuli: &[f32], snn_width: usize) -> Result<()> {
     Ok(())
 }
 
+/// Reject stimuli outside a declared [`SpikeEncoding::range`] `(lo, hi)`.
+///
+/// [`encode_stimuli_checked`] runs this after [`validate_stimuli`]. Stateful
+/// implementations should call it on their output *before* committing state,
+/// so a declared-range breach cannot fail the checked call after the hook has
+/// already committed (failure atomicity).
+///
+/// | Violation | Error |
+/// |---|---|
+/// | any value below `lo` or above `hi` | [`HybridError::InvalidConfig`] naming the index and value |
+pub fn validate_stimulus_range(stimuli: &[f32], range: (f32, f32)) -> Result<()> {
+    let (lo, hi) = range;
+    if let Some((index, value)) = stimuli
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, v)| *v < lo || *v > hi)
+    {
+        return Err(HybridError::InvalidConfig(format!(
+            "DomainAdapter stimulus {index} = {value} is outside the declared encoding range ({lo}, {hi})"
+        )));
+    }
+    Ok(())
+}
+
 /// Reject a decode call that breaks the [`DomainAdapter`] input contract.
 ///
 /// | Violation | Error |
@@ -306,7 +349,7 @@ pub fn validate_decode_input(
     }
     check_width_cap("embed_dim", embed_dim)?;
     check_width_cap("num_neurons", num_neurons)?;
-    projector::validate_activity(activity, num_neurons)
+    projector::validate_activity(activity, num_neurons, "DomainAdapter::decode_activity")
 }
 
 /// Reject an embedding that breaks the [`DomainAdapter`] decode output
@@ -348,7 +391,11 @@ fn check_width_cap(name: &str, value: usize) -> Result<()> {
 ///
 /// Because pooling and resizing average `f32` values, finite inputs of extreme
 /// magnitude can overflow to `±Inf` and then `NaN` (`+Inf` and `-Inf` in one
-/// resize window). That is reported as [`HybridError::NonFinite`], not emitted.
+/// resize window). The pooled and resized buffers are checked for finiteness
+/// before `tanh` runs — `tanh` squashes `±Inf` to `±1` and would mask the
+/// overflow — so the overflow is reported as [`HybridError::NonFinite`]
+/// (`embedding` stage, matching the forward host's finite-pooled check), not
+/// emitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PoolResizeTanhAdapter {
     mode: ProjectionMode,
@@ -370,9 +417,15 @@ impl PoolResizeTanhAdapter {
 impl DomainAdapter for PoolResizeTanhAdapter {
     fn encode_stimuli(&mut self, hidden: &Tensor, snn_width: usize) -> Result<Vec<f32>> {
         validate_encode_input(hidden, snn_width)?;
-        let stimuli = projector::pooled_to_stimuli(&projector::mean_pool(hidden), snn_width);
-        validate_stimuli(&stimuli, snn_width)?;
-        Ok(stimuli)
+        let pooled = projector::mean_pool(hidden);
+        validate::validate_finite(&pooled, ForwardValueStage::Embedding)?;
+        let mut resized = projector::resize_to(&pooled, snn_width);
+        validate::validate_finite(&resized, ForwardValueStage::Embedding)?;
+        for v in &mut resized {
+            *v = v.tanh();
+        }
+        validate_stimuli(&resized, snn_width)?;
+        Ok(resized)
     }
 
     fn decode_activity(
@@ -397,14 +450,22 @@ impl DomainAdapter for PoolResizeTanhAdapter {
     }
 
     fn decoding(&self) -> SpikeDecoding {
-        let kind = match self.mode {
-            ProjectionMode::RateSum | ProjectionMode::SpikingTernary => SpikeDecodingKind::Rate,
-            ProjectionMode::TemporalHistogram => {
-                SpikeDecodingKind::Other("temporal_histogram".into())
+        let (kind, window) = match self.mode {
+            // Rate and histogram features aggregate every step of the recorded
+            // activity, so the decode window is the whole record: `usize::MAX`
+            // stands for "all provided ticks" (a fixed window would
+            // misdescribe multi-step input).
+            ProjectionMode::RateSum | ProjectionMode::SpikingTernary => {
+                (SpikeDecodingKind::Rate, usize::MAX)
             }
-            ProjectionMode::MembraneSnapshot => SpikeDecodingKind::Membrane,
+            ProjectionMode::TemporalHistogram => (
+                SpikeDecodingKind::Other("temporal_histogram".into()),
+                usize::MAX,
+            ),
+            // A membrane snapshot reads the end state of the record: one tick.
+            ProjectionMode::MembraneSnapshot => (SpikeDecodingKind::Membrane, 1),
         };
-        SpikeDecoding::new(kind, 1)
+        SpikeDecoding::new(kind, window)
     }
 }
 
@@ -445,7 +506,7 @@ mod tests {
             (&rank1, 5),
             (&rank1, 1),
         ] {
-            let got = adapter.encode_stimuli_checked(hidden, width).unwrap();
+            let got = encode_stimuli_checked(&mut adapter, hidden, width).unwrap();
             let want = projector::embed_to_stimuli_with_width(hidden, width);
             assert_eq!(
                 got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -463,7 +524,7 @@ mod tests {
             let mut adapter = PoolResizeTanhAdapter::new(mode);
             assert_eq!(adapter.mode(), mode);
             assert_eq!(
-                adapter.decode_activity_checked(&activity, 4, 6).unwrap(),
+                decode_activity_checked(&mut adapter, &activity, 4, 6).unwrap(),
                 projector::project_spike_activity(mode, &activity, 4, 6).unwrap(),
                 "mode {mode:?}"
             );
@@ -595,28 +656,38 @@ mod tests {
         assert!(validate_decode_input(&act, 2, 4).is_ok());
     }
 
-    /// Finite inputs can still overflow inside the pool/resize average:
-    /// `+Inf` and `-Inf` meet in one resize window and produce `NaN`. The
-    /// contract turns that into an error instead of emitting `NaN` stimuli.
+    /// Finite inputs can still overflow inside the pool/resize average. The
+    /// intermediate pooled/resized buffers are checked before `tanh` — which
+    /// would squash `±Inf` to `±1` and mask the failure — so every overflow
+    /// shape is rejected at the `embedding` stage, never emitted as stimuli.
     #[test]
     fn extreme_finite_hidden_state_is_rejected_not_emitted_as_nan() {
-        let hidden = Tensor::from_vec(vec![f32::MAX, -f32::MAX, f32::MAX, -f32::MAX], &[2, 2]);
-        assert!(validate_encode_input(&hidden, 1).is_ok());
         let mut adapter = PoolResizeTanhAdapter::default();
-        for result in [
-            adapter.encode_stimuli(&hidden, 1),
-            adapter.encode_stimuli_checked(&hidden, 1),
-        ] {
-            assert!(
-                matches!(
-                    result,
-                    Err(HybridError::NonFinite {
-                        stage: ForwardValueStage::Stimuli,
-                        index: 0
-                    })
-                ),
-                "{result:?}"
-            );
+        // Mixed-sign overflow: `+Inf` and `-Inf` meet in one resize window
+        // and would produce `NaN`.
+        let mixed = Tensor::from_vec(vec![f32::MAX, -f32::MAX, f32::MAX, -f32::MAX], &[2, 2]);
+        // Same-sign overflow inside `mean_pool`: `tanh(+Inf)` would emit a
+        // well-formed `1.0` stimulus if the pooled buffer were unchecked.
+        let same_sign = Tensor::from_vec(vec![f32::MAX, f32::MAX], &[2, 1]);
+        // Finite pooled values can still overflow inside a resize window.
+        let resize_overflow = Tensor::from_vec(vec![f32::MAX, f32::MAX], &[2]);
+        for hidden in [&mixed, &same_sign, &resize_overflow] {
+            assert!(validate_encode_input(hidden, 1).is_ok());
+            for result in [
+                adapter.encode_stimuli(hidden, 1),
+                encode_stimuli_checked(&mut adapter, hidden, 1),
+            ] {
+                assert!(
+                    matches!(
+                        result,
+                        Err(HybridError::NonFinite {
+                            stage: ForwardValueStage::Embedding,
+                            index: 0
+                        })
+                    ),
+                    "{result:?}"
+                );
+            }
         }
     }
 
@@ -640,11 +711,51 @@ mod tests {
         );
     }
 
+    /// A hook emitting `-0.5` despite declaring `(0.0, 1.0)` passes the global
+    /// `[-1, 1]` bound but fails the checked entry point's declared-range
+    /// validation.
+    #[test]
+    fn checked_encode_enforces_the_declared_encoding_range() {
+        struct NarrowRange;
+        impl DomainAdapter for NarrowRange {
+            fn encode_stimuli(&mut self, _hidden: &Tensor, snn_width: usize) -> Result<Vec<f32>> {
+                Ok(vec![-0.5; snn_width])
+            }
+            fn decode_activity(
+                &mut self,
+                _activity: &SpikeActivity,
+                _num_neurons: usize,
+                embed_dim: usize,
+            ) -> Result<Vec<f32>> {
+                Ok(vec![0.0; embed_dim])
+            }
+            fn encoding(&self) -> SpikeEncoding {
+                SpikeEncoding::new(SpikeEncodingKind::Rate, 1, Some((0.0, 1.0)))
+            }
+        }
+        let hidden = Tensor::from_vec(vec![0.1; 4], &[4]);
+        let mut adapter = NarrowRange;
+        match encode_stimuli_checked(&mut adapter, &hidden, 2) {
+            Err(HybridError::InvalidConfig(msg)) => {
+                assert!(msg.contains("declared encoding range"), "{msg}")
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(adapter.encode_stimuli(&hidden, 2).unwrap(), [-0.5; 2]);
+        assert!(validate_stimulus_range(&[0.5, 1.0], (0.0, 1.0)).is_ok());
+        assert!(validate_stimulus_range(&[-0.1], (0.0, 1.0)).is_err());
+    }
+
     #[test]
     fn adapter_is_object_safe() {
         let mut boxed: Box<dyn DomainAdapter> = Box::new(PoolResizeTanhAdapter::default());
         let hidden = Tensor::from_vec(vec![0.25; 4], &[4]);
-        assert_eq!(boxed.encode_stimuli_checked(&hidden, 4).unwrap().len(), 4);
+        assert_eq!(
+            encode_stimuli_checked(&mut *boxed, &hidden, 4)
+                .unwrap()
+                .len(),
+            4
+        );
         boxed.reset();
     }
 }

@@ -17,8 +17,9 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   bitwise determinism, statefulness (failure-atomic, `reset`), and error
   conditions. Non-panicking validators (`validate_encode_input`,
   `validate_stimuli`, `validate_decode_input`, `validate_embedding`) back the
-  provided `*_checked` host entry points; widths are capped at
-  `MAX_ADAPTER_WIDTH`. `PoolResizeTanhAdapter` is the reference
+  provided `encode_stimuli_checked` / `decode_activity_checked` host entry
+  functions (free functions, so implementations cannot bypass them); widths
+  are capped at `MAX_ADAPTER_WIDTH`. `PoolResizeTanhAdapter` is the reference
   implementation (the existing mean-pool → resize → `tanh` path and the pure
   `ProjectionMode` reverse path, bit-identical). `adapter::conformance`
   exports a reusable suite (`assert_domain_adapter_contract(factory)`) that
