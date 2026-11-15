@@ -1208,25 +1208,10 @@ impl HybridExecutionPlan {
     /// `transformer.max_seq_len`, `snn_input_channels`, or `snn_lif_neurons` is `0` (note
     /// [`crate::HybridNetwork::new`] permits such configs without validation).
     pub fn from_hybrid_config(config: &HybridConfig) -> std::result::Result<Self, PlanError> {
-        if config.transformer.dim == 0
-            || config.transformer.max_seq_len == 0
-            || config.snn_input_channels == 0
-            || config.snn_lif_neurons == 0
-        {
-            return Err(PlanError::InvalidParameters(format!(
-                "transformer.dim ({}), transformer.max_seq_len ({}), \
-                 snn_input_channels ({}), and snn_lif_neurons ({}) must be > 0",
-                config.transformer.dim,
-                config.transformer.max_seq_len,
-                config.snn_input_channels,
-                config.snn_lif_neurons
-            )));
-        }
-        let topology = HybridTopology::new(
-            AnnTopology::new(config.transformer.dim, config.transformer.max_seq_len, None)?,
-            SnnTopology::new(config.snn_input_channels, config.snn_lif_neurons)?,
-        )?;
-        Self::from_topology(&topology)
+        Self::from_hybrid_config_with_encoding(
+            config,
+            crate::PoolResizeTanhAdapter::default().encoding(),
+        )
     }
 
     /// [`from_hybrid_config`] with an explicit declared [`SpikeEncoding`] on
