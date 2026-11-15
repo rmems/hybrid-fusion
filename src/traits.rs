@@ -103,11 +103,12 @@ pub trait SpikingNetwork {
     /// Restore pre-step dynamics when the backend supports reset.
     ///
     /// Backends that advertise `BackendCapabilities::reset` must override this
-    /// method. The default is an explicit unsupported-operation error.
+    /// method. The default is the
+    /// [`crate::HybridError::SnnUnsupported`] sentinel, which lets hosts
+    /// distinguish "no reset implementation" from a failed reset override —
+    /// overrides reporting real failures must not return that variant.
     fn reset(&mut self) -> Result<()> {
-        Err(crate::HybridError::SnnStep(
-            "reset is not supported by this backend".into(),
-        ))
+        Err(crate::HybridError::SnnUnsupported("reset"))
     }
 
     /// Side-effect-free capability report.

@@ -257,12 +257,7 @@ mod tests {
         assert!(!caps.reset);
         let err = <NoReset as SpikingNetwork>::reset(&mut NoReset).unwrap_err();
         match err {
-            HybridError::SnnStep(message) => {
-                assert!(
-                    message.contains("not supported"),
-                    "default reset did not report itself unsupported: {message}"
-                );
-            }
+            HybridError::SnnUnsupported(op) => assert_eq!(op, "reset"),
             other => panic!("expected unsupported reset, got {other:?}"),
         }
     }

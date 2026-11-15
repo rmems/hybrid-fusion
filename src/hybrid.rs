@@ -256,10 +256,10 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     /// [`SpikingNetwork::reset`] without advertising
     /// [`crate::BackendCapabilities::reset`] is still honored. A backend
     /// reporting neither `reset` nor [`crate::BackendCapabilities::stateful`]
-    /// may keep the trait default: its unsupported-operation
-    /// [`HybridError::SnnStep`] is ignored because there is no cross-call state
-    /// to leak. Any other error propagates — a failing override is never
-    /// mistaken for "nothing to reset".
+    /// may keep the trait default: its
+    /// [`HybridError::SnnUnsupported`] sentinel is ignored because there is no
+    /// cross-call state to leak. Any other error propagates — a failing
+    /// override is never mistaken for "nothing to reset".
     ///
     /// # Errors
     ///
@@ -270,7 +270,7 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         let caps = self.snn.capabilities();
         match self.snn.reset() {
             Ok(()) => {}
-            Err(HybridError::SnnStep(_)) if !caps.reset && !caps.stateful => {}
+            Err(HybridError::SnnUnsupported(_)) if !caps.reset && !caps.stateful => {}
             Err(err) if !caps.reset && caps.stateful => {
                 return Err(HybridError::SnnStep(format!(
                     "cannot reset HybridNetwork: SNN is stateful but does not implement reset ({err})"
@@ -897,9 +897,7 @@ mod tests {
             channels,
             stateful: true,
             reset_capable: false,
-            reset_err: Some(|| {
-                HybridError::SnnStep("reset is not supported by this backend".into())
-            }),
+            reset_err: Some(|| HybridError::SnnUnsupported("reset")),
         });
         net.forward(&[0, 1], None).unwrap();
         let err = net.reset().unwrap_err();
@@ -934,9 +932,7 @@ mod tests {
             channels,
             stateful: false,
             reset_capable: false,
-            reset_err: Some(|| {
-                HybridError::SnnStep("reset is not supported by this backend".into())
-            }),
+            reset_err: Some(|| HybridError::SnnUnsupported("reset")),
         });
         net.forward(&[0, 1], None).unwrap();
         net.reset().unwrap();
@@ -944,10 +940,29 @@ mod tests {
     }
 
     #[test]
+    fn reset_propagates_snn_step_failure_on_stateless_backend() {
+        // A *real* `SnnStep` failure from an unadvertised override must not be
+        // mistaken for the `SnnUnsupported` default sentinel.
+        let channels = HybridConfig::tiny().snn_input_channels;
+        let mut net = caps_net(CapsSnn {
+            channels,
+            stateful: false,
+            reset_capable: false,
+            reset_err: Some(|| HybridError::SnnStep("membrane voltage rail dropped".into())),
+        });
+        net.forward(&[0, 1], None).unwrap();
+        match net.reset().unwrap_err() {
+            HybridError::SnnStep(msg) => assert!(msg.contains("voltage rail")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(net.global_step(), 1, "failed reset must keep global_step");
+    }
+
+    #[test]
     fn reset_propagates_real_failure_on_unadvertised_backend() {
         // An unadvertised override that fails with something other than the
-        // trait-default `SnnStep` unsupported error must surface the failure;
-        // only the default may be ignored on a stateless backend.
+        // trait-default `SnnUnsupported` sentinel must surface the failure;
+        // only the sentinel may be ignored on a stateless backend.
         let channels = HybridConfig::tiny().snn_input_channels;
         let mut net = caps_net(CapsSnn {
             channels,

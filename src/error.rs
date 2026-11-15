@@ -105,6 +105,14 @@ pub enum HybridError {
     #[error("SNN step failed: {0}")]
     SnnStep(String),
 
+    /// Trait-default sentinel for an optional SNN operation the backend does
+    /// not implement (currently [`crate::SpikingNetwork::reset`]). Hosts match
+    /// this variant to distinguish "unsupported" from a real backend failure;
+    /// an implementation reporting a *failed* override must use a different
+    /// variant such as [`Self::SnnStep`].
+    #[error("SNN operation not supported: {0}")]
+    SnnUnsupported(&'static str),
+
     /// A backend reported a fired ID outside its output population
     /// (`0..num_neurons`).
     ///

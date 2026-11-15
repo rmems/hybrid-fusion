@@ -211,8 +211,8 @@ check leaves the host counter unchanged but cannot roll back the backend step.
 
 ### `reset(&mut self) -> Result<()>`
 
-Restore pre-step dynamics for a reset-capable backend. The default returns an
-unsupported-operation `HybridError::SnnStep`; every backend that advertises
+Restore pre-step dynamics for a reset-capable backend. The default returns the
+`HybridError::SnnUnsupported` sentinel; every backend that advertises
 `with_reset(true)` must override it. `RequiredFeature::new("reset")` is accepted
 as a compatibility alias but normalizes to this typed reset capability.
 
@@ -220,7 +220,9 @@ as a compatibility alias but normalizes to this typed reset capability.
 overrides `reset` without advertising `with_reset(true)` is still honored,
 while a backend reporting `stateful` without reset makes the host reset fail
 closed. Stateless backends may keep the default — the host ignores the
-unsupported error when capabilities report neither `reset` nor `stateful`.
+`SnnUnsupported` sentinel when capabilities report neither `reset` nor
+`stateful`, but propagates any other error so a failing override cannot pass
+silently. Overrides reporting real failures must not return `SnnUnsupported`.
 What "reset" restores is backend-defined (`NeuromodSnn` also restores its
 construction-time weights and thresholds for replay).
 
@@ -1240,7 +1242,8 @@ All errors come from [`src/error.rs`](../src/error.rs):
 | `NonFinite { stage, index }` | NaN or ±Inf in hidden / embedding / stimuli; NaN in `SpikingExpertRouter` encoder stimulus or decoder readout (`ForwardValueStage::EncoderStimulus` / `DecoderReadout`) |
 | `ZeroSnnChannels` | `SpikingNetwork::num_channels()` is 0 |
 | `InvalidConfig(String)` | Other host/config contract failures |
-| `SnnStep(String)` | SNN internal error during `step` / `step_frozen` (Sentry when enabled); unsupported frozen evaluation / reset |
+| `SnnStep(String)` | SNN internal error during `step` / `step_frozen` (Sentry when enabled); unsupported frozen evaluation |
+| `SnnUnsupported(&'static str)` | Trait-default sentinel: the backend does not implement the named operation (currently `reset`). Hosts may ignore it on stateless backends; overrides must not return it for real failures |
 | `SnnSpikeOutOfRange { neuron, num_neurons }` | Backend reported a fired ID outside `0..num_neurons` (host-side check; was free-text `SnnStep`) |
 | `SnnDuplicateSpike { neuron }` | Backend reported the same neuron twice in one tick |
 | `SnnInvalidReadout { index, value }` | `SpikeDecoder` readout was negative or `±Inf` (NaN uses `NonFinite`) |
