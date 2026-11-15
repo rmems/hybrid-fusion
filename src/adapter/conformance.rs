@@ -692,8 +692,6 @@ mod tests {
     use crate::adapter::PoolResizeTanhAdapter;
     use crate::error::HybridError;
     use crate::types::ProjectionMode;
-    use std::cell::Cell;
-    use std::rc::Rc;
 
     /// Reference adapter with one knob per contract clause to break.
     ///
@@ -713,7 +711,7 @@ mod tests {
         advances_on_failure: bool,
         state: u32,
         bad_range: bool,
-        ticks: Rc<Cell<u32>>,
+        ticks: std::sync::Arc<std::sync::atomic::AtomicU32>,
     }
 
     impl DomainAdapter for Faulty {
@@ -732,8 +730,9 @@ mod tests {
                 out.pop();
             }
             if self.non_deterministic {
-                let tick = self.ticks.get();
-                self.ticks.set(tick + 1);
+                let tick = self
+                    .ticks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 out[0] = (tick % 7) as f32 / 10.0;
             }
             if self.reset_is_noop || self.advances_on_failure {

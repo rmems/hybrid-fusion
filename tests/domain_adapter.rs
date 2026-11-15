@@ -471,3 +471,13 @@ fn reverse_path_reset_clears_adapter_state() {
         "after reset the adapter must replay its first output"
     );
 }
+
+/// `DomainAdapter: Send` keeps the hosts `Send` whenever their backends are —
+/// an injected `Box<dyn DomainAdapter>` must not strip the auto-trait.
+#[test]
+fn hosts_stay_send_with_an_injected_adapter() {
+    fn is_send<T: Send>() {}
+    is_send::<Box<dyn DomainAdapter>>();
+    is_send::<HybridNetwork<PatternTransformer, SilentSnn>>();
+    is_send::<ReverseHybridPath<RecordingRouter>>();
+}

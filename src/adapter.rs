@@ -155,7 +155,12 @@ pub const STIMULUS_BOUND: f32 = 1.0;
 ///
 /// assert_domain_adapter_contract(|| PoolResizeTanhAdapter::new(ProjectionMode::RateSum));
 /// ```
-pub trait DomainAdapter {
+///
+/// The `Send` supertrait keeps hosts holding `Box<dyn DomainAdapter>` `Send`
+/// when their other backends are — an adapter behind `Rc` or raw pointers
+/// cannot be injected. `Sync` is deliberately not required: all mutation goes
+/// through `&mut self`, so `Cell`-style streaming state stays legal.
+pub trait DomainAdapter: Send {
     /// ANN → SNN hook. Contract: see the "Encode" section of the trait docs.
     fn encode_stimuli(&mut self, hidden: &Tensor, snn_width: usize) -> Result<Vec<f32>>;
 
