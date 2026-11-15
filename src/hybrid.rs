@@ -844,4 +844,133 @@ mod tests {
         assert_eq!(after_reset.stimuli, baseline.stimuli);
         assert_eq!(after_reset.global_step, baseline.global_step);
     }
+
+    /// SNN with configurable reset capability / failure for host reset branches.
+    struct CapsSnn {
+        channels: usize,
+        stateful: bool,
+        reset_capable: bool,
+        reset_err: Option<&'static str>,
+    }
+
+    impl SpikingNetwork for CapsSnn {
+        fn step(&mut self, _stimuli: &[f32], _modulators: &NeuroModulators) -> Result<Vec<usize>> {
+            Ok(Vec::new())
+        }
+        fn num_channels(&self) -> usize {
+            self.channels
+        }
+        fn reset(&mut self) -> Result<()> {
+            match self.reset_err {
+                Some(msg) => Err(HybridError::SnnStep(msg.into())),
+                None => Ok(()),
+            }
+        }
+        fn capabilities(&self) -> crate::BackendCapabilities {
+            use crate::capabilities::RequiredFeature;
+            crate::BackendCapabilities::snn(std::any::type_name::<Self>())
+                .with_channels(self.channels)
+                .with_reset(self.reset_capable)
+                .with_stateful(self.stateful)
+                .with_features([RequiredFeature::new("step")])
+        }
+    }
+
+    fn caps_net<S: SpikingNetwork>(snn: S) -> HybridNetwork<MockTransformer, S> {
+        let cfg = HybridConfig::tiny();
+        HybridNetwork::new(
+            MockTransformer {
+                dim: cfg.transformer.dim,
+                max_seq: cfg.transformer.max_seq_len,
+            },
+            snn,
+            cfg,
+        )
+    }
+
+    #[test]
+    fn reset_fails_closed_on_stateful_backend_without_reset() {
+        let channels = HybridConfig::tiny().snn_input_channels;
+        let mut net = caps_net(CapsSnn {
+            channels,
+            stateful: true,
+            reset_capable: false,
+            reset_err: Some("reset is not supported by this backend"),
+        });
+        net.forward(&[0, 1], None).unwrap();
+        let err = net.reset().unwrap_err();
+        match err {
+            HybridError::SnnStep(msg) => assert!(msg.contains("stateful")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(net.global_step(), 1, "failed reset must keep global_step");
+    }
+
+    #[test]
+    fn reset_propagates_advertised_backend_failure() {
+        let channels = HybridConfig::tiny().snn_input_channels;
+        let mut net = caps_net(CapsSnn {
+            channels,
+            stateful: true,
+            reset_capable: true,
+            reset_err: Some("backend reset exploded"),
+        });
+        net.forward(&[0, 1], None).unwrap();
+        match net.reset().unwrap_err() {
+            HybridError::SnnStep(msg) => assert!(msg.contains("exploded")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(net.global_step(), 1, "failed reset must keep global_step");
+    }
+
+    #[test]
+    fn reset_succeeds_on_stateless_backend_with_default_reset() {
+        let channels = HybridConfig::tiny().snn_input_channels;
+        let mut net = caps_net(CapsSnn {
+            channels,
+            stateful: false,
+            reset_capable: false,
+            reset_err: Some("reset is not supported by this backend"),
+        });
+        net.forward(&[0, 1], None).unwrap();
+        net.reset().unwrap();
+        assert_eq!(net.global_step(), 0);
+    }
+
+    #[test]
+    fn reset_honors_backend_override_without_capability() {
+        // Backend implements reset() but reports default capabilities
+        // (stateful=false, reset=false): the host must still call it rather
+        // than silently skipping a real reset implementation.
+        let channels = HybridConfig::tiny().snn_input_channels;
+        struct QuietResetSnn {
+            channels: usize,
+            resets: u32,
+        }
+        impl SpikingNetwork for QuietResetSnn {
+            fn step(
+                &mut self,
+                _stimuli: &[f32],
+                _modulators: &NeuroModulators,
+            ) -> Result<Vec<usize>> {
+                Ok(Vec::new())
+            }
+            fn num_channels(&self) -> usize {
+                self.channels
+            }
+            fn reset(&mut self) -> Result<()> {
+                self.resets += 1;
+                Ok(())
+            }
+        }
+        let mut net = caps_net(QuietResetSnn {
+            channels,
+            resets: 0,
+        });
+        net.reset().unwrap();
+        assert_eq!(
+            net.snn.resets, 1,
+            "host must delegate even without with_reset(true)"
+        );
+    }
 }
