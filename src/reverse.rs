@@ -474,9 +474,9 @@ mod tests {
             for (i, w) in expert_weights.iter_mut().enumerate().take(k) {
                 *w = 1.0 / k as f32 + if i == 0 { skew } else { 0.0 };
             }
-            let sum: f32 = expert_weights.iter().sum();
+            let sum: f64 = expert_weights.iter().map(|&w| f64::from(w)).sum();
             for w in &mut expert_weights {
-                *w /= sum;
+                *w = (*w as f64 / sum) as f32;
             }
             Ok(ExpertRouteOutput {
                 expert_weights,

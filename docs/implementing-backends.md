@@ -216,6 +216,14 @@ unsupported-operation `HybridError::SnnStep`; every backend that advertises
 `with_reset(true)` must override it. `RequiredFeature::new("reset")` is accepted
 as a compatibility alias but normalizes to this typed reset capability.
 
+`HybridNetwork::reset` calls this method **unconditionally**: a backend that
+overrides `reset` without advertising `with_reset(true)` is still honored,
+while a backend reporting `stateful` without reset makes the host reset fail
+closed. Stateless backends may keep the default — the host ignores the
+unsupported error when capabilities report neither `reset` nor `stateful`.
+What "reset" restores is backend-defined (`NeuromodSnn` also restores its
+construction-time weights and thresholds for replay).
+
 ### `capabilities(&self) -> BackendCapabilities`
 
 Side-effect-free report. The default advertises the SNN domain, `f32`, the

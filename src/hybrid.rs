@@ -245,26 +245,36 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
 
     /// Restore post-construction dynamic state for a new input sequence.
     ///
-    /// Clears the host [`Self::global_step`] counter and, when the injected
-    /// [`SpikingNetwork`] advertises [`crate::BackendCapabilities::reset`],
-    /// delegates to [`SpikingNetwork::reset`] so membrane, refractory, trace,
-    /// and similar cross-tick state returns to its freshly constructed values.
-    /// Transformer and SNN **weights / parameters are not modified**.
+    /// Clears the host [`Self::global_step`] counter and delegates to
+    /// [`SpikingNetwork::reset`] so membrane, refractory, trace, and similar
+    /// cross-tick state returns to its freshly constructed values. The host
+    /// does not touch transformer weights; SNN-side reset semantics are
+    /// backend-defined — `NeuromodSnn::reset`, for example, also restores its
+    /// construction-time weights and thresholds.
+    ///
+    /// The backend call is unconditional so an implementation that overrides
+    /// [`SpikingNetwork::reset`] without advertising
+    /// [`crate::BackendCapabilities::reset`] is still honored. A backend
+    /// reporting neither `reset` nor [`crate::BackendCapabilities::stateful`]
+    /// may keep the trait default: its unsupported-operation error is ignored
+    /// because there is no cross-call state to leak.
     ///
     /// # Errors
     ///
-    /// Propagates [`SpikingNetwork::reset`] when reset is advertised. If the SNN
-    /// reports [`crate::BackendCapabilities::stateful`] without reset, returns
-    /// an unsupported-operation error so dynamics cannot be silently leaked
-    /// across sequences.
+    /// Propagates [`SpikingNetwork::reset`] when reset is advertised, and fails
+    /// closed when the SNN reports `stateful` without reset so dynamics cannot
+    /// be silently leaked across sequences.
     pub fn reset(&mut self) -> Result<()> {
         let caps = self.snn.capabilities();
-        if caps.reset {
-            self.snn.reset()?;
-        } else if caps.stateful {
-            return Err(HybridError::SnnStep(
-                "cannot reset HybridNetwork: SNN is stateful but does not implement reset".into(),
-            ));
+        match self.snn.reset() {
+            Ok(()) => {}
+            Err(_) if !caps.reset && !caps.stateful => {}
+            Err(err) if !caps.reset => {
+                return Err(HybridError::SnnStep(format!(
+                    "cannot reset HybridNetwork: SNN is stateful but does not implement reset ({err})"
+                )));
+            }
+            Err(err) => return Err(err),
         }
         self.global_step = 0;
         Ok(())
@@ -760,9 +770,13 @@ mod tests {
                     got: stimuli.len(),
                 });
             }
-            self.membrane += stimuli.iter().sum::<f32>();
+            // Normalized by channel count so a single forward stays
+            // subthreshold: state must accumulate across calls to fire, and
+            // subtracting the threshold leaves a residual that only `reset`
+            // can clear — the carry this test exists to observe.
+            self.membrane += stimuli.iter().sum::<f32>() / self.channels as f32;
             if self.membrane >= 1.0 {
-                self.membrane = 0.0;
+                self.membrane -= 1.0;
                 Ok(vec![0])
             } else {
                 Ok(vec![])
@@ -818,8 +832,13 @@ mod tests {
         assert_eq!(first.stimuli, baseline.stimuli);
 
         let _ = used.forward(&tokens_b, None).unwrap();
+        assert!(
+            used.snn.membrane != 0.0,
+            "epoch must leave carried membrane state for reset to clear"
+        );
 
         used.reset().unwrap();
+        assert_eq!(used.snn.membrane, 0.0, "host reset must zero the membrane");
         let after_reset = used.forward(&tokens_a, None).unwrap();
         assert_eq!(after_reset.fired_neurons, baseline.fired_neurons);
         assert_eq!(after_reset.stimuli, baseline.stimuli);

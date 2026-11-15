@@ -71,6 +71,12 @@ impl SimpleSnn {
     pub fn reset(&mut self) {
         self.membrane_potentials.fill(0.0);
     }
+
+    /// Current membrane potentials, for diagnostics and tests observing
+    /// cross-call state (e.g. host `reset` delegation).
+    pub fn membrane_potentials(&self) -> &[f32] {
+        &self.membrane_potentials
+    }
 }
 
 impl SpikingNetwork for SimpleSnn {

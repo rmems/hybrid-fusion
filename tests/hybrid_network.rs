@@ -308,6 +308,7 @@ fn reset_restores_reference_forward_output_after_membrane_epoch() {
 
     let mut fresh = build();
     let baseline = fresh.forward(&tokens_a, Some(mods.clone())).unwrap();
+    let fresh_membrane = fresh.snn.membrane_potentials().to_vec();
 
     let mut used = build();
     assert_eq!(
@@ -317,8 +318,17 @@ fn reset_restores_reference_forward_output_after_membrane_epoch() {
         baseline.fired_neurons
     );
     let _ = used.forward(&tokens_b, None).unwrap();
+    assert_ne!(
+        used.snn.membrane_potentials(),
+        fresh_membrane.as_slice(),
+        "epoch must leave carried membrane state for reset to clear"
+    );
 
     used.reset().unwrap();
+    assert!(
+        used.snn.membrane_potentials().iter().all(|&p| p == 0.0),
+        "host reset must zero SimpleSnn membrane potentials"
+    );
     let after_reset = used.forward(&tokens_a, Some(mods)).unwrap();
     assert_eq!(after_reset.fired_neurons, baseline.fired_neurons);
     assert_eq!(after_reset.stimuli, baseline.stimuli);

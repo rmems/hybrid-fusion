@@ -550,8 +550,8 @@ pub trait ExpertRouter {
     ///
     /// The default is a no-op for stateless routers. Stateful checkpoint-backed
     /// routers should clear caches, gating memory, or other epoch state here;
-    /// hosts such as [`crate::ReverseHybridPath::reset`] call this after a
-    /// successful forward epoch.
+    /// hosts such as [`crate::ReverseHybridPath::reset`] call this whenever
+    /// reset is invoked, regardless of whether a forward call succeeded.
     fn reset(&mut self) {}
 
     /// Pre-softmax gate logits for `embedding`: the raw, unnormalized scores

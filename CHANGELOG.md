@@ -325,10 +325,14 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 - **`HybridNetwork::reset` / `ReverseHybridPath::reset` (RM-1444):** host
   `reset()` now restores post-construction **dynamic** state, not only
   `global_step`. `HybridNetwork::reset` delegates to
-  [`SpikingNetwork::reset`] when the backend advertises reset (and fails closed
-  when the SNN is stateful without reset); `ReverseHybridPath::reset` also
-  calls the new default [`ExpertRouter::reset`] hook for cross-call router
-  epoch state. Learned weights and gate parameters are unchanged.
+  [`SpikingNetwork::reset`] unconditionally (honoring backends that override it
+  without advertising the capability), fails closed when the SNN reports
+  `stateful` without reset, and ignores the unsupported-operation default on
+  stateless backends that have nothing to leak; `ReverseHybridPath::reset`
+  also calls the new default [`ExpertRouter::reset`] hook for cross-call
+  router epoch state. Host transformer weights and gate parameters are
+  unchanged; backend-specific SNN reset semantics apply (`NeuromodSnn::reset`
+  restores its construction-time weights and thresholds).
   **Behavior change:** `HybridNetwork::reset` now returns [`Result<()>`] and
   propagates SNN reset errors instead of silently ignoring membrane / trace
   leakage across input sequences.
