@@ -3,8 +3,8 @@
 //! Format-neutral topology planning. No checkpoint file, loader, or layout type.
 
 use hybrid_fusion::{
-    AnnTopology, HybridConfig, HybridError, HybridExecutionPlan, HybridTopology, PlanError,
-    PortSpec, ProjectionMode, SnnTopology, TopologySource,
+    AnnTopology, DomainAdapter, HybridConfig, HybridError, HybridExecutionPlan, HybridTopology,
+    PlanError, PoolResizeTanhAdapter, PortSpec, ProjectionMode, SnnTopology, TopologySource,
 };
 
 fn plan_from_source(
@@ -69,7 +69,10 @@ fn snn_axes_stay_independent_and_architecture_is_descriptive() {
     assert_eq!(ann.attrs.get("last_axis").map(String::as_str), Some("128"));
     assert_eq!(ann.attrs.get("max_sequence").map(String::as_str), Some("7"));
     let adapt = plan.stage_by_name("adapt.project_stimuli").unwrap();
-    assert_eq!(adapt.output, PortSpec::f32_exact(&[3]));
+    assert_eq!(
+        adapt.output,
+        PortSpec::f32_exact(&[3]).with_encoding(PoolResizeTanhAdapter::default().encoding())
+    );
     assert_eq!(
         adapt.attrs.get("hidden_dim").map(String::as_str),
         Some("128")
@@ -208,7 +211,11 @@ fn reverse_embedding_width_is_independent_of_ann_hidden_width() {
     let plan =
         HybridExecutionPlan::from_reverse_topology(&topology, ProjectionMode::RateSum, 48).unwrap();
     let project = plan.stage_by_name("adapt.project_activity").unwrap();
-    assert_eq!(project.output, PortSpec::f32_exact(&[48]));
+    assert_eq!(
+        project.output,
+        PortSpec::f32_exact(&[48])
+            .with_decoding(PoolResizeTanhAdapter::new(ProjectionMode::RateSum).decoding())
+    );
     let router = plan.stage_by_name("moe.router").unwrap();
     assert_eq!(router.input, PortSpec::f32_exact(&[48]));
     assert_eq!(

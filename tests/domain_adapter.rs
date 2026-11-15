@@ -10,9 +10,9 @@ use hybrid_fusion::adapter::conformance::{
 use hybrid_fusion::{
     DomainAdapter, ExpertRouteOutput, ExpertRouter, HybridConfig, HybridError, HybridNetwork,
     NeuroModulators, PoolResizeTanhAdapter, ProjectionMode, Result, ReverseHybridPath,
-    SpikeActivity, SpikeEncoding, SpikeEncodingKind, SpikingNetwork, Tensor, Transformer,
-    decode_activity_checked, encode_stimuli_checked, validate_decode_input, validate_embedding,
-    validate_encode_input, validate_stimuli,
+    SpikeActivity, SpikeDecoding, SpikeEncoding, SpikeEncodingKind, SpikingNetwork, StageKind,
+    Tensor, Transformer, decode_activity_checked, encode_stimuli_checked, validate_decode_input,
+    validate_embedding, validate_encode_input, validate_stimuli,
 };
 
 /// Stateful adapter: stimuli are an exponential moving average of the
@@ -469,6 +469,57 @@ fn reverse_path_reset_clears_adapter_state() {
         path.forward_activity(&act).unwrap().embedding,
         vec![1.0; 6],
         "after reset the adapter must replay its first output"
+    );
+}
+
+/// `execution_plan` records the injected adapter's declared encoding/decoding
+/// on the adaptation port, not the reference path's metadata.
+#[test]
+fn execution_plan_records_the_injected_adapter_metadata() {
+    let config = HybridConfig::tiny();
+    let net = HybridNetwork::try_with_adapter(
+        PatternTransformer {
+            dim: config.transformer.dim,
+        },
+        SilentSnn {
+            channels: config.snn_input_channels,
+        },
+        config,
+        // ConstantAdapter overrides no metadata: encoding() is the trait
+        // default, which the plan must report verbatim.
+        Box::new(ConstantAdapter { value: 0.25 }),
+    )
+    .unwrap();
+    let plan = net.execution_plan().unwrap();
+    let adapt = plan
+        .stages()
+        .iter()
+        .find(|s| s.kind == StageKind::Adaptation)
+        .expect("adaptation stage");
+    assert_eq!(
+        adapt.output.encoding,
+        Some(SpikeEncoding::default()),
+        "plan must carry the injected adapter's declared encoding"
+    );
+
+    let path = ReverseHybridPath::with_adapter(
+        ProjectionMode::MembraneSnapshot,
+        4,
+        6,
+        RecordingRouter::default(),
+        Box::new(ConstantAdapter { value: 0.75 }),
+    )
+    .unwrap();
+    let plan = path.execution_plan().unwrap();
+    let adapt = plan
+        .stages()
+        .iter()
+        .find(|s| s.kind == StageKind::Adaptation)
+        .expect("adaptation stage");
+    assert_eq!(
+        adapt.output.decoding,
+        Some(SpikeDecoding::default()),
+        "plan must carry the injected adapter's declared decoding"
     );
 }
 

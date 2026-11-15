@@ -31,6 +31,12 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   `decode_activity_checked`. Both hosts reset adapter state in `reset()`.
   `new`/`try_new` keep their signatures and default to
   `PoolResizeTanhAdapter`, so existing behavior is unchanged.
+  `HybridExecutionPlan` gained `from_topology_with_encoding`,
+  `from_hybrid_config_with_encoding`, and `from_reverse_path_with_decoding`
+  so `execution_plan` records the injected adapter's declared
+  `SpikeEncoding`/`SpikeDecoding` on the adaptation port.
+  `DomainAdapter` requires `Send` so hosts stay `Send` when their backends
+  are.
 - **`ResultTrack` on every emitted result** ([#62](https://github.com/rmems/hybrid-fusion/issues/62),
   Linear [RM-2207](https://linear.app/rpd-34/issue/RM-2207); shape from ADR 0001 §5.1):
   new `#[non_exhaustive]` `ResultTrack { Ann, SnnNative, Hybrid }` in

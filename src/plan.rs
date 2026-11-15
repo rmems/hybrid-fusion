@@ -27,6 +27,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::adapter::DomainAdapter;
 use crate::encoding::{SpikeDecoding, SpikeEncoding};
 use crate::topology::{AnnTopology, HybridTopology, SnnTopology};
 use crate::types::{Dtype, HybridConfig, ProjectionMode};
@@ -1112,6 +1113,25 @@ impl HybridExecutionPlan {
     /// [`PlanError::InvalidTopology`] when any topology dimension is `0`,
     /// including a value mutated after [`HybridTopology::new`].
     pub fn from_topology(topology: &HybridTopology) -> std::result::Result<Self, PlanError> {
+        Self::from_topology_with_encoding(
+            topology,
+            crate::PoolResizeTanhAdapter::default().encoding(),
+        )
+    }
+
+    /// [`from_topology`] with an explicit declared [`SpikeEncoding`] on the
+    /// adaptation port — the honest description when the host runs an
+    /// injected [`crate::DomainAdapter`] rather than the reference
+    /// pool→resize→`tanh` path (RM-1811). `encoding` is what the injected
+    /// adapter reports via [`crate::DomainAdapter::encoding`].
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError::InvalidTopology`] when any topology dimension is `0`.
+    pub fn from_topology_with_encoding(
+        topology: &HybridTopology,
+        encoding: crate::SpikeEncoding,
+    ) -> std::result::Result<Self, PlanError> {
         let topology = HybridTopology::new(topology.ann.clone(), topology.snn.clone())?;
         let hidden_dim = topology.ann.hidden_dim;
         let max_seq_len = topology.ann.max_seq_len;
@@ -1145,10 +1165,10 @@ impl HybridExecutionPlan {
             StageKind::Adaptation,
             // mirrors the transformer's accepted hidden-state layouts
             PortSpec::f32(vec![]),
-            // bounded stimuli in [-1, 1] via projector tanh
-            PortSpec::f32_exact(&[input_channels]),
+            // bounded stimuli in [-1, 1] via the declared adapter encoding
+            PortSpec::f32_exact(&[input_channels]).with_encoding(encoding),
         );
-        g.set_attr(adapt, "role", "projector::embed_to_stimuli_with_width");
+        g.set_attr(adapt, "role", "domain_adapter.encode_stimuli");
         g.set_attr(adapt, "hidden_dim", hidden_dim.to_string());
         g.set_attr(adapt, "output_bounds", "[-1,1]");
 
@@ -1209,6 +1229,37 @@ impl HybridExecutionPlan {
         Self::from_topology(&topology)
     }
 
+    /// [`from_hybrid_config`] with an explicit declared [`SpikeEncoding`] on
+    /// the adaptation port — see [`from_topology_with_encoding`].
+    ///
+    /// # Errors
+    ///
+    /// Same validation failures as [`from_hybrid_config`].
+    pub fn from_hybrid_config_with_encoding(
+        config: &HybridConfig,
+        encoding: crate::SpikeEncoding,
+    ) -> std::result::Result<Self, PlanError> {
+        if config.transformer.dim == 0
+            || config.transformer.max_seq_len == 0
+            || config.snn_input_channels == 0
+            || config.snn_lif_neurons == 0
+        {
+            return Err(PlanError::InvalidParameters(format!(
+                "transformer.dim ({}), transformer.max_seq_len ({}), \
+                 snn_input_channels ({}), and snn_lif_neurons ({}) must be > 0",
+                config.transformer.dim,
+                config.transformer.max_seq_len,
+                config.snn_input_channels,
+                config.snn_lif_neurons
+            )));
+        }
+        let topology = HybridTopology::new(
+            AnnTopology::new(config.transformer.dim, config.transformer.max_seq_len, None)?,
+            SnnTopology::new(config.snn_input_channels, config.snn_lif_neurons)?,
+        )?;
+        Self::from_topology_with_encoding(&topology, encoding)
+    }
+
     /// Reverse-path plan from neutral topology.
     ///
     /// `output_population` is the neuron population. `embed_dim` is the router
@@ -1252,6 +1303,32 @@ impl HybridExecutionPlan {
         n_neurons: usize,
         embed_dim: usize,
     ) -> std::result::Result<Self, PlanError> {
+        Self::from_reverse_path_with_decoding(
+            mode,
+            n_neurons,
+            embed_dim,
+            crate::PoolResizeTanhAdapter::new(mode).decoding(),
+        )
+    }
+
+    /// [`from_reverse_path`] with an explicit declared [`SpikeDecoding`] on the
+    /// adaptation port — the honest description when the host runs an
+    /// injected [`crate::DomainAdapter`] rather than the reference
+    /// `ProjectionMode` path (RM-1811).
+    ///
+    /// `mode` is still recorded as stage metadata (it is the host's declared
+    /// projection mode); `decoding` is what the injected adapter reports via
+    /// [`crate::DomainAdapter::decoding`].
+    ///
+    /// # Errors
+    ///
+    /// [`PlanError::InvalidParameters`] if `n_neurons` or `embed_dim` is `0`.
+    pub fn from_reverse_path_with_decoding(
+        mode: ProjectionMode,
+        n_neurons: usize,
+        embed_dim: usize,
+        decoding: crate::SpikeDecoding,
+    ) -> std::result::Result<Self, PlanError> {
         if n_neurons == 0 || embed_dim == 0 {
             return Err(PlanError::InvalidParameters(format!(
                 "n_neurons ({n_neurons}) and embed_dim ({embed_dim}) must be > 0"
@@ -1281,10 +1358,10 @@ impl HybridExecutionPlan {
             StageKind::Adaptation,
             // consumes the composite SpikeActivity (see snn.activity)
             PortSpec::any(),
-            PortSpec::f32_exact(&[embed_dim]),
+            PortSpec::f32_exact(&[embed_dim]).with_decoding(decoding),
         );
         g.set_attr(project, "projection_mode", format!("{mode:?}"));
-        g.set_attr(project, "role", "projector::project_spike_activity");
+        g.set_attr(project, "role", "domain_adapter.decode_activity");
         g.set_attr(project, "num_neurons", n_neurons.to_string());
 
         let router = g.add_stage(

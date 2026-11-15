@@ -21,7 +21,10 @@ use crate::validate;
 /// The ANN→SNN representation change (hidden state → bounded stimuli) is
 /// delegated to the injected [`DomainAdapter`]: [`PoolResizeTanhAdapter`] is
 /// the default and is bit-identical to the original in-line
-/// pool → resize → `tanh` path (RM-1811).
+/// pool → resize → `tanh` path for all inputs that do not overflow the
+/// pool/resize summation — overflowing windows are rejected as
+/// [`HybridError::NonFinite`] rather than squashed to `1.0`/`NaN` by `tanh`
+/// (RM-1811; intentional contract hardening from #76).
 pub struct HybridNetwork<T: Transformer, S: SpikingNetwork> {
     pub transformer: T,
     pub snn: S,
@@ -177,6 +180,22 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         self.adapter = adapter;
     }
 
+    /// Run one ANN→SNN tick: token IDs → hidden states → adapter stimuli →
+    /// SNN step.
+    ///
+    /// A stateful adapter commits its streaming state once
+    /// [`DomainAdapter::encode_stimuli`] accepts the input; if the SNN step
+    /// then fails, the adapter has still consumed that tick — the contract's
+    /// failure-atomicity guarantee covers the adapter's own errors, not the
+    /// host's downstream failures. [`Self::reset`] is the way to drop such
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// Validation failures (empty/oversized `token_ids`, malformed hidden
+    /// states, non-finite intermediates, out-of-domain fired IDs) and adapter
+    /// or backend errors are returned without advancing `global_step`. Backend
+    /// failures are reported to Sentry when the `sentry` feature is on.
     pub fn forward(
         &mut self,
         token_ids: &[u32],
@@ -292,14 +311,20 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     /// `Transformer::max_seq_len`, `SpikingNetwork::num_channels`,
     /// `SpikingNetwork::num_neurons`) — the same
     /// values `forward` validates against — so the plan matches the runnable
-    /// pipeline even when `config` disagrees.
+    /// pipeline even when `config` disagrees. The adaptation port records the
+    /// injected adapter's declared [`DomainAdapter::encoding`].
     pub fn execution_plan(&self) -> Result<crate::plan::HybridExecutionPlan> {
         let mut cfg = self.config.clone();
         cfg.transformer.dim = self.transformer.dim();
         cfg.transformer.max_seq_len = self.transformer.max_seq_len();
         cfg.snn_input_channels = self.snn.num_channels();
         cfg.snn_lif_neurons = self.snn.num_neurons();
-        Ok(crate::plan::HybridExecutionPlan::from_hybrid_config(&cfg)?)
+        Ok(
+            crate::plan::HybridExecutionPlan::from_hybrid_config_with_encoding(
+                &cfg,
+                self.adapter.encoding(),
+            )?,
+        )
     }
 
     /// Restore post-construction dynamic state for a new input sequence.
