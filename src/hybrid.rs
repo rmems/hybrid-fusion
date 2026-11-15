@@ -256,8 +256,10 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     /// [`SpikingNetwork::reset`] without advertising
     /// [`crate::BackendCapabilities::reset`] is still honored. A backend
     /// reporting neither `reset` nor [`crate::BackendCapabilities::stateful`]
-    /// may keep the trait default: its unsupported-operation error is ignored
-    /// because there is no cross-call state to leak.
+    /// may keep the trait default: its unsupported-operation
+    /// [`HybridError::SnnStep`] is ignored because there is no cross-call state
+    /// to leak. Any other error propagates — a failing override is never
+    /// mistaken for "nothing to reset".
     ///
     /// # Errors
     ///
@@ -268,8 +270,8 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         let caps = self.snn.capabilities();
         match self.snn.reset() {
             Ok(()) => {}
-            Err(_) if !caps.reset && !caps.stateful => {}
-            Err(err) if !caps.reset => {
+            Err(HybridError::SnnStep(_)) if !caps.reset && !caps.stateful => {}
+            Err(err) if !caps.reset && caps.stateful => {
                 return Err(HybridError::SnnStep(format!(
                     "cannot reset HybridNetwork: SNN is stateful but does not implement reset ({err})"
                 )));
@@ -850,7 +852,7 @@ mod tests {
         channels: usize,
         stateful: bool,
         reset_capable: bool,
-        reset_err: Option<&'static str>,
+        reset_err: Option<fn() -> HybridError>,
     }
 
     impl SpikingNetwork for CapsSnn {
@@ -862,7 +864,7 @@ mod tests {
         }
         fn reset(&mut self) -> Result<()> {
             match self.reset_err {
-                Some(msg) => Err(HybridError::SnnStep(msg.into())),
+                Some(err) => Err(err()),
                 None => Ok(()),
             }
         }
@@ -895,7 +897,9 @@ mod tests {
             channels,
             stateful: true,
             reset_capable: false,
-            reset_err: Some("reset is not supported by this backend"),
+            reset_err: Some(|| {
+                HybridError::SnnStep("reset is not supported by this backend".into())
+            }),
         });
         net.forward(&[0, 1], None).unwrap();
         let err = net.reset().unwrap_err();
@@ -913,7 +917,7 @@ mod tests {
             channels,
             stateful: true,
             reset_capable: true,
-            reset_err: Some("backend reset exploded"),
+            reset_err: Some(|| HybridError::SnnStep("backend reset exploded".into())),
         });
         net.forward(&[0, 1], None).unwrap();
         match net.reset().unwrap_err() {
@@ -930,11 +934,33 @@ mod tests {
             channels,
             stateful: false,
             reset_capable: false,
-            reset_err: Some("reset is not supported by this backend"),
+            reset_err: Some(|| {
+                HybridError::SnnStep("reset is not supported by this backend".into())
+            }),
         });
         net.forward(&[0, 1], None).unwrap();
         net.reset().unwrap();
         assert_eq!(net.global_step(), 0);
+    }
+
+    #[test]
+    fn reset_propagates_real_failure_on_unadvertised_backend() {
+        // An unadvertised override that fails with something other than the
+        // trait-default `SnnStep` unsupported error must surface the failure;
+        // only the default may be ignored on a stateless backend.
+        let channels = HybridConfig::tiny().snn_input_channels;
+        let mut net = caps_net(CapsSnn {
+            channels,
+            stateful: false,
+            reset_capable: false,
+            reset_err: Some(|| HybridError::InvalidConfig("reset hardware fault".into())),
+        });
+        net.forward(&[0, 1], None).unwrap();
+        match net.reset().unwrap_err() {
+            HybridError::InvalidConfig(msg) => assert!(msg.contains("hardware fault")),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(net.global_step(), 1, "failed reset must keep global_step");
     }
 
     #[test]
