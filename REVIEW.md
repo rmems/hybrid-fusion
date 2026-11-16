@@ -19,6 +19,8 @@ Copy-paste this into every PR review:
 ### Trait boundaries
 
 - [ ] No concrete `cortex-tensor`, `neuromod`, or backend-specific types in public API
+      (tracked exception: the feature-gated `AxonEncoderAdapter` takes
+      `axon_encoder::Encoder` types, RM-1811)
 - [ ] Pluggable surface stays trait/type contracts: `Transformer`, `SpikingNetwork`
       (incl. `step_frozen`), `SpikeEncoder` / `SpikeDecoder`, `ExpertRouter`
       (incl. `gate_logits`), `SpikeActivity`, the `SpikingExpertRouter` host,

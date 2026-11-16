@@ -46,6 +46,8 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   `snn_width` that differs from it — a typed error rather than an encoder
   panic or silently dropped lanes (`with_encoder` is the width-agnostic
   escape hatch and documents that its caller owns the width contract).
+  `with_encoder_channels` rejects `channels == 0` or above the u16
+  spike-channel space at construction.
   `E: Clone` lets the adapter snapshot the encoder
   before `encode_step` and restore it on the one post-encode rejection
   (an out-of-range spike channel from a misbehaving `Encoder`), so every

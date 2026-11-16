@@ -154,6 +154,10 @@ impl<E: Encoder + 'static> AxonEncoderAdapter<E> {
     /// configured channel count: `encode_stimuli` then requires
     /// `snn_width == channels` rather than letting excess lanes drop
     /// silently.
+    ///
+    /// Rejects `channels == 0` and `channels` above the u16 spike-channel
+    /// space with [`HybridError::InvalidConfig`]: no `snn_width` could ever
+    /// satisfy either, so the adapter would fail every call.
     pub fn with_encoder_channels(
         encoder: E,
         kind: SpikeEncodingKind,
@@ -172,6 +176,13 @@ impl<E: Encoder + 'static> AxonEncoderAdapter<E> {
         mode: ProjectionMode,
         channels: Option<usize>,
     ) -> Result<Self> {
+        if let Some(channels) = channels
+            && (channels == 0 || channels > MAX_ENCODER_CHANNEL_INPUTS)
+        {
+            return Err(HybridError::InvalidConfig(format!(
+                "channels {channels} must be in 1..={MAX_ENCODER_CHANNEL_INPUTS}"
+            )));
+        }
         if let Some(population) = (&encoder as &dyn Any).downcast_ref::<PopulationEncoder>()
             && population.num_neurons() > 1
         {
@@ -512,6 +523,76 @@ mod tests {
             assert!(matches!(err, HybridError::InvalidConfig(_)));
         }
         assert!(adapter.encode_stimuli(&hidden(), 4).is_ok());
+    }
+
+    fn channel_pinned_embedding_rate(channels: usize) -> AxonEncoderAdapter<EmbeddingRateEncoder> {
+        let encoder =
+            EmbeddingRateEncoder::try_new(8, EmbeddingEncoderConfig { v_th: 0.4 }).unwrap();
+        AxonEncoderAdapter::with_encoder_channels(
+            encoder,
+            SpikeEncodingKind::Rate,
+            ProjectionMode::RateSum,
+            channels,
+        )
+        .expect("channel-pinned adapter")
+    }
+
+    #[test]
+    fn with_encoder_channels_passes_the_conformance_suite() {
+        // The suite's default snn_width is 8, matching the pinned channel count.
+        check_domain_adapter_contract(|| channel_pinned_embedding_rate(8))
+            .unwrap_or_else(|v| panic!("{v}"));
+    }
+
+    #[test]
+    fn with_encoder_channels_rejects_a_mismatched_snn_width_atomically() {
+        let mut probed = channel_pinned_embedding_rate(8);
+        let mut fresh = channel_pinned_embedding_rate(8);
+        for width in [7usize, 16] {
+            let err = probed
+                .encode_stimuli(&hidden(), width)
+                .expect_err("channel mismatch must error");
+            assert!(matches!(err, HybridError::InvalidConfig(_)));
+        }
+        // A rejected call must not advance the encoder: the probed adapter
+        // replays bit-for-bit against one that never saw the bad widths.
+        for _ in 0..4 {
+            let a = probed.encode_stimuli(&hidden(), 8).unwrap();
+            let b = fresh.encode_stimuli(&hidden(), 8).unwrap();
+            assert_eq!(
+                a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                b.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn with_encoder_channels_rejects_unsatisfiable_channel_counts() {
+        for channels in [0usize, MAX_ENCODER_CHANNEL_INPUTS + 1] {
+            let encoder =
+                EmbeddingRateEncoder::try_new(8, EmbeddingEncoderConfig { v_th: 0.4 }).unwrap();
+            let result = AxonEncoderAdapter::with_encoder_channels(
+                encoder,
+                SpikeEncodingKind::Rate,
+                ProjectionMode::RateSum,
+                channels,
+            );
+            assert!(
+                matches!(result, Err(HybridError::InvalidConfig(_))),
+                "channels = {channels} must be rejected at construction"
+            );
+        }
+        let encoder =
+            EmbeddingRateEncoder::try_new(8, EmbeddingEncoderConfig { v_th: 0.4 }).unwrap();
+        assert!(
+            AxonEncoderAdapter::with_encoder_channels(
+                encoder,
+                SpikeEncodingKind::Rate,
+                ProjectionMode::RateSum,
+                MAX_ENCODER_CHANNEL_INPUTS,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

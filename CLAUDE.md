@@ -19,17 +19,19 @@ Run from the repo root. "Verified" means it ran successfully in a fresh checkout
 | `cargo clippy --all-targets --all-features -- -D warnings` | verified |
 | `cargo build --features backends` | verified |
 | `cargo test --features "neuromod backends"` | verified |
+| `cargo test --features axon-encoder` | verified |
 | `cd smoke/cortex-neuromod && cargo test --locked` | verified (4 passed; fetches `cortex-tensor` by git rev) |
 | `cargo test --features sentry` | not run here (`--all-features` already covers it; CI's MSRV job skips it on purpose) |
 
 CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build, and test with `--all-features` on floating
 `stable` (`RUSTUP_TOOLCHAIN: stable`), plus the smoke test. `msrv` runs build and test on 1.99.0 for default, `neuromod`,
-`backends`, and `neuromod backends`, plus the smoke test. Run the fmt and clippy gates before committing; CI fails on either.
+`backends`, `axon-encoder`, and `neuromod backends`, plus the smoke test. Run the fmt and clippy gates before committing; CI fails on either.
 
 ## Architecture map
 
 - `src/traits.rs`: pluggable surface (`Transformer`, `SpikingNetwork` incl. `step_frozen`, `ExpertRouter` incl. `gate_logits`, `SpikeActivity`, deprecated loader shims). `src/encoding.rs`: ANN↔SNN boundary adapters (`SpikeEncoder`, `SpikeDecoder`, `RateEncoder`, `SpikeCountDecoder`). `src/spiking_router.rs`: `SpikingExpertRouter` hybrid MoE routing host (the cortex-tensor `SpikingMoeRouter` port, issue #61).
 - `src/adapter.rs` + `src/adapter/conformance.rs`: `DomainAdapter` contract, validators, `PoolResizeTanhAdapter`, and the reusable conformance suite.
+  `src/axon_adapter.rs` (feature `axon-encoder`): `AxonEncoderAdapter`, the axon-encoder 0.6-backed rate/temporal `DomainAdapter`.
 - `src/hybrid.rs`: `HybridNetwork<T, S>` forward path. `src/projector.rs`: pool, resize, `tanh` into SNN stimuli.
 - `src/reverse.rs` + `src/routing.rs`: `ReverseHybridPath` (activity to embedding to MoE route) and pure routing math.
 - `src/topology.rs`, `src/plan.rs`, `src/capabilities.rs` + `src/capabilities/contract.rs`: neutral planning topology,
@@ -43,7 +45,7 @@ CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build
 
 ## Invariants and non-goals (from `REVIEW.md` and `Cargo.toml`)
 
-- No concrete backend types in the public API. The `neuromod` dependency is the one tracked, feature-gated exception (issue #44).
+- No concrete backend types in the public API. Two tracked, feature-gated exceptions: the `neuromod` dependency (issue #44; `NeuromodSnn` keeps neuromod types out of its signatures) and the `axon-encoder` dependency (RM-1811; `AxonEncoderAdapter<E: axon_encoder::Encoder>` and its `rate`/`embedding_rate`/`temporal` constructors expose axon-encoder encoder types by design, since callers configure those encoders).
 - Do not add a loader abstraction or any checkpoint parsing, mmap, or CUDA code here.
 - Stimuli are in `[-1, 1]`; hidden, pooled, and stimuli buffers must be finite; zero-length axes and empty `token_ids` are rejected.
 - Shape mismatches return an error, never a silent fallback. `global_step` must not change when forward validation fails.
