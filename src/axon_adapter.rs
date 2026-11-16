@@ -190,7 +190,7 @@ impl<E: Encoder + Clone + 'static> AxonEncoderAdapter<E> {
         }
         if (&encoder as &dyn Any).is::<PopulationEncoder>() {
             return Err(HybridError::InvalidConfig(
-                "axon-encoder PopulationEncoder fans each input out to num_neurons                  spike channels and samples an unseeded RNG per encode_step, so it                  can satisfy neither the snn_width stimulus nor DomainAdapter                  determinism; wrap a deterministic single-channel encoder                  (RateEncoder, TemporalEncoder, EmbeddingRateEncoder, …)"
+                "axon-encoder PopulationEncoder samples an unseeded RNG per encode_step, breaking DomainAdapter determinism; multi-neuron populations also fan each input out past the snn_width stimulus. Wrap a deterministic single-channel encoder (RateEncoder, TemporalEncoder, EmbeddingRateEncoder, ...)"
                     .into(),
             ));
         }
