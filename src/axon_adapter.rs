@@ -218,7 +218,10 @@ impl<E: Encoder + Clone + 'static> AxonEncoderAdapter<E> {
 
     /// The wrapped encoder, for callers that drive state directly —
     /// [`ModulatedEncoder::encode_step_with_gains`] for a modulated step, or
-    /// an encoder-specific accessor. [`reset`](DomainAdapter::reset)
+    /// an encoder-specific accessor. Do not replace the encoder with one of a
+    /// different channel count: `encode_stimuli` checks `snn_width` against
+    /// the count recorded at construction and cannot detect the change.
+    /// [`reset`](DomainAdapter::reset)
     /// restores the encoder as it was passed to the constructor, discarding
     /// changes made through this handle.
     ///
