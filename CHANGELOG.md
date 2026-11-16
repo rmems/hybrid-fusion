@@ -35,9 +35,9 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   `RateEncoder` (`rate`), `EmbeddingRateEncoder` (`embedding_rate`), and
   `TemporalEncoder` (`temporal`, declared `Other("axon_temporal")`);
   `with_encoder` wraps any configured `Encoder` with a caller-declared
-  `SpikeEncodingKind`. Construction rejects a multi-neuron
-  `PopulationEncoder` (its per-input fan-out can never fit `snn_width`; a
-  single-neuron population maps channels 1:1 and is accepted) and any
+  `SpikeEncodingKind`. Construction rejects every `PopulationEncoder` (its
+  per-input fan-out can never fit `snn_width`, and its `encode_step` samples
+  an unseeded RNG, breaking adapter determinism) and any
   encoder whose `time_model` spans more than one tick per call, since
   intra-call spike timing cannot survive the stimulus representation.
   `encode_stimuli` rejects `snn_width` above the u16 spike-channel space
@@ -47,7 +47,8 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   panic or silently dropped lanes (`with_encoder` is the width-agnostic
   escape hatch and documents that its caller owns the width contract).
   `with_encoder_channels` rejects `channels == 0` or above the u16
-  spike-channel space at construction.
+  spike-channel space at construction. `reset` restores the encoder exactly
+  as it was passed to the constructor, so caller-preloaded state survives.
   `E: Clone` lets the adapter snapshot the encoder
   before `encode_step` and restore it on the one post-encode rejection
   (an out-of-range spike channel from a misbehaving `Encoder`), so every

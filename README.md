@@ -159,9 +159,10 @@ assert_eq!(out.embedding.len(), 128);
 
 ## Sensory encoding adapter (optional `axon-encoder` feature)
 
-Rate and temporal ANN→SNN coding comes from
-[`axon-encoder`](https://crates.io/crates/axon-encoder) 0.6, not from encoders
-written in this crate. The optional `axon-encoder` feature exposes
+`AxonEncoderAdapter`'s rate and temporal ANN→SNN coding comes from
+[`axon-encoder`](https://crates.io/crates/axon-encoder) 0.6; it does not
+replace the in-tree `SpikeEncoder` implementations (`RateEncoder` in
+`src/encoding.rs`). The optional `axon-encoder` feature exposes
 `AxonEncoderAdapter`, a `DomainAdapter` that mean-pools, resizes and `tanh`s
 the hidden state, then advances a wrapped `axon_encoder::Encoder` by one
 `encode_step` tick per call. Constructors: `rate` (`RateEncoder`),
