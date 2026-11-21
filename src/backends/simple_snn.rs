@@ -20,12 +20,15 @@
 //!    resulting effective leak is clamped to `[0.0, 1.0]`, so it can decay
 //!    but never amplify the membrane.
 //! 2. Add stimulus, scaled by the dopamine-derived excitatory gain (clamped
-//!    to `[0.0, 3.0]`) and dampened by cortisol (inhibitory gain).
+//!    to `[0.0, 3.0]`) and dampened by cortisol (inhibitory gain bounded to
+//!    `[0.1, 1.0]`, so cortisol can only suppress, never amplify).
 //! 3. If potential exceeds `threshold`, record the neuron as fired and reset
 //!    its potential.
 //!
 //! All stimuli and every [`NeuroModulators`] field must be finite; `step`
-//! rejects the first non-finite value before touching membrane state.
+//! rejects the first non-finite value before touching membrane state, and a
+//! finite update that would still overflow the membrane rejects the whole
+//! step atomically.
 //!
 //! # Capability report
 //!
@@ -129,32 +132,42 @@ impl SpikingNetwork for SimpleSnn {
             }
         }
 
-        let mut fired = Vec::new();
-
         // Finite modulators clamp rather than reject (the file's convention:
         // leak_factor, tempo, and cortisol_suppress all clamp); large dopamine
         // saturates the gain instead of amplifying without bound.
         let dopamine_gain =
             (1.0 + modulators.dopamine * 0.5 + modulators.aux_dopamine * 0.25).clamp(0.0, 3.0);
-        let cortisol_suppress = (1.0 - modulators.cortisol * 0.3).max(0.1);
+        let cortisol_suppress = (1.0 - modulators.cortisol * 0.3).clamp(0.1, 1.0);
         let ach_leak_scale = 1.0 + modulators.acetylcholine * 0.3;
         // Clamp tempo to non-negative so leak decays (never amplifies) membrane.
         let tempo = modulators.tempo.max(0.0);
         let effective_leak = (self.leak_factor * ach_leak_scale * tempo).clamp(0.0, 1.0);
 
-        for (i, pot) in self.membrane_potentials.iter_mut().enumerate() {
+        // Compute the next membrane state before writing it back: a finite
+        // stimulus can still overflow once gain-scaled, and a rejected step
+        // must leave the membrane provably untouched.
+        let mut fired = Vec::new();
+        let mut next_potentials = Vec::with_capacity(stimuli.len());
+        for (i, &pot) in self.membrane_potentials.iter().enumerate() {
             // 1. Leak toward zero.
-            *pot *= 1.0 - effective_leak;
+            let mut pot = pot * (1.0 - effective_leak);
 
             // 2. Add stimulus with modulator scaling (width already validated).
-            *pot += stimuli[i] * dopamine_gain * cortisol_suppress;
+            pot += stimuli[i] * dopamine_gain * cortisol_suppress;
+            if !pot.is_finite() {
+                return Err(HybridError::SnnStep(format!(
+                    "stimulus at index {i} overflows the membrane potential"
+                )));
+            }
 
             // 3. Spike if above threshold.
-            if *pot >= self.threshold {
+            if pot >= self.threshold {
                 fired.push(i);
-                *pot = 0.0;
+                pot = 0.0;
             }
+            next_potentials.push(pot);
         }
+        self.membrane_potentials = next_potentials;
 
         Ok(fired)
     }
@@ -538,5 +551,61 @@ mod tests {
     #[should_panic(expected = "num_channels")]
     fn new_rejects_zero_channels() {
         let _ = SimpleSnn::new(0);
+    }
+
+    #[test]
+    fn negative_dopamine_clamps_gain_to_zero() {
+        // The gain's lower bound is 0.0: negative dopamine silences the
+        // stimulus instead of inverting it into inhibition.
+        let mut snn = SimpleSnn::with_params(1, 1.0, 0.0);
+        let mods = NeuroModulators {
+            dopamine: -10.0,
+            aux_dopamine: -10.0,
+            ..Default::default()
+        };
+        let fired = snn.step(&[0.8], &mods).unwrap();
+        assert!(fired.is_empty());
+        assert_eq!(snn.membrane_potentials(), &[0.0]);
+    }
+
+    #[test]
+    fn negative_cortisol_cannot_amplify_stimulus() {
+        // cortisol_suppress is bounded to [0.1, 1.0]: negative cortisol
+        // behaves exactly like cortisol = 0 rather than amplifying.
+        let mut negative = SimpleSnn::with_params(1, 1.0, 0.0);
+        let mut neutral = SimpleSnn::with_params(1, 1.0, 0.0);
+        let negative_mods = NeuroModulators {
+            cortisol: -100.0,
+            ..Default::default()
+        };
+        let fired_neg = negative.step(&[0.5], &negative_mods).unwrap();
+        let fired_neu = neutral.step(&[0.5], &NeuroModulators::default()).unwrap();
+        assert_eq!(fired_neg, fired_neu);
+        assert_eq!(
+            negative.membrane_potentials(),
+            neutral.membrane_potentials()
+        );
+    }
+
+    #[test]
+    fn rejects_overflowing_update_without_mutating_membrane() {
+        // A finite stimulus can still overflow once gain-scaled; the step
+        // must reject atomically rather than store a non-finite potential.
+        let mut snn = SimpleSnn::with_params(2, 1.0, 0.0);
+        snn.step(&[0.5, 0.5], &NeuroModulators::default()).unwrap();
+        let before = snn.membrane_potentials().to_vec();
+
+        let err = snn
+            .step(&[f32::MAX, 0.1], &NeuroModulators::default())
+            .unwrap_err();
+        assert!(
+            matches!(err, HybridError::SnnStep(_)),
+            "expected SnnStep, got {err:?}"
+        );
+        assert_eq!(
+            snn.membrane_potentials(),
+            before.as_slice(),
+            "an overflowing update must not change membrane state"
+        );
     }
 }
