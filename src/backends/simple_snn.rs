@@ -92,6 +92,35 @@ impl SpikingNetwork for SimpleSnn {
 
         let mut fired = Vec::new();
 
+        // Reject non-finite stimuli before mutating membrane state: a NaN
+        // stimulus would make `pot >= threshold` permanently false, so the
+        // neuron would silently never fire again.
+        for (index, value) in stimuli.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(HybridError::NonFinite {
+                    stage: crate::ForwardValueStage::Stimuli,
+                    index,
+                });
+            }
+        }
+
+        // A non-finite modulator poisons the derived gains exactly like a
+        // non-finite stimulus poisons the membrane; reject it in the same
+        // pre-mutation pass, naming the offending field.
+        for (name, value) in [
+            ("dopamine", modulators.dopamine),
+            ("cortisol", modulators.cortisol),
+            ("acetylcholine", modulators.acetylcholine),
+            ("tempo", modulators.tempo),
+            ("aux_dopamine", modulators.aux_dopamine),
+        ] {
+            if !value.is_finite() {
+                return Err(HybridError::SnnStep(format!(
+                    "non-finite neuromodulator `{name}`: {value}"
+                )));
+            }
+        }
+
         let dopamine_gain = 1.0 + modulators.dopamine * 0.5 + modulators.aux_dopamine * 0.25;
         let cortisol_suppress = (1.0 - modulators.cortisol * 0.3).max(0.1);
         let ach_leak_scale = 1.0 + modulators.acetylcholine * 0.3;
@@ -352,5 +381,108 @@ mod tests {
                 got: 5
             }
         ));
+    }
+
+    #[test]
+    fn rejects_nan_stimulus_before_mutating_membrane() {
+        // Explicit neutral modulators (not `Default`, whose dopamine 0.5
+        // scales the stimulus) keep the arithmetic in this test obvious.
+        let neutral = NeuroModulators {
+            dopamine: 0.0,
+            cortisol: 0.0,
+            acetylcholine: 0.0,
+            tempo: 1.0,
+            aux_dopamine: 0.0,
+        };
+        let mut snn = SimpleSnn::with_params(2, 1.0, 0.0);
+        // Prime the membrane so we can prove rejection leaves it untouched.
+        snn.step(&[0.4, 0.0], &neutral).unwrap();
+
+        let err = snn.step(&[0.0, f32::NAN], &neutral);
+        match err {
+            Err(HybridError::NonFinite {
+                stage: crate::ForwardValueStage::Stimuli,
+                index,
+            }) => assert_eq!(index, 1),
+            other => panic!("expected NonFinite at index 1, got {other:?}"),
+        }
+        assert_eq!(
+            snn.membrane_potentials,
+            vec![0.4, 0.0],
+            "a rejected stimulus must not change membrane state"
+        );
+
+        // +Inf is rejected the same way, reporting the first offending index.
+        let err = snn.step(&[f32::INFINITY, f32::NAN], &NeuroModulators::default());
+        match err {
+            Err(HybridError::NonFinite { index, .. }) => assert_eq!(index, 0),
+            other => panic!("expected NonFinite at index 0, got {other:?}"),
+        }
+        assert_eq!(snn.membrane_potentials, vec![0.4, 0.0]);
+
+        // The mock still steps normally after the rejected calls.
+        let fired = snn.step(&[0.7, 0.0], &neutral).unwrap();
+        assert_eq!(fired, vec![0usize]);
+    }
+
+    #[test]
+    fn rejects_non_finite_modulator_before_mutating_membrane() {
+        let neutral = NeuroModulators {
+            dopamine: 0.0,
+            cortisol: 0.0,
+            acetylcholine: 0.0,
+            tempo: 1.0,
+            aux_dopamine: 0.0,
+        };
+        let mut snn = SimpleSnn::with_params(1, 1.0, 0.0);
+        snn.step(&[0.4], &neutral).unwrap();
+
+        let nan_dopamine = NeuroModulators {
+            dopamine: f32::NAN,
+            ..NeuroModulators::default()
+        };
+        let err = snn.step(&[0.5], &nan_dopamine);
+        match err {
+            Err(HybridError::SnnStep(message)) => assert!(
+                message.contains("dopamine"),
+                "error must name the offending field: {message}"
+            ),
+            other => panic!("expected SnnStep naming the field, got {other:?}"),
+        }
+        assert_eq!(
+            snn.membrane_potentials,
+            vec![0.4],
+            "a rejected modulator must not change membrane state"
+        );
+
+        // Every modulator field is validated, not just dopamine.
+        for (field, value) in [
+            ("dopamine", f32::NAN),
+            ("cortisol", f32::INFINITY),
+            ("acetylcholine", f32::NAN),
+            ("tempo", f32::NAN),
+            ("aux_dopamine", f32::INFINITY),
+        ] {
+            let mods = NeuroModulators {
+                dopamine: if field == "dopamine" { value } else { 0.0 },
+                cortisol: if field == "cortisol" { value } else { 0.0 },
+                acetylcholine: if field == "acetylcholine" { value } else { 0.0 },
+                tempo: if field == "tempo" { value } else { 1.0 },
+                aux_dopamine: if field == "aux_dopamine" { value } else { 0.0 },
+            };
+            let err = snn.step(&[0.5], &mods);
+            match &err {
+                Err(HybridError::SnnStep(message)) => assert!(
+                    message.contains(field),
+                    "expected SnnStep naming `{field}`, got {message}"
+                ),
+                other => panic!("expected SnnStep naming `{field}`, got {other:?}"),
+            }
+            assert_eq!(snn.membrane_potentials, vec![0.4]);
+        }
+
+        // The mock still steps normally after the rejected calls.
+        let fired = snn.step(&[1.0], &neutral).unwrap();
+        assert_eq!(fired, vec![0usize]);
     }
 }
