@@ -25,6 +25,38 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   rejection paths: `UnknownStage` on missing edge endpoints and negotiation
   requirements, ambiguous unpreferred compatible offers, and an absent
   preferred backend with no named fallback.
+- **`AxonEncoderAdapter<E>`** (Linear [RM-1811](https://linear.app/rpd-34/issue/RM-1811),
+  feature `axon-encoder`): a `DomainAdapter` whose ANN→SNN encode advances a
+  wrapped `axon_encoder::Encoder` by one `encode_step` tick per call — the
+  crate-adoption path for rate/temporal coding, so no encoders are written
+  in-tree. The mean-pool → resize → `tanh` signal is shared with the
+  reference adapter; each spike contributes `±1.0` to its channel's stimulus
+  with saturation at `±STIMULUS_BOUND`. Convenience constructors cover
+  `RateEncoder` (`rate`), `EmbeddingRateEncoder` (`embedding_rate`), and
+  `TemporalEncoder` (`temporal`, declared `Other("axon_temporal")`);
+  `with_encoder` wraps any configured `Encoder` with a caller-declared
+  `SpikeEncodingKind`. Construction rejects every `PopulationEncoder` (its
+  per-input fan-out can never fit `snn_width`, and its `encode_step` samples
+  an unseeded RNG, breaking adapter determinism) and any
+  encoder whose `time_model` spans more than one tick per call, since
+  intra-call spike timing cannot survive the stimulus representation.
+  `encode_stimuli` rejects `snn_width` above the u16 spike-channel space
+  and, for adapters built with a configured channel count (the
+  `embedding_rate`/`temporal` constructors and `with_encoder_channels`), a
+  `snn_width` that differs from it — a typed error rather than an encoder
+  panic or silently dropped lanes (`with_encoder` is the width-agnostic
+  escape hatch and documents that its caller owns the width contract).
+  `with_encoder_channels` rejects `channels == 0` or above the u16
+  spike-channel space at construction. `reset` restores the encoder exactly
+  as it was passed to the constructor, so caller-preloaded state survives.
+  `E: Clone` lets the adapter snapshot the encoder
+  before `encode_step` and restore it on the one post-encode rejection
+  (an out-of-range spike channel from a misbehaving `Encoder`), so every
+  failed call leaves encoder state untouched; spike contributions are
+  netted per channel and clamped once at `±STIMULUS_BOUND`, making the
+  result order-independent. SNN→ANN decode stays in-tree via
+  `PoolResizeTanhAdapter`; modulated (`EncodingGains`) paths stay outside
+  the `DomainAdapter` signature and are reachable through `encoder_mut()`.
 - **`DomainAdapter` contract** (Linear [RM-1811](https://linear.app/rpd-34/issue/RM-1811)):
   new `src/adapter.rs` defines the ANN↔SNN representation boundary as a trait
   (`encode_stimuli` hidden state → stimuli, `decode_activity` activity →

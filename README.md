@@ -157,6 +157,29 @@ assert_eq!(out.embedding.len(), 128);
 - **[Implementing a Backend](docs/implementing-backends.md)** — trait contracts, data flow, tensor shape conventions, and a minimal working example for `Transformer` + `SpikingNetwork`.
 - **[Extraction map](docs/extraction-map.md)** — what is extractable from corinth-canal / grok-ozempic into hybrid-fusion vs sibling crates (MoE, dual GGUF+Safetensors, non-extract list).
 
+## Sensory encoding adapter (optional `axon-encoder` feature)
+
+`AxonEncoderAdapter`'s rate and temporal ANN→SNN coding comes from
+[`axon-encoder`](https://crates.io/crates/axon-encoder) 0.6; it does not
+replace the in-tree `SpikeEncoder` implementations (`RateEncoder` in
+`src/encoding.rs`). The optional `axon-encoder` feature exposes
+`AxonEncoderAdapter`, a `DomainAdapter` that mean-pools, resizes and `tanh`s
+the hidden state, then advances a wrapped `axon_encoder::Encoder` by one
+`encode_step` tick per call. Constructors: `rate` (`RateEncoder`),
+`embedding_rate` (`EmbeddingRateEncoder`), `temporal` (`TemporalEncoder`),
+`with_encoder_channels` (any channel-fixed encoder) and `with_encoder` (any
+width-agnostic encoder). SNN→ANN decoding stays in-tree via
+`PoolResizeTanhAdapter`. Plug it into a host with
+`HybridNetwork::with_adapter`.
+
+```sh
+cargo build --features axon-encoder
+```
+
+This feature is a tracked exception to the no-concrete-backend-types rule:
+the adapter's public API takes axon-encoder encoder types, because callers
+configure those encoders directly.
+
 ## Spiking backend (optional `neuromod` feature)
 
 `hybrid-fusion` stays backend-agnostic, but it ships one production-oriented

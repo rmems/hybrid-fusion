@@ -85,20 +85,23 @@
 //! exponentiates in `f64` and applies a simplex residual; hybrid-fusion
 //! exponentiates in `f32` and accumulates the normalizer in `f64`).
 
+use axon_encoder::prelude::{EmbeddingEncoderConfig, EmbeddingRateEncoder};
 use cortex_tensor::CortexError;
 use cortex_tensor::moe::MoeRouter;
 use cortex_tensor::snn::{
-    DEFAULT_SPIKE_BOOST, NeuromodNetwork, RateEncoder as CortexRateEncoder, SnnBackend,
-    SnnCapabilities, SnnDecoder as CortexSnnDecoder, SnnEncoder as CortexSnnEncoder, SnnStepOutput,
+    AxonEncoder as CortexAxonEncoder, DEFAULT_SPIKE_BOOST, NeuromodNetwork,
+    RateEncoder as CortexRateEncoder, SnnBackend, SnnCapabilities,
+    SnnDecoder as CortexSnnDecoder, SnnEncoder as CortexSnnEncoder, SnnStepOutput,
     SpikeCountDecoder as CortexSpikeCountDecoder, SpikingMoeRouter,
 };
 use cortex_tensor::types::EMBEDDING_DIM;
 use hybrid_fusion::{
-    BackendCapabilities, DEFAULT_SPIKE_BOOST as HYBRID_SPIKE_BOOST, ExpertRouteOutput,
-    ExpertRouter, HybridError, NeuroModulators, NeuromodSnn, RateEncoder as HybridRateEncoder,
-    Result as HybridResult, SpikeCountDecoder as HybridSpikeCountDecoder,
-    SpikeDecoder as HybridSpikeDecoder, SpikeEncoder as HybridSpikeEncoder, SpikingExpertRouter,
-    SpikingNetwork, routing_entropy, softmax, synthetic_gate_scores, top_k_indices,
+    AxonEncoderAdapter, BackendCapabilities, DEFAULT_SPIKE_BOOST as HYBRID_SPIKE_BOOST,
+    DomainAdapter, ExpertRouteOutput, ExpertRouter, HybridError, NeuroModulators, NeuromodSnn,
+    ProjectionMode, RateEncoder as HybridRateEncoder, Result as HybridResult,
+    SpikeCountDecoder as HybridSpikeCountDecoder, SpikeDecoder as HybridSpikeDecoder,
+    SpikeEncoder as HybridSpikeEncoder, SpikeEncodingKind, SpikingExpertRouter, SpikingNetwork,
+    Tensor, routing_entropy, softmax, synthetic_gate_scores, top_k_indices,
 };
 use neuromod::SpikingNetwork as NeuromodEngine;
 use std::cell::RefCell;
@@ -268,6 +271,65 @@ fn rate_encoder_and_spike_boost_defaults_match() {
     assert_eq!(
         cortex_enc.encode(&signal, 6).expect("cortex encode"),
         hybrid_enc.encode(&signal, 6).expect("hybrid encode")
+    );
+}
+
+#[test]
+fn axon_encoder_adapters_replay_identically() {
+    // ADR 0002 §3: both crates bridge axon-encoder 0.6 `Encoder::encode_step`
+    // to a ±1.0-per-spike stimulus vector. `EmbeddingRateEncoder` fires at
+    // most once per channel per step, so the two accumulation policies agree
+    // bit-for-bit: cortex-tensor's `AxonEncoder` adds each spike's ±1.0
+    // unclamped, while hybrid-fusion's `AxonEncoderAdapter` nets the same
+    // contributions and clamps at ±STIMULUS_BOUND — identical when the net
+    // is within the bound. The hybrid side also owns the
+    // pool → resize → tanh normalization (a rank-1 hidden tensor reaches the
+    // encoder as `tanh(row)`), so the cortex side is fed the tanh'd signal
+    // to make both `encode_step` calls see identical input.
+    const WIDTH: usize = 4;
+    let make_encoder = || {
+        EmbeddingRateEncoder::try_new(WIDTH, EmbeddingEncoderConfig { v_th: 0.4 })
+            .expect("embedding rate encoder")
+    };
+    let mut cortex = CortexAxonEncoder::new(make_encoder());
+    let mut hybrid = AxonEncoderAdapter::with_encoder(
+        make_encoder(),
+        SpikeEncodingKind::Rate,
+        ProjectionMode::RateSum,
+    )
+    .expect("hybrid axon adapter");
+
+    let mut saw_spike = false;
+    for tick in 0..STEPS {
+        let raw: Vec<f32> = (0..WIDTH)
+            .map(|i| 0.35 * (tick as f32) - 0.5 * (i as f32) + 0.1)
+            .collect();
+        let signal: Vec<f32> = raw.iter().map(|v| v.tanh()).collect();
+        let hidden = Tensor::from_vec(raw, &[1, WIDTH]);
+        let cortex_stimuli = cortex.encode(&signal, WIDTH).expect("cortex axon encode");
+        let hybrid_stimuli = hybrid
+            .encode_stimuli(&hidden, WIDTH)
+            .expect("hybrid axon encode");
+        assert_eq!(
+            cortex_stimuli, hybrid_stimuli,
+            "axon encoder adapters diverged on tick {tick}"
+        );
+        saw_spike |= cortex_stimuli.iter().any(|v| *v != 0.0);
+    }
+    assert!(saw_spike, "fixtures should drive at least one spike");
+
+    // Reset replays identically on both sides.
+    CortexSnnEncoder::reset(&mut cortex);
+    hybrid.reset();
+    let raw = vec![0.3f32; WIDTH];
+    let signal: Vec<f32> = raw.iter().map(|v| v.tanh()).collect();
+    let hidden = Tensor::from_vec(raw, &[1, WIDTH]);
+    assert_eq!(
+        cortex.encode(&signal, WIDTH).expect("cortex replay"),
+        hybrid
+            .encode_stimuli(&hidden, WIDTH)
+            .expect("hybrid replay"),
+        "axon encoder adapters diverged after reset"
     );
 }
 

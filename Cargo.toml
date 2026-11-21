@@ -62,11 +62,20 @@ sentry = { version = "0.34", optional = true, default-features = false, features
 # backends.
 neuromod = { version = "0.7", optional = true }
 
+# ── Optional: axon-encoder sensory encoders ───────────────────────────────────
+# `axon-encoder` owns sensory encoding in the rmems stack (see AGENTS.md's
+# ownership table). The optional `axon-encoder` feature exposes
+# `AxonEncoderAdapter`, a `DomainAdapter` backed by that crate's `Encoder`
+# trait, so rate/temporal coding reaches hybrid pipelines without in-tree
+# encoder implementations. Off by default; decoding stays in-tree.
+axon-encoder = { version = "0.6", optional = true }
+
 [features]
 default  = []
 sentry   = ["dep:sentry"]
 backends = []
 neuromod = ["dep:neuromod"]
+axon-encoder = ["dep:axon-encoder"]
 
 [dev-dependencies]
 criterion  = "0.5"
