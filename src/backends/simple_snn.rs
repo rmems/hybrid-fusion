@@ -58,7 +58,18 @@ impl SimpleSnn {
     }
 
     /// Create with explicit threshold and leak factor.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `num_channels` is zero: zero-length axes are rejected
+    /// everywhere else in this crate (a `Result`-returning constructor is a
+    /// public-contract change tracked separately), so the mock fails loudly
+    /// at construction instead of stepping into an empty network.
     pub fn with_params(num_channels: usize, threshold: f32, leak_factor: f32) -> Self {
+        assert!(
+            num_channels > 0,
+            "SimpleSnn requires at least one channel, got num_channels = 0"
+        );
         Self {
             membrane_potentials: vec![0.0; num_channels],
             threshold,
@@ -162,6 +173,13 @@ mod tests {
             .step(&[0.5, 0.0, 0.0, 0.0], &NeuroModulators::default())
             .unwrap();
         assert!(fired.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "num_channels = 0")]
+    fn zero_width_construction_panics() {
+        // `new` delegates to `with_params`, so both entry points are covered.
+        let _ = SimpleSnn::new(0);
     }
 
     #[test]
