@@ -15,11 +15,17 @@
 //! wanted.
 //!
 //! Each step:
-//! 1. Leak the membrane toward zero by `leak_factor`.
-//! 2. Add stimulus, scaled by dopamine (excitatory gain) and dampened by
-//!    cortisol (inhibitory gain).
+//! 1. Leak the membrane toward zero by `leak_factor`, scaled by
+//!    acetylcholine and tempo. Acetylcholine needs no clamp of its own: the
+//!    resulting effective leak is clamped to `[0.0, 1.0]`, so it can decay
+//!    but never amplify the membrane.
+//! 2. Add stimulus, scaled by the dopamine-derived excitatory gain (clamped
+//!    to `[0.0, 3.0]`) and dampened by cortisol (inhibitory gain).
 //! 3. If potential exceeds `threshold`, record the neuron as fired and reset
 //!    its potential.
+//!
+//! All stimuli and every [`NeuroModulators`] field must be finite; `step`
+//! rejects the first non-finite value before touching membrane state.
 //!
 //! # Capability report
 //!
@@ -35,7 +41,7 @@
 //! (`NeuromodSnn` folds reward into R-STDP; this mock does not), so negotiation
 //! must not treat the two reports as substitutes.
 
-use crate::error::{HybridError, Result};
+use crate::error::{ForwardValueStage, HybridError, Result};
 use crate::traits::{NeuroModulators, SpikingNetwork};
 
 /// Deterministic mock / reference Leaky Integrate-and-Fire spiking network.
@@ -58,7 +64,15 @@ impl SimpleSnn {
     }
 
     /// Create with explicit threshold and leak factor.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `num_channels` is 0.
     pub fn with_params(num_channels: usize, threshold: f32, leak_factor: f32) -> Self {
+        assert!(
+            num_channels > 0,
+            "SimpleSnn::with_params requires num_channels > 0, got {num_channels}"
+        );
         Self {
             membrane_potentials: vec![0.0; num_channels],
             threshold,
@@ -90,9 +104,38 @@ impl SpikingNetwork for SimpleSnn {
             });
         }
 
+        // Reject non-finite inputs before mutating membrane state: a single
+        // NaN/Inf stimulus or modulator field would poison every downstream
+        // potential.
+        for (index, &value) in stimuli.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(HybridError::NonFinite {
+                    stage: ForwardValueStage::Stimuli,
+                    index,
+                });
+            }
+        }
+        for (field, value) in [
+            ("dopamine", modulators.dopamine),
+            ("cortisol", modulators.cortisol),
+            ("acetylcholine", modulators.acetylcholine),
+            ("tempo", modulators.tempo),
+            ("aux_dopamine", modulators.aux_dopamine),
+        ] {
+            if !value.is_finite() {
+                return Err(HybridError::SnnStep(format!(
+                    "NeuroModulators.{field} must be finite, got {value}"
+                )));
+            }
+        }
+
         let mut fired = Vec::new();
 
-        let dopamine_gain = 1.0 + modulators.dopamine * 0.5 + modulators.aux_dopamine * 0.25;
+        // Finite modulators clamp rather than reject (the file's convention:
+        // leak_factor, tempo, and cortisol_suppress all clamp); large dopamine
+        // saturates the gain instead of amplifying without bound.
+        let dopamine_gain =
+            (1.0 + modulators.dopamine * 0.5 + modulators.aux_dopamine * 0.25).clamp(0.0, 3.0);
         let cortisol_suppress = (1.0 - modulators.cortisol * 0.3).max(0.1);
         let ach_leak_scale = 1.0 + modulators.acetylcholine * 0.3;
         // Clamp tempo to non-negative so leak decays (never amplifies) membrane.
@@ -352,5 +395,148 @@ mod tests {
                 got: 5
             }
         ));
+    }
+
+    #[test]
+    fn rejects_non_finite_stimulus_without_mutating_membrane() {
+        let mut snn = SimpleSnn::with_params(4, 1.0, 0.0);
+        let mods = NeuroModulators::default();
+        // Build non-zero membrane state so "unchanged" is a meaningful check.
+        snn.step(&[0.5; 4], &mods).unwrap();
+        let before = snn.membrane_potentials().to_vec();
+        assert!(before.iter().all(|v| *v > 0.0));
+
+        let err = snn.step(&[0.1, f32::NAN, 0.1, 0.1], &mods).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                HybridError::NonFinite {
+                    stage: ForwardValueStage::Stimuli,
+                    index: 1
+                }
+            ),
+            "expected NonFinite{{Stimuli, index: 1}}, got {err:?}"
+        );
+        assert_eq!(
+            snn.membrane_potentials(),
+            before.as_slice(),
+            "a rejected stimulus must not change membrane state"
+        );
+
+        // ±Inf is rejected the same way and reports the first offending index.
+        let err = snn
+            .step(&[f32::INFINITY, 0.0, f32::NAN, 0.0], &mods)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            HybridError::NonFinite {
+                stage: ForwardValueStage::Stimuli,
+                index: 0
+            }
+        ));
+        assert_eq!(snn.membrane_potentials(), before.as_slice());
+    }
+
+    #[test]
+    fn rejects_non_finite_modulator_without_mutating_membrane() {
+        let mut snn = SimpleSnn::with_params(2, 1.0, 0.0);
+        snn.step(&[0.5, 0.5], &NeuroModulators::default()).unwrap();
+        let before = snn.membrane_potentials().to_vec();
+
+        // Every field is validated; NaN and ±Inf are all rejected.
+        let cases: [(&str, NeuroModulators); 5] = [
+            (
+                "dopamine",
+                NeuroModulators {
+                    dopamine: f32::NAN,
+                    ..Default::default()
+                },
+            ),
+            (
+                "cortisol",
+                NeuroModulators {
+                    cortisol: f32::INFINITY,
+                    ..Default::default()
+                },
+            ),
+            (
+                "acetylcholine",
+                NeuroModulators {
+                    acetylcholine: f32::NEG_INFINITY,
+                    ..Default::default()
+                },
+            ),
+            (
+                "tempo",
+                NeuroModulators {
+                    tempo: f32::NAN,
+                    ..Default::default()
+                },
+            ),
+            (
+                "aux_dopamine",
+                NeuroModulators {
+                    aux_dopamine: f32::INFINITY,
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (field, mods) in cases {
+            let err = snn.step(&[0.1, 0.1], &mods).unwrap_err();
+            match err {
+                HybridError::SnnStep(message) => assert!(
+                    message.contains(field),
+                    "error must name the offending field {field}: {message}"
+                ),
+                other => panic!("expected SnnStep for non-finite {field}, got {other:?}"),
+            }
+            assert_eq!(
+                snn.membrane_potentials(),
+                before.as_slice(),
+                "a rejected modulator must not change membrane state"
+            );
+        }
+    }
+
+    #[test]
+    fn dopamine_gain_clamps_at_ceiling_instead_of_amplifying() {
+        // dopamine = 4.0 already saturates the gain at its 3.0 ceiling, so a
+        // far larger (but still finite) value must behave identically.
+        let mut saturated = SimpleSnn::with_params(1, 1.0, 0.0);
+        let mut extreme = SimpleSnn::with_params(1, 1.0, 0.0);
+        let ceiling = NeuroModulators {
+            dopamine: 4.0,
+            ..Default::default()
+        };
+        let extreme_mods = NeuroModulators {
+            dopamine: 1e6,
+            ..Default::default()
+        };
+
+        // At max gain a 0.3 dust stimulus reaches only 0.9 — subthreshold.
+        let fired = extreme.step(&[0.3], &extreme_mods).unwrap();
+        assert!(
+            fired.is_empty(),
+            "dust stimulus must stay subthreshold at the gain ceiling"
+        );
+        let expected = saturated.step(&[0.3], &ceiling).unwrap();
+        assert!(expected.is_empty());
+        assert_eq!(
+            extreme.membrane_potentials(),
+            saturated.membrane_potentials(),
+            "dopamine above the ceiling must match the saturated case exactly"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "num_channels")]
+    fn with_params_rejects_zero_channels() {
+        let _ = SimpleSnn::with_params(0, 1.0, 0.2);
+    }
+
+    #[test]
+    #[should_panic(expected = "num_channels")]
+    fn new_rejects_zero_channels() {
+        let _ = SimpleSnn::new(0);
     }
 }
