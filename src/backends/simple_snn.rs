@@ -121,7 +121,14 @@ impl SpikingNetwork for SimpleSnn {
             }
         }
 
-        let dopamine_gain = 1.0 + modulators.dopamine * 0.5 + modulators.aux_dopamine * 0.25;
+        // The dopamine gain is clamped to [0, 3]: dopamine and aux_dopamine
+        // only ever boost (gain >= 1) and cortisol only suppresses via
+        // `cortisol_suppress`, but an unbounded gain would let a caller with a
+        // huge dopamine value turn the mock into an always-fire network.
+        let dopamine_gain =
+            (1.0 + modulators.dopamine * 0.5 + modulators.aux_dopamine * 0.25).clamp(0.0, 3.0);
+        // Acetylcholine is bounded by construction: `ach_leak_scale` scales
+        // the leak and `effective_leak` is clamped to [0, 1] below.
         let cortisol_suppress = (1.0 - modulators.cortisol * 0.3).max(0.1);
         let ach_leak_scale = 1.0 + modulators.acetylcholine * 0.3;
         // Clamp tempo to non-negative so leak decays (never amplifies) membrane.
@@ -191,6 +198,34 @@ mod tests {
             .step(&[0.5, 0.0, 0.0, 0.0], &NeuroModulators::default())
             .unwrap();
         assert!(fired.is_empty());
+    }
+
+    #[test]
+    fn dopamine_gain_is_clamped_to_three() {
+        let mut snn = SimpleSnn::with_params(1, 1.0, 0.0);
+        // Unbounded, this dopamine would give gain 1 + 10*0.5 = 6.0 and fire
+        // on a 0.2 stimulus (0.2 * 6.0 = 1.2 >= 1.0). Clamped to 3.0, the
+        // effective injection is 0.2 * 3.0 = 0.6 and the neuron stays quiet.
+        let mods = NeuroModulators {
+            dopamine: 10.0,
+            ..Default::default()
+        };
+        let fired = snn.step(&[0.2], &mods).unwrap();
+        assert!(
+            fired.is_empty(),
+            "a huge dopamine value must not exceed the gain clamp"
+        );
+
+        // A moderate dopamine still boosts within the clamp: with gain 1.5 a
+        // 0.7 stimulus gives 1.05 >= 1.0 and fires; without the boost it
+        // would stay quiet.
+        let mut snn = SimpleSnn::with_params(1, 1.0, 0.0);
+        let boosted = NeuroModulators {
+            dopamine: 1.0, // gain 1.5
+            ..Default::default()
+        };
+        let fired = snn.step(&[0.7], &boosted).unwrap();
+        assert_eq!(fired, vec![0usize], "moderate dopamine still boosts firing");
     }
 
     #[test]
