@@ -409,10 +409,12 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   cortisol can no longer amplify a stimulus, and a finite update that would
   still overflow the membrane now rejects the step atomically instead of
   storing a non-finite potential. **Breaking for direct `SimpleSnn`
-  callers:** `new` / `with_params` panic on `num_channels == 0` instead of
-  constructing a silently dead network (previously `HybridNetwork::try_new`
-  could still report `ZeroSnnChannels` for such a backend), and `step`
-  returns new errors for inputs it used to accept.
+  callers:** `new` / `with_params` panic on `num_channels == 0` or a
+  non-finite `threshold` / `leak_factor` (`f32::clamp` preserves NaN, which
+  would poison the membrane every step) instead of constructing a silently
+  dead network — previously `HybridNetwork::try_new` could still report
+  `ZeroSnnChannels` for such a backend — and `step` returns new errors for
+  inputs it used to accept.
 - **`HybridNetwork::reset` / `ReverseHybridPath::reset` (RM-1444):** host
   `reset()` now restores post-construction **dynamic** state, not only
   `global_step`. `HybridNetwork::reset` delegates to

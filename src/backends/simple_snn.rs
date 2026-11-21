@@ -70,11 +70,21 @@ impl SimpleSnn {
     ///
     /// # Panics
     ///
-    /// Panics when `num_channels` is 0.
+    /// Panics when `num_channels` is 0 or `threshold` / `leak_factor` is
+    /// non-finite (`f32::clamp` preserves NaN, so a NaN `leak_factor` would
+    /// poison the membrane on every step).
     pub fn with_params(num_channels: usize, threshold: f32, leak_factor: f32) -> Self {
         assert!(
             num_channels > 0,
             "SimpleSnn::with_params requires num_channels > 0, got {num_channels}"
+        );
+        assert!(
+            threshold.is_finite(),
+            "SimpleSnn::with_params requires a finite threshold, got {threshold}"
+        );
+        assert!(
+            leak_factor.is_finite(),
+            "SimpleSnn::with_params requires a finite leak_factor, got {leak_factor}"
         );
         Self {
             membrane_potentials: vec![0.0; num_channels],
@@ -585,6 +595,18 @@ mod tests {
             negative.membrane_potentials(),
             neutral.membrane_potentials()
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "leak_factor")]
+    fn with_params_rejects_non_finite_leak() {
+        let _ = SimpleSnn::with_params(1, 1.0, f32::NAN);
+    }
+
+    #[test]
+    #[should_panic(expected = "threshold")]
+    fn with_params_rejects_non_finite_threshold() {
+        let _ = SimpleSnn::with_params(1, f32::INFINITY, 0.2);
     }
 
     #[test]
