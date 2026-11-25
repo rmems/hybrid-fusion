@@ -72,7 +72,6 @@ use serde::{Deserialize, Serialize};
 use crate::encoding::{SpikeDecoder, SpikeEncoder};
 use crate::error::{ForwardValueStage, HybridError, Result};
 use crate::routing::{routing_entropy, softmax, top_k_indices};
-use crate::telemetry;
 use crate::traits::{ExpertRouteOutput, ExpertRouter, NeuroModulators, SpikingNetwork};
 
 /// Default additive routing boost per unit of decoded spike activity: one
@@ -424,18 +423,10 @@ where
             });
         }
 
-        // ── The tick. Backend/runtime failures are reported when the
-        // `sentry` feature is on. ──────────────────────────────────────────
-        let fired_neurons = match if frozen {
-            self.snn.step_frozen(&stimulus, modulators)
+        let fired_neurons = if frozen {
+            self.snn.step_frozen(&stimulus, modulators)?
         } else {
-            self.snn.step(&stimulus, modulators)
-        } {
-            Ok(fired) => fired,
-            Err(err) => {
-                telemetry::capture_error(&err);
-                return Err(err);
-            }
+            self.snn.step(&stimulus, modulators)?
         };
 
         // ── Post-tick: failures past this point have consumed the tick;

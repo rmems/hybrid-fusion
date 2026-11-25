@@ -517,6 +517,14 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Removed
 
+- **Optional Sentry telemetry integration** (issue
+  [#89](https://github.com/rmems/hybrid-fusion/issues/89)) — **breaking** for
+  downstream users that enabled `features = ["sentry"]`: the `sentry`
+  dependency and feature flag, the `hybrid_fusion::sentry` re-export, the
+  `hybrid_fusion::telemetry` module (`capture_error` / `report`), the
+  `sentry_init` example, and the sentry contract-rejection test are gone.
+  `HybridNetwork::forward` and `SpikingExpertRouter` no longer capture
+  backend/runtime errors; they return the same typed `HybridError` values.
 - Qodana Cloud scan (`qodana-rust` + `QODANA_TOKEN`) after JetBrains membership expired (#35).
 
 ## [0.2.0] - 2026-07-10

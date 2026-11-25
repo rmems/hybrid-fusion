@@ -9,8 +9,8 @@
 //! destroys type and meaning on the wire for every record this crate
 //! serializes — `embedding: vec![NaN]` becomes `"embedding":[null]` and
 //! `routing_entropy: Some(NaN)` becomes `"routing_entropy":null`, which
-//! deserializes back as `None`. Downstream logs, Sentry breadcrumbs, and
-//! checkpointed fusion traces end up silently wrong.
+//! deserializes back as `None`. Downstream logs and checkpointed fusion
+//! traces end up silently wrong.
 //!
 //! This module implements the crate policy instead of letting that happen:
 //! the `Serialize` impls of the `f32`-bearing record types

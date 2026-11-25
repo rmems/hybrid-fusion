@@ -4,8 +4,7 @@
 //!
 //! These validators inspect transformer hidden-state layout and host SNN width
 //! without stepping the SNN or incrementing `global_step`. Contract failures
-//! are returned as structured [`HybridError`] variants and must not be reported
-//! as Sentry runtime failures.
+//! are returned as structured [`HybridError`] variants.
 
 use crate::error::{ForwardValueStage, HybridError, Result};
 use crate::tensor::Tensor;

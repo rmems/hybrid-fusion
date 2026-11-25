@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// [`crate::HybridNetwork::forward`] validates the tensor returned by
 /// [`hidden_states`](Self::hidden_states) **before** pooling, projection, or
 /// [`SpikingNetwork::step`]. Failures are structured [`crate::HybridError`]
-/// contract variants (not Sentry runtime failures).
+/// contract variants.
 ///
 /// Supported layouts:
 ///

@@ -48,7 +48,6 @@ token_ids → Transformer::hidden_states → projector (pool/resize/tanh)
 | GGUF layout contract | `GgufLoader` / `GgufLayout` (deprecated shims) | sole format owner: `engram-parser` |
 | Orchestrator | `HybridNetwork<T, S>` | this crate |
 | Config / output | `HybridConfig`, `TransformerConfig`, `HybridOutput` | this crate |
-| Optional error reporting | `sentry` feature + `telemetry` | optional; apps init DSN |
 
 `SpikingNetwork` is hybrid-fusion's step contract; cortex-tensor keeps a twin
 `SnnBackend` contract for its own ANN+SNN reference path. The mapping and the
@@ -177,7 +176,7 @@ Do **not** copy these into `hybrid-fusion` as implementation work:
  └─ 7. #27  SafetensorsLoader / layout types  ← landed (this crate: trait; engram-parser: I/O)
 ```
 
-Issue `#9` (optional Sentry) is **outside** this epic and is already implemented in-tree.
+Issue `#9` (optional Sentry) was outside this epic; the in-tree integration has since been removed (#89).
 
 ---
 

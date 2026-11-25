@@ -5,7 +5,6 @@
 use crate::adapter::{DomainAdapter, PoolResizeTanhAdapter, encode_stimuli_checked};
 use crate::error::{ForwardValueStage, HybridError, Result};
 use crate::projector;
-use crate::telemetry;
 use crate::track::ResultTrack;
 use crate::traits::{NeuroModulators, SpikingNetwork, Transformer};
 use crate::types::{HybridConfig, HybridOutput};
@@ -194,16 +193,12 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     ///
     /// Validation failures (empty/oversized `token_ids`, malformed hidden
     /// states, non-finite intermediates, out-of-domain fired IDs) and adapter
-    /// or backend errors are returned without advancing `global_step`. Backend
-    /// failures are reported to Sentry when the `sentry` feature is on.
+    /// or backend errors are returned without advancing `global_step`.
     pub fn forward(
         &mut self,
         token_ids: &[u32],
         modulators: Option<NeuroModulators>,
     ) -> Result<HybridOutput> {
-        // Caller-side validation and backend-contract errors are returned
-        // without Sentry capture so routine bad requests / malformed hidden
-        // states do not flood the error stream / quota.
         if token_ids.is_empty() {
             return Err(HybridError::InputLengthMismatch {
                 expected: 1,
@@ -242,14 +237,7 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         let stimuli = encode_stimuli_checked(&mut *self.adapter, &hidden, snn_width)?;
 
         let modulators = modulators.unwrap_or_default();
-        // Backend/runtime failures are reported when the `sentry` feature is on.
-        let fired_neurons = match self.snn.step(&stimuli, &modulators) {
-            Ok(fired) => fired,
-            Err(err) => {
-                telemetry::capture_error(&err);
-                return Err(err);
-            }
-        };
+        let fired_neurons = self.snn.step(&stimuli, &modulators)?;
         // The backend may already have advanced. Reject an invalid output
         // without incrementing the host counter; no backend rollback is implied.
         // Out-of-range and duplicate fired IDs are the host-side check of the
