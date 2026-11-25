@@ -313,8 +313,9 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   (exhaustive enum; downstream `match` arms must be updated) (RM-1804, #40).
 - `Tensor::try_from_vec` / `Tensor::try_zeros` — fallible tensor constructors
   returning `HybridError::InvalidConfig` on zero-extent shapes,
-  `usize`-overflowing shape products, unallocatable buffers, or a
-  `data.len()`/shape-product mismatch, for backend code that must not panic
+  `usize`-overflowing shape products, or a `data.len()`/shape-product
+  mismatch (`try_zeros` additionally fails when its buffer cannot be
+  allocated), for backend code that must not panic
   (Linear [RM-1469](https://linear.app/rpd-34/issue/RM-1469)). `from_vec` /
   `zeros` keep their panicking contract but now also panic (rather than
   silently wrapping the product in release builds) when the shape product
