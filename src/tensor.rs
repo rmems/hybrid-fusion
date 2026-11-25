@@ -158,10 +158,16 @@ impl Tensor {
         self.shape.len()
     }
 
+    /// Number of scalar elements (product of `shape`).
+    ///
+    /// Saturates at `usize::MAX` when the product overflows `usize` —
+    /// reachable only for tensors deserialized from untrusted input, since
+    /// the constructors reject overflowing and zero-extent shapes. A shape
+    /// containing a `0` axis yields `0`, matching the mathematical product.
     pub fn numel(&self) -> usize {
-        // Saturates rather than wrapping: constructor-built tensors always
-        // have a fitting product, but a deserialized tensor can carry an
-        // absurd shape.
+        if self.shape.contains(&0) {
+            return 0;
+        }
         shape_numel(&self.shape).unwrap_or(usize::MAX)
     }
 }
@@ -251,6 +257,11 @@ mod tests {
         let t: Tensor = serde_json::from_str(r#"{"data":[],"shape":[65536,65536,65536,65536]}"#)
             .expect("fields deserialize without cross-validation");
         assert_eq!(t.numel(), usize::MAX);
+
+        // A zero axis yields 0 even when an earlier prefix overflows.
+        let z: Tensor = serde_json::from_str(r#"{"data":[],"shape":[65536,65536,65536,65536,0]}"#)
+            .expect("fields deserialize without cross-validation");
+        assert_eq!(z.numel(), 0);
     }
 
     #[test]
