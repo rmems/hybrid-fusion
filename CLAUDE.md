@@ -20,7 +20,7 @@ Run from the repo root. "Verified" means it ran successfully in a fresh checkout
 | `cargo build --features backends` | verified |
 | `cargo test --features "neuromod backends"` | verified |
 | `cargo test --features axon-encoder` | verified |
-| `cd smoke/cortex-neuromod && cargo test --locked` | verified (17 passed; uses published `cortex-hybrid` 0.2) |
+| `cd smoke/cortex-neuromod && cargo test --locked` | verified (18 passed; uses published `cortex-hybrid` 0.2) |
 | `cargo test --features sentry` | not run here (`--all-features` already covers it; CI's MSRV job skips it on purpose) |
 
 CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build, and test with `--all-features` on floating

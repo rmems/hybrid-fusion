@@ -119,7 +119,9 @@ special case.
 
 cortex-hybrid's `SnnDecoder` is sized by the channel count. It is fallible
 when the count exceeds `MAX_SNN_CHANNELS` (1,048,576 channels), the boundary's
-allocation cap; `SpikingMoeRouter` enforces the same cap before stepping. The
+allocation cap; `SpikingMoeRouter` enforces the same cap before stepping.
+hybrid-fusion's `SpikingExpertRouter` currently has no matching cap, a
+documented contract difference asserted by the parity tests. The
 `SpikeCountDecoder` silently drops out-of-range IDs, and the
 `SpikingMoeRouter` host validates the spike list before decoding, so a
 compliant flow never reaches the decoder with a bad ID. hybrid-fusion's

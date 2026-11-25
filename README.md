@@ -206,7 +206,7 @@ cargo test --manifest-path smoke/cortex-neuromod/Cargo.toml --locked
 
 The harness uses published `cortex-hybrid` 0.2.0 from crates.io (package VCS
 commit `704c3128f9bca71266fb5f40d41faa7862412c3c`) and depends on this crate
-with `neuromod` and `axon-encoder` enabled. Verified on 2026-11-25: 17 passed,
+with `neuromod` and `axon-encoder` enabled. Verified on 2026-11-25: 18 passed,
 0 failed, 0 ignored. `cargo test` and `cargo test --features neuromod` in the
 library root do not build it.
 

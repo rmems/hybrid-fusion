@@ -44,6 +44,10 @@
 //!   cortex-hybrid's decoder is fallible only when the requested channel
 //!   count exceeds `MAX_SNN_CHANNELS`. Both routers fail closed; only the
 //!   standalone-decoder behavior differs.
+//! * Channel allocation cap: cortex-hybrid's router rejects widths above
+//!   `MAX_SNN_CHANNELS` before allocating per-tick buffers; hybrid-fusion's
+//!   router currently has no matching cap. The difference is asserted
+//!   explicitly below.
 //! * Reset semantics: cortex-hybrid's `reset` rewinds the replay RNG to the
 //!   seed and keeps learned weights; hybrid-fusion's `reset` restores the
 //!   construction-time weights/thresholds and keeps the RNG stream (explicit
@@ -467,6 +471,82 @@ fn spike_count_decoders_documented_difference_and_host_parity() {
             ));
         }
     }
+}
+
+#[test]
+fn router_channel_cap_is_an_explicit_difference() {
+    // cortex-hybrid caps backend-controlled channel counts before allocating
+    // per-tick buffers. hybrid-fusion currently has no matching router cap:
+    // the same width is accepted and stepped. The width is only one Mi channels
+    // plus one, so the hybrid allocation is about 4 MiB and safe for this test.
+    struct WideCortex;
+    impl SnnBackend for WideCortex {
+        fn channels(&self) -> usize {
+            MAX_SNN_CHANNELS + 1
+        }
+        fn step(&mut self, _stimulus: &[f32]) -> cortex_hybrid::Result<SnnStepOutput> {
+            Ok(SnnStepOutput { spikes: vec![0] })
+        }
+        fn step_frozen(&mut self, stimulus: &[f32]) -> cortex_hybrid::Result<SnnStepOutput> {
+            self.step(stimulus)
+        }
+        fn reset(&mut self) {}
+        fn capabilities(&self) -> SnnCapabilities {
+            SnnCapabilities {
+                backend_name: "wide-stub",
+                frozen_evaluation: true,
+                plasticity: false,
+                caller_rng: false,
+                neuromodulation: false,
+            }
+        }
+    }
+
+    let err = SpikingMoeRouter::new(
+        MoeRouter::load("", EXPERTS, TOP_K).expect("stub MoeRouter"),
+        WideCortex,
+        CortexRateEncoder::default(),
+        CortexSpikeCountDecoder,
+    )
+    .err()
+    .expect("cortex router must reject oversized channels");
+    assert!(
+        matches!(err, CortexError::InvalidConfig(_)),
+        "expected typed InvalidConfig, got {err:?}"
+    );
+
+    struct WideHybrid;
+    impl SpikingNetwork for WideHybrid {
+        fn step(
+            &mut self,
+            stimuli: &[f32],
+            _modulators: &NeuroModulators,
+        ) -> HybridResult<Vec<usize>> {
+            assert_eq!(stimuli.len(), MAX_SNN_CHANNELS + 1);
+            Ok(vec![0])
+        }
+        fn num_channels(&self) -> usize {
+            MAX_SNN_CHANNELS + 1
+        }
+        fn num_neurons(&self) -> usize {
+            EXPERTS
+        }
+    }
+
+    let mut hybrid_router = SpikingExpertRouter::new(
+        SyntheticChunkRouter {
+            num_experts: EXPERTS,
+            top_k: TOP_K,
+        },
+        WideHybrid,
+        HybridRateEncoder::default(),
+        HybridSpikeCountDecoder,
+    )
+    .expect("hybrid router currently accepts the same width");
+    let output = hybrid_router
+        .forward(&embedding_for_tick(0), &zero_modulators())
+        .expect("hybrid router currently steps the same width");
+    assert_eq!(output.num_neurons, EXPERTS);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
