@@ -41,9 +41,9 @@
 //!   population and rejects out-of-range fired IDs; cortex-hybrid's is sized
 //!   by the channel count and silently drops out-of-range IDs because its
 //!   *host* (`SpikingMoeRouter`) validates the spike list before decoding.
-//!   cortex-hybrid's decoder is fallible only for an unrepresentable channel
-//!   count. Both routers fail closed; only the standalone-decoder behavior
-//!   differs.
+//!   cortex-hybrid's decoder is fallible only when the requested channel
+//!   count exceeds `MAX_SNN_CHANNELS`. Both routers fail closed; only the
+//!   standalone-decoder behavior differs.
 //! * Reset semantics: cortex-hybrid's `reset` rewinds the replay RNG to the
 //!   seed and keeps learned weights; hybrid-fusion's `reset` restores the
 //!   construction-time weights/thresholds and keeps the RNG stream (explicit
@@ -90,7 +90,7 @@ use axon_encoder::prelude::{EmbeddingEncoderConfig, EmbeddingRateEncoder};
 use cortex_hybrid::CortexError;
 use cortex_hybrid::moe::MoeRouter;
 use cortex_hybrid::snn::{
-    AxonEncoder as CortexAxonEncoder, DEFAULT_SPIKE_BOOST, NeuromodNetwork,
+    AxonEncoder as CortexAxonEncoder, DEFAULT_SPIKE_BOOST, MAX_SNN_CHANNELS, NeuromodNetwork,
     RateEncoder as CortexRateEncoder, SnnBackend, SnnCapabilities, SnnDecoder as CortexSnnDecoder,
     SnnEncoder as CortexSnnEncoder, SnnStepOutput, SpikeCountDecoder as CortexSpikeCountDecoder,
     SpikingMoeRouter,
@@ -360,6 +360,13 @@ fn spike_count_decoders_documented_difference_and_host_parity() {
         )
         .expect("small channel count is representable");
     assert_eq!(counts, vec![0.0, 1.0, 0.0, 0.0]);
+    let err = CortexSpikeCountDecoder
+        .decode(&SnnStepOutput { spikes: vec![] }, MAX_SNN_CHANNELS + 1)
+        .expect_err("oversized channel count must fail before allocation");
+    assert!(
+        matches!(err, CortexError::InvalidConfig(_)),
+        "expected typed InvalidConfig, got {err:?}"
+    );
 
     // Host parity: both routers reject a misbehaving backend (out-of-range
     // and duplicate fired IDs) before the readout can influence routing.

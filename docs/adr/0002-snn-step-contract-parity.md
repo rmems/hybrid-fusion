@@ -8,10 +8,10 @@
   wording throughout). Related: [RM-2205](https://linear.app/rpd-34/issue/RM-2205)
   (ADR 0001), [RM-2206](https://linear.app/rpd-34/issue/RM-2206) (closed not
   planned — cortex-hybrid keeps its SNN code), [RM-2208](https://linear.app/rpd-34/issue/RM-2208)
-  (smoke pin bump, unblocked here).
-- **Trees cited:** hybrid-fusion `ea230f7`, cortex-hybrid `74d63ee`
-  (the smoke pin this ADR lands with, past the #91–#93 fix series and
-  RM-2364).
+  (smoke dependency moved to crates.io here).
+- **Trees cited:** hybrid-fusion `ea230f7`, cortex-hybrid `74d63ee` at ADR
+  acceptance. The smoke lockfile now pins published cortex-hybrid 0.2.0
+  (package VCS commit `704c3128f9bca71266fb5f40d41faa7862412c3c`).
 
 ## 1. Context
 
@@ -86,7 +86,7 @@ Drift is prevented mechanically, not by prose:
 | `SnnCapabilities { backend_name, frozen_evaluation, plasticity, caller_rng, neuromodulation }` | `BackendCapabilities::snn(..)` + `RequiredFeature` strings `step`, `frozen_evaluation`, `plasticity`, `caller_rng`, `neuromodulation` | two vocabularies for the same facts; the adapters report identical values (asserted by the parity tests) |
 | `SnnStepOutput { spikes: Vec<usize> }` | `Vec<usize>` fired IDs | same index space (`0..` output population), no wrapper in hybrid-fusion |
 | `SnnEncoder::encode(&ann_signal, channels)`, `reset()` | `SpikeEncoder::encode`, `reset()`, plus `encoding()` (`SpikeEncoding` metadata) | identical semantics; hybrid-fusion adds declared plan-port metadata |
-| `SnnDecoder::decode(&SnnStepOutput, channels) -> Result<Vec<f32>>` (fallible for an unrepresentable channel count) | `SpikeDecoder::decode(&[usize], num_neurons) -> Result<Vec<f32>>`, plus `decoding()` metadata | **sized by channel count vs output population**, with different standalone out-of-range spike behavior (§4.2) |
+| `SnnDecoder::decode(&SnnStepOutput, channels) -> Result<Vec<f32>>` (fallible above `MAX_SNN_CHANNELS`) | `SpikeDecoder::decode(&[usize], num_neurons) -> Result<Vec<f32>>`, plus `decoding()` metadata | **sized by channel count vs output population**, with different standalone out-of-range spike behavior (§4.2) |
 | `RateEncoder { gain }` | `RateEncoder { gain }` | identical tiling semantics |
 | `SpikeCountDecoder` | `SpikeCountDecoder` | counts per channel / per neuron; out-of-range IDs silently dropped vs rejected (§4.2) |
 | `SpikingMoeRouter<B, E, D>` over the concrete `MoeRouter` | `SpikingExpertRouter<R, S, E, D>` over any `ExpertRouter` | same pipeline: gate scores → encode → step → decode → additive spike boost → top-k |
@@ -118,7 +118,8 @@ special case.
 ### 4.2 Decoder fallibility and sizing
 
 cortex-hybrid's `SnnDecoder` is sized by the channel count. It is fallible
-only when the requested channel count cannot be represented safely; its
+when the count exceeds `MAX_SNN_CHANNELS` (1,048,576 channels), the boundary's
+allocation cap; `SpikingMoeRouter` enforces the same cap before stepping. The
 `SpikeCountDecoder` silently drops out-of-range IDs, and the
 `SpikingMoeRouter` host validates the spike list before decoding, so a
 compliant flow never reaches the decoder with a bad ID. hybrid-fusion's
