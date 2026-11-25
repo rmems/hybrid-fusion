@@ -479,10 +479,10 @@ fn router_channel_cap_is_an_explicit_difference() {
     // per-tick buffers. hybrid-fusion currently has no matching router cap:
     // the same width is accepted and stepped. The width is only one Mi channels
     // plus one, so the hybrid allocation is about 4 MiB and safe for this test.
-    struct WideCortex;
+    struct WideCortex(usize);
     impl SnnBackend for WideCortex {
         fn channels(&self) -> usize {
-            MAX_SNN_CHANNELS + 1
+            self.0
         }
         fn step(&mut self, _stimulus: &[f32]) -> cortex_hybrid::Result<SnnStepOutput> {
             Ok(SnnStepOutput { spikes: vec![0] })
@@ -502,9 +502,21 @@ fn router_channel_cap_is_an_explicit_difference() {
         }
     }
 
+    let mut at_limit = SpikingMoeRouter::new(
+        MoeRouter::load("", EXPERTS, TOP_K).expect("stub MoeRouter"),
+        WideCortex(MAX_SNN_CHANNELS),
+        CortexRateEncoder::default(),
+        CortexSpikeCountDecoder,
+    )
+    .expect("cortex router must accept the inclusive channel cap");
+    let limit_output = at_limit
+        .forward(&embedding_for_tick(0))
+        .expect("cortex router must step at the inclusive channel cap");
+    assert_eq!(limit_output.hidden.len(), EMBEDDING_DIM);
+
     let err = SpikingMoeRouter::new(
         MoeRouter::load("", EXPERTS, TOP_K).expect("stub MoeRouter"),
-        WideCortex,
+        WideCortex(MAX_SNN_CHANNELS + 1),
         CortexRateEncoder::default(),
         CortexSpikeCountDecoder,
     )
