@@ -425,6 +425,22 @@ mod tests {
         assert_eq!(fired, vec![0usize]);
     }
 
+    fn assert_modulator_step_rejected(snn: &mut SimpleSnn, mods: &NeuroModulators, field: &str) {
+        let before = snn.membrane_potentials.clone();
+        let err = snn.step(&[0.5], mods);
+        match err {
+            Err(HybridError::SnnStep(message)) => assert!(
+                message.contains(field),
+                "expected SnnStep naming `{field}`, got {message}"
+            ),
+            other => panic!("expected SnnStep naming `{field}`, got {other:?}"),
+        }
+        assert_eq!(
+            snn.membrane_potentials, before,
+            "a rejected modulator must not change membrane state"
+        );
+    }
+
     #[test]
     fn rejects_non_finite_modulator_before_mutating_membrane() {
         let neutral = NeuroModulators {
@@ -441,19 +457,7 @@ mod tests {
             dopamine: f32::NAN,
             ..NeuroModulators::default()
         };
-        let err = snn.step(&[0.5], &nan_dopamine);
-        match err {
-            Err(HybridError::SnnStep(message)) => assert!(
-                message.contains("dopamine"),
-                "error must name the offending field: {message}"
-            ),
-            other => panic!("expected SnnStep naming the field, got {other:?}"),
-        }
-        assert_eq!(
-            snn.membrane_potentials,
-            vec![0.4],
-            "a rejected modulator must not change membrane state"
-        );
+        assert_modulator_step_rejected(&mut snn, &nan_dopamine, "dopamine");
 
         // Every modulator field is validated, not just dopamine.
         for (field, value) in [
@@ -470,15 +474,7 @@ mod tests {
                 tempo: if field == "tempo" { value } else { 1.0 },
                 aux_dopamine: if field == "aux_dopamine" { value } else { 0.0 },
             };
-            let err = snn.step(&[0.5], &mods);
-            match &err {
-                Err(HybridError::SnnStep(message)) => assert!(
-                    message.contains(field),
-                    "expected SnnStep naming `{field}`, got {message}"
-                ),
-                other => panic!("expected SnnStep naming `{field}`, got {other:?}"),
-            }
-            assert_eq!(snn.membrane_potentials, vec![0.4]);
+            assert_modulator_step_rejected(&mut snn, &mods, field);
         }
 
         // The mock still steps normally after the rejected calls.
