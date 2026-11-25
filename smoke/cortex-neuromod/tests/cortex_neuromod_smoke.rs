@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Fixed-seed smoke test: one real cortex-tensor embedding stage into one real
+//! Fixed-seed smoke test: one real cortex-hybrid embedding stage into one real
 //! `neuromod` 0.7 network through [`hybrid_fusion::NeuromodSnn`] (issue #45).
 //!
 //! This file lives in the `smoke/cortex-neuromod` package, not in the library.
 //! Run it with `cargo test --manifest-path smoke/cortex-neuromod/Cargo.toml --locked`.
 //! The library's default build and `cargo test --features neuromod` do not
-//! resolve this package and do not fetch cortex-tensor.
+//! resolve this package and do not fetch cortex-hybrid.
 //!
 //! # Fixture
 //!
-//! - ANN: cortex-tensor `ReferenceExecutor` embedding stage. Token table and
+//! - ANN: cortex-hybrid `ReferenceExecutor` embedding stage. Token table and
 //!   position table are fixed literals (vocab 4, dim 4, max sequence 4). Input
 //!   token ids are `[1, 3, 0]`. Output is token embedding plus position
 //!   embedding, shape `[3, 4]`.
@@ -28,8 +28,8 @@
 //! strictly positive. The bound is loose on purpose — this is not a spike-count
 //! benchmark.
 
-use cortex_tensor::stage::{ReferenceStageParams, StageInput, StageSource};
-use cortex_tensor::{AnnExecutor, AnnStage, ReferenceExecutor, StageId, StageKind, Tensor};
+use cortex_hybrid::stage::{ReferenceStageParams, StageInput, StageSource};
+use cortex_hybrid::{AnnExecutor, AnnStage, ReferenceExecutor, StageId, StageKind, Tensor};
 use hybrid_fusion::projector::embed_to_stimuli_with_width;
 use hybrid_fusion::{
     BackendCapabilities, DeviceHint, Dtype, HybridError, NeuroModulators, NeuromodSnn,
@@ -183,7 +183,7 @@ fn same_seed_reproduces_fired_indices_including_after_reset() {
 fn neuromod_report_matches_the_smoke_fixture() {
     // The harness has no separate capabilities() adapter. It drives
     // NeuromodSnn, whose report must describe this fixture. ReferenceExecutor
-    // capabilities stay in cortex-tensor (RM-1831).
+    // capabilities stay in cortex-hybrid (RM-1831).
     let stimulus = project(&hidden_state(&token_table(), &position_table()));
     let mut snn = NeuromodSnn::with_seed(CHANNELS, CHANNELS, SEED).expect("network");
     let caps: BackendCapabilities = snn.capabilities();

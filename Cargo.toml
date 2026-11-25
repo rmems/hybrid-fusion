@@ -14,8 +14,8 @@ keywords = ["neuromorphic", "snn", "llm", "transformer", "hybrid"]
 categories = ["science", "algorithms"]
 readme = "README.md"
 # crates.io surface: licenses, README, changelog, user docs, sources,
-# examples, and tests. Drop agent/CI/dev-only paths and the unpublished
-# smoke harness (it pins cortex-tensor by git and must not be packaged).
+# examples, and tests. Drop agent/CI/dev-only paths and the separate
+# smoke harness (it is a test-only package and must not be packaged).
 # `docs/superpowers/` is agent planning history; `docs/implementing-backends.md`
 # and `docs/extraction-map.md` stay. `rust-toolchain.toml` stays in git so
 # local builds use the pinned toolchain; MSRV for dependents is `rust-version`.

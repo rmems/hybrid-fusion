@@ -20,7 +20,7 @@ Run from the repo root. "Verified" means it ran successfully in a fresh checkout
 | `cargo build --features backends` | verified |
 | `cargo test --features "neuromod backends"` | verified |
 | `cargo test --features axon-encoder` | verified |
-| `cd smoke/cortex-neuromod && cargo test --locked` | verified (4 passed; fetches `cortex-tensor` by git rev) |
+| `cd smoke/cortex-neuromod && cargo test --locked` | verified (17 passed; uses published `cortex-hybrid` 0.2) |
 | `cargo test --features sentry` | not run here (`--all-features` already covers it; CI's MSRV job skips it on purpose) |
 
 CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build, and test with `--all-features` on floating
@@ -40,7 +40,7 @@ CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build
   finite-value validation, `HybridError`, config/output types, optional Sentry reporting.
 - `src/backends/` (feature `backends`): reference toy backends. `src/neuromod_adapter.rs` (feature `neuromod`): real SNN adapter.
 - `tests/`: integration tests, including `tensor_properties.rs` (proptest). `examples/`: some need `sentry`, `backends`, or `neuromod`.
-- `smoke/cortex-neuromod/`: separate package and lockfile; the unpublished `cortex-tensor` git pin stays out of the library graph.
+- `smoke/cortex-neuromod/`: separate package and lockfile; the published `cortex-hybrid` smoke dependency stays out of the library graph.
 - `docs/extraction-map.md` and `docs/implementing-backends.md` are user docs. `docs/superpowers/` is agent planning history.
 
 ## Invariants and non-goals (from `REVIEW.md` and `Cargo.toml`)
@@ -57,7 +57,7 @@ CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build
 - Keep the toolchain pin in sync across `Cargo.toml` `rust-version`, `rust-toolchain.toml`, `smoke/cortex-neuromod/Cargo.toml`,
   `.agents/setup`, and the CI MSRV job.
 - The first all-features build compiles Sentry's transitive tree (reqwest, hyper, tokio, ring) and is slow; clippy took about 3.5 minutes cold.
-- The smoke test needs network access to fetch `cortex-tensor` from GitHub.
+- The smoke test needs network access on a cold cache to fetch `cortex-hybrid` from crates.io.
 - `Cargo.toml` has an `exclude` list for publishing; `CLAUDE.md` is listed there next to `AGENTS.md`.
 - Never run `cargo publish`.
 - Edit only what the task needs.

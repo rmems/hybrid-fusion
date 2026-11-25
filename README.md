@@ -48,7 +48,7 @@ This crate **owns**:
 
 This crate **does not own**:
 
-- Tensor / transformer math -> [`cortex-tensor`](https://github.com/rmems/cortex-tensor)
+- Tensor / transformer math -> [`cortex-hybrid`](https://github.com/rmems/cortex-hybrid)
   (including real-weight gate matmul once backends land).
 - GGUF / Safetensors parsing, mmap, layout discovery, tensor-role
   classification, and model-topology discovery ->
@@ -193,25 +193,26 @@ is a deterministic reference/mock only, kept for tests and examples; enable
 cargo build --features neuromod
 ```
 
-### Fixed-seed smoke test (issue #45)
+### Fixed-seed smoke tests (issue #45, RM-2208)
 
-`smoke/cortex-neuromod` runs one real cortex-tensor embedding stage into one
-real `NeuromodSnn`. It is a separate package, not a feature of this library
-and not a Cargo workspace member, so resolving or publishing `hybrid-fusion`
-does not fetch cortex-tensor.
+`smoke/cortex-neuromod` runs real cortex-hybrid ANN stages into real SNN
+backends. It is a separate package, not a feature of this library and not a
+Cargo workspace member, so resolving or publishing `hybrid-fusion` does not
+fetch cortex-hybrid.
 
 ```sh
 cargo test --manifest-path smoke/cortex-neuromod/Cargo.toml --locked
 ```
 
-The harness pins `cortex-tensor` (not on crates.io; rev
-`5cbee81473ed69bd8e74d53e210ef64c02d232da`) and depends on this crate with
-`neuromod` enabled. `cargo test` and `cargo test --features neuromod` in the
+The harness uses published `cortex-hybrid` 0.2.0 from crates.io (package VCS
+commit `704c3128f9bca71266fb5f40d41faa7862412c3c`) and depends on this crate
+with `neuromod` and `axon-encoder` enabled. Verified on 2026-11-25: 17 passed,
+0 failed, 0 ignored. `cargo test` and `cargo test --features neuromod` in the
 library root do not build it.
 
-Fixture, also documented at the top of the test module:
+Fixtures, also documented at the top of the test modules:
 
-- Token ids `[1, 3, 0]` through cortex-tensor `ReferenceExecutor`'s embedding
+- Token ids `[1, 3, 0]` through cortex-hybrid `ReferenceExecutor`'s embedding
   stage (vocab 4, dim 4, fixed token and position tables).
 - `embed_to_stimuli_with_width` mean-pools, resizes to 4 channels, and applies
   `tanh`.
@@ -221,6 +222,11 @@ Fixture, also documented at the top of the test module:
   neuron per step).
 - A second network with the same seed, and `reset()` plus `reseed(0x45_5EE5)`,
   must emit the same per-step fired indices. A different seed may differ.
+- `tests/ann_snn_ann_round_trip.rs` chains the cortex-only ANN→SNN→ANN path:
+  embedding `[3, 4]` → mean-pooled `[4]` signal → axon `EmbeddingRateEncoder`
+  → cortex `NeuromodNetwork` (4 LIF channels, seed `0x2208_5EED`, 5 frozen
+  ticks) → `SpikeCountDecoder` readout `[4]` → cortex readout stage `[1, 2]`.
+  Its spike trace and readouts are golden-tested under `tests/fixtures/`.
 
 The crate's MSRV is `rust-version = 1.99.0` for **all** builds, default and
 feature-enabled alike. `rust-toolchain.toml` pins the same release for local
