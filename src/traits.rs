@@ -26,8 +26,20 @@ use serde::{Deserialize, Serialize};
 /// Every other rank (0, 3, …) is rejected. Backing `data.len()` must equal the
 /// layout product (`seq_len * dim` or `dim`). Every value must be finite
 /// (no NaN or ±Inf).
+///
+/// # Fallibility
+///
+/// `hidden_states` returns `Result<Tensor, HybridError>`: a backend that
+/// cannot produce a well-formed tensor reports `Err` (typically
+/// [`HybridError::InvalidConfig`](crate::HybridError::InvalidConfig) from
+/// [`Tensor::try_from_vec`](crate::Tensor::try_from_vec) /
+/// [`Tensor::try_zeros`](crate::Tensor::try_zeros)) instead of panicking.
+/// [`crate::HybridNetwork::forward`] propagates the error before pooling or
+/// stepping and leaves `global_step` unchanged. The `Tensor::from_vec` /
+/// `Tensor::zeros` constructors still panic on invalid shapes — they are
+/// convenience wrappers for callers that already proved the shape valid.
 pub trait Transformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor;
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor>;
     fn dim(&self) -> usize;
     fn max_seq_len(&self) -> usize;
     fn param_count(&self) -> usize;

@@ -83,9 +83,9 @@ struct TinyTransformer {
 }
 
 impl Transformer for TinyTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
         let seq = token_ids.len();
-        Tensor::from_vec(vec![0.1; seq * self.dim], &[seq, self.dim])
+        Tensor::try_from_vec(vec![0.1; seq * self.dim], &[seq, self.dim])
     }
     fn dim(&self) -> usize {
         self.dim

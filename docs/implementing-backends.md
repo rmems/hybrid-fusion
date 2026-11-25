@@ -36,16 +36,17 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 
 ```rust
 pub trait Transformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor;
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor>;
     fn dim(&self) -> usize;
     fn max_seq_len(&self) -> usize;
     fn param_count(&self) -> usize;
 }
 ```
 
-### `hidden_states(&self, token_ids: &[u32]) -> Tensor`
+### `hidden_states(&self, token_ids: &[u32]) -> Result<Tensor>`
 
-Returns the model's hidden-state representation for the given token sequence.
+Returns the model's hidden-state representation for the given token sequence,
+or an error if the backend cannot produce one.
 
 **Contract:**
 
@@ -67,17 +68,24 @@ Returns the model's hidden-state representation for the given token sequence.
 - `dim()` must be `> 0`. A zero hidden dimension is rejected as
   `HiddenStateDim { expected: 1, got: 0 }` before pooling or `step`, even
   if a deserialized tensor uses a matching zero-extent axis.
-- All shape dimensions must be `> 0`. `Tensor::from_vec` panics on zero-dim
-  shapes.
+- All shape dimensions must be `> 0`. Build tensors with
+  `Tensor::try_from_vec` / `Tensor::try_zeros`, which return
+  `HybridError::InvalidConfig` on zero-extent shapes or a `data.len()` /
+  shape-product mismatch. `Tensor::from_vec` / `Tensor::zeros` still exist
+  but **panic** — they are convenience wrappers for shapes you have already
+  proven valid.
+- Return `Err` (not `panic!`) for any failure inside `hidden_states`.
+  `HybridNetwork::forward` propagates the error before pooling or stepping
+  and leaves `global_step` unchanged.
 
 **Common implementation pattern:**
 
 ```rust
-fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
     let seq_len = token_ids.len();
     // ... run your transformer forward pass ...
     let data: Vec<f32> = /* fill with seq_len * dim values */;
-    Tensor::from_vec(data, &[seq_len, self.dim])
+    Tensor::try_from_vec(data, &[seq_len, self.dim])
 }
 ```
 
@@ -948,9 +956,10 @@ should call `ResultTrack::require_same`, which returns
 ### Rules
 
 - **All dimensions must be `> 0`.** `Tensor::from_vec` and `Tensor::zeros`
-  panic on zero-dim shapes. This is a hard invariant.
-- **`data.len()` must equal the product of shape dimensions.** Mismatches
-  panic at construction time.
+  panic on zero-dim shapes; `Tensor::try_from_vec` and `Tensor::try_zeros`
+  return `HybridError::InvalidConfig` instead. This is a hard invariant.
+- **`data.len()` must equal the product of shape dimensions.** The `try_*`
+  constructors return `InvalidConfig` on mismatch; `from_vec` panics.
 - **1-D tensors** `[d]` represent flat vectors. The projector uses them
   directly.
 - **2-D tensors** `[rows, cols]` represent matrix layouts. The projector
@@ -969,6 +978,11 @@ let t = Tensor::from_vec(vec![0.0; 4 * 128], &[4, 128]);
 
 // Zeros (same rules apply)
 let t = Tensor::zeros(&[8, 256]);
+
+// Fallible variants — preferred on the Transformer::hidden_states path,
+// since they return HybridError::InvalidConfig instead of panicking:
+let t = Tensor::try_from_vec(vec![0.0; 128], &[128])?;
+let t = Tensor::try_zeros(&[8, 256])?;
 ```
 
 ---
@@ -994,7 +1008,7 @@ struct MyTransformer {
 }
 
 impl Transformer for MyTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
         let seq_len = token_ids.len();
         // Dummy: multiply each token id by a small float to fill the tensor.
         // A real backend would run attention, FFN layers, etc.
@@ -1005,7 +1019,7 @@ impl Transformer for MyTransformer {
                 data.push(base + j as f32 * 0.001);
             }
         }
-        Tensor::from_vec(data, &[seq_len, self.dim])
+        Tensor::try_from_vec(data, &[seq_len, self.dim])
     }
 
     fn dim(&self) -> usize {
@@ -1163,8 +1177,9 @@ hidden-state dimension mismatch: expected 128, got 64
 Rank-2 `shape[0]` must also equal `token_ids.len()` (`HiddenStateSeqLen`).
 Rank 0 / 3+ is `HiddenStateRank`. NaN / ±Inf is `NonFinite`.
 
-**Fix:** Ensure `Tensor::from_vec(data, &[seq_len, self.dim])` uses the same
-`dim` value as `fn dim(&self) -> usize`, and `seq_len == token_ids.len()`.
+**Fix:** Ensure `Tensor::try_from_vec(data, &[seq_len, self.dim])` uses the
+same `dim` value as `fn dim(&self) -> usize`, and
+`seq_len == token_ids.len()`.
 
 ### Zero-dim tensors panic
 
@@ -1174,6 +1189,11 @@ dimension is `0`:
 ```
 Tensor::from_vec: shape dimensions must be > 0, got [0]
 ```
+
+On the `Transformer::hidden_states` path, use `Tensor::try_from_vec` /
+`Tensor::try_zeros` instead — they return `HybridError::InvalidConfig`,
+which `HybridNetwork::forward` propagates without stepping the SNN or
+advancing `global_step`.
 
 **Fix:** Never return a tensor with a zero-length dimension. If your
 transformer produces no output for an edge case, return a 1-D tensor of

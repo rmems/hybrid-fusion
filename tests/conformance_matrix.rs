@@ -597,7 +597,7 @@ mod backend_reports {
 
     #[test]
     fn simple_transformer_report_matches_the_trait_default() {
-        let t = SimpleTransformer::new(TransformerConfig::tiny());
+        let t = SimpleTransformer::new(TransformerConfig::tiny()).unwrap();
         let caps = t.capabilities();
         assert_eq!(caps.domains, vec![ExecutionDomain::Ann]);
         assert_eq!(caps.dtypes, BTreeSet::from([Dtype::F32]));
@@ -608,7 +608,7 @@ mod backend_reports {
         assert!(caps.channels.is_none() && caps.num_neurons.is_none());
         assert!(caps.max_batch.is_none());
         // The advertised contract is what hidden_states honours.
-        assert_eq!(t.hidden_states(&[0, 1, 2]).shape(), &[3, t.dim()]);
+        assert_eq!(t.hidden_states(&[0, 1, 2]).unwrap().shape(), &[3, t.dim()]);
     }
 
     #[test]

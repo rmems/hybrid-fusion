@@ -11,7 +11,8 @@ use hybrid_fusion::{HybridConfig, HybridNetwork};
 fn main() {
     let config = HybridConfig::tiny();
 
-    let transformer = SimpleTransformer::new(config.transformer.clone());
+    let transformer = SimpleTransformer::new(config.transformer.clone())
+        .expect("tiny config has non-zero vocab_size and dim");
     let snn = SimpleSnn::new(config.snn_input_channels);
 
     let mut network =

@@ -17,9 +17,12 @@ struct MockTransformer {
 }
 
 impl Transformer for MockTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
         let seq = token_ids.len();
-        Tensor::from_vec(vec![0.1; seq * self.dim], &[seq, self.dim])
+        Ok(Tensor::from_vec(
+            vec![0.1; seq * self.dim],
+            &[seq, self.dim],
+        ))
     }
     fn dim(&self) -> usize {
         self.dim
