@@ -29,9 +29,10 @@ impl SimpleTransformer {
     ///
     /// # Errors
     ///
-    /// [`HybridError::InvalidConfig`] when `vocab_size` or `dim` is `0` —
-    /// zero-sized configs would otherwise panic (modulo-by-zero in
-    /// `embed_token`) or violate `Tensor`'s non-zero extent invariant.
+    /// [`HybridError::InvalidConfig`] when `vocab_size`, `dim`, or
+    /// `max_seq_len` is `0` — zero-sized configs would otherwise panic
+    /// (modulo-by-zero in `embed_token`) or produce a transformer that can
+    /// never accept input — or when a weight-matrix size overflows `usize`.
     pub fn new(config: TransformerConfig) -> Result<Self> {
         let vocab_size = config.vocab_size;
         let dim = config.dim;
@@ -45,16 +46,29 @@ impl SimpleTransformer {
                 "SimpleTransformer::new: dim must be > 0, got {dim}"
             )));
         }
+        if config.max_seq_len == 0 {
+            return Err(HybridError::InvalidConfig(format!(
+                "SimpleTransformer::new: max_seq_len must be > 0, got {}",
+                config.max_seq_len
+            )));
+        }
+
+        let emb_len = vocab_size.checked_mul(dim).ok_or_else(|| {
+            HybridError::InvalidConfig(
+                "SimpleTransformer::new: vocab_size * dim overflows usize".into(),
+            )
+        })?;
+        let proj_len = dim.checked_mul(dim).ok_or_else(|| {
+            HybridError::InvalidConfig("SimpleTransformer::new: dim * dim overflows usize".into())
+        })?;
 
         let mut lcg = Lcg::new(
             (vocab_size as u64).wrapping_mul(2654435761) ^ (dim as u64).wrapping_mul(2246822519),
         );
 
         // next_f32() already returns [-1, 1); scale by 0.01 → symmetric [-0.01, 0.01).
-        let embeddings = (0..vocab_size * dim)
-            .map(|_| lcg.next_f32() * 0.01)
-            .collect();
-        let projection = (0..dim * dim).map(|_| lcg.next_f32() * 0.01).collect();
+        let embeddings = (0..emb_len).map(|_| lcg.next_f32() * 0.01).collect();
+        let projection = (0..proj_len).map(|_| lcg.next_f32() * 0.01).collect();
 
         Ok(Self {
             vocab_size,
@@ -85,7 +99,12 @@ impl Transformer for SimpleTransformer {
     fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
         let seq = token_ids.len();
         let dim = self.dim;
-        let mut data = Vec::with_capacity(seq * dim);
+        let cap = seq.checked_mul(dim).ok_or_else(|| {
+            HybridError::InvalidConfig(
+                "SimpleTransformer::hidden_states: seq * dim overflows usize".into(),
+            )
+        })?;
+        let mut data = Vec::with_capacity(cap);
         for &tid in token_ids {
             let emb = self.embed_token(tid);
             let proj = self.project(emb);
@@ -218,6 +237,16 @@ mod tests {
     fn rejects_zero_dim() {
         let mut cfg = tiny_config();
         cfg.dim = 0;
+        assert!(matches!(
+            SimpleTransformer::new(cfg),
+            Err(HybridError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_max_seq_len() {
+        let mut cfg = tiny_config();
+        cfg.max_seq_len = 0;
         assert!(matches!(
             SimpleTransformer::new(cfg),
             Err(HybridError::InvalidConfig(_))

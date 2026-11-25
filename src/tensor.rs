@@ -40,12 +40,19 @@ impl Serialize for Tensor {
     }
 }
 
+/// Product of all shape dimensions, `None` on `usize` overflow. The empty
+/// shape yields `1` (rank-0 scalar).
+fn shape_numel(shape: &[usize]) -> Option<usize> {
+    shape.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d))
+}
+
 impl Tensor {
     /// Fallible [`Self::from_vec`]: returns [`HybridError::InvalidConfig`]
-    /// instead of panicking when a shape dimension is `0` or `data.len()`
-    /// does not equal the shape product. Backend code on the
-    /// [`crate::Transformer::hidden_states`] path should use this (or
-    /// [`Self::try_zeros`]) so a construction failure surfaces as `Err`.
+    /// instead of panicking when a shape dimension is `0`, the shape product
+    /// overflows `usize`, or `data.len()` does not equal the shape product.
+    /// Backend code on the [`crate::Transformer::hidden_states`] path should
+    /// use this (or [`Self::try_zeros`]) so a construction failure surfaces
+    /// as `Err`.
     ///
     /// Rank-0 tensors (`shape == &[]`, one element) are valid, matching
     /// [`Self::from_vec`].
@@ -55,7 +62,11 @@ impl Tensor {
                 "Tensor::try_from_vec: shape dimensions must be > 0, got {shape:?}"
             )));
         }
-        let expected: usize = shape.iter().product();
+        let Some(expected) = shape_numel(shape) else {
+            return Err(HybridError::InvalidConfig(format!(
+                "Tensor::try_from_vec: shape product overflows usize (shape={shape:?})"
+            )));
+        };
         if data.len() != expected {
             return Err(HybridError::InvalidConfig(format!(
                 "Tensor::try_from_vec: data.len()={} does not match shape product={expected} (shape={shape:?})",
@@ -69,16 +80,28 @@ impl Tensor {
     }
 
     /// Fallible [`Self::zeros`]: returns [`HybridError::InvalidConfig`] when
-    /// a shape dimension is `0` instead of panicking.
+    /// a shape dimension is `0`, the shape product overflows `usize`, or the
+    /// buffer cannot be allocated, instead of panicking.
     pub fn try_zeros(shape: &[usize]) -> Result<Self, HybridError> {
         if shape.contains(&0) {
             return Err(HybridError::InvalidConfig(format!(
                 "Tensor::try_zeros: shape dimensions must be > 0, got {shape:?}"
             )));
         }
-        let len: usize = shape.iter().product();
+        let Some(len) = shape_numel(shape) else {
+            return Err(HybridError::InvalidConfig(format!(
+                "Tensor::try_zeros: shape product overflows usize (shape={shape:?})"
+            )));
+        };
+        let mut data = Vec::new();
+        data.try_reserve_exact(len).map_err(|_| {
+            HybridError::InvalidConfig(format!(
+                "Tensor::try_zeros: cannot allocate {len} elements (shape={shape:?})"
+            ))
+        })?;
+        data.resize(len, 0.0);
         Ok(Self {
-            data: vec![0.0; len],
+            data,
             shape: shape.to_vec(),
         })
     }
@@ -91,7 +114,7 @@ impl Tensor {
             shape.iter().all(|&d| d > 0),
             "Tensor::from_vec: shape dimensions must be > 0, got {shape:?}",
         );
-        let expected: usize = shape.iter().product();
+        let expected = shape_numel(shape).expect("Tensor::from_vec: shape product overflows usize");
         assert_eq!(
             data.len(),
             expected,
@@ -112,7 +135,7 @@ impl Tensor {
             shape.iter().all(|&d| d > 0),
             "Tensor::zeros: shape dimensions must be > 0, got {shape:?}",
         );
-        let len: usize = shape.iter().product();
+        let len = shape_numel(shape).expect("Tensor::zeros: shape product overflows usize");
         Self {
             data: vec![0.0; len],
             shape: shape.to_vec(),
@@ -169,6 +192,23 @@ mod tests {
                 assert!(msg.contains("does not match shape product"), "{msg}");
             }
             other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_constructors_reject_shape_product_overflow() {
+        // usize::MAX * 2 overflows; the fallible constructors must return
+        // InvalidConfig rather than panic (debug) or wrap to a small product
+        // that would silently accept a mismatched buffer (release).
+        let shape = [usize::MAX, 2];
+        for result in [
+            Tensor::try_from_vec(Vec::new(), &shape),
+            Tensor::try_zeros(&shape),
+        ] {
+            assert!(
+                matches!(result, Err(HybridError::InvalidConfig(_))),
+                "overflowing shape must be InvalidConfig"
+            );
         }
     }
 
