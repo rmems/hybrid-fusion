@@ -67,8 +67,8 @@ impl SimpleTransformer {
         );
 
         // next_f32() already returns [-1, 1); scale by 0.01 → symmetric [-0.01, 0.01).
-        let embeddings = (0..emb_len).map(|_| lcg.next_f32() * 0.01).collect();
-        let projection = (0..proj_len).map(|_| lcg.next_f32() * 0.01).collect();
+        let embeddings = init_weights(emb_len, &mut lcg)?;
+        let projection = init_weights(proj_len, &mut lcg)?;
 
         Ok(Self {
             vocab_size,
@@ -104,7 +104,12 @@ impl Transformer for SimpleTransformer {
                 "SimpleTransformer::hidden_states: seq * dim overflows usize".into(),
             )
         })?;
-        let mut data = Vec::with_capacity(cap);
+        let mut data = Vec::new();
+        data.try_reserve_exact(cap).map_err(|_| {
+            HybridError::InvalidConfig(
+                "SimpleTransformer::hidden_states: cannot allocate hidden-state buffer".into(),
+            )
+        })?;
         for &tid in token_ids {
             let emb = self.embed_token(tid);
             let proj = self.project(emb);
@@ -124,6 +129,20 @@ impl Transformer for SimpleTransformer {
     fn param_count(&self) -> usize {
         self.embeddings.len() + self.projection.len()
     }
+}
+
+/// Fill `len` weights from `lcg`, reserving fallibly so an element count that
+/// fits `usize` but exceeds `Vec<f32>`'s byte capacity returns
+/// [`HybridError::InvalidConfig`] instead of panicking inside `collect`.
+fn init_weights(len: usize, lcg: &mut Lcg) -> Result<Vec<f32>> {
+    let mut weights = Vec::new();
+    weights.try_reserve_exact(len).map_err(|_| {
+        HybridError::InvalidConfig(format!(
+            "SimpleTransformer::new: cannot allocate {len} weight elements"
+        ))
+    })?;
+    weights.extend((0..len).map(|_| lcg.next_f32() * 0.01));
+    Ok(weights)
 }
 
 /// Minimal deterministic 64-bit LCG for weight initialisation.
@@ -260,6 +279,24 @@ mod tests {
         let cfg = TransformerConfig {
             vocab_size: usize::MAX,
             dim: 2,
+            num_heads: 1,
+            num_layers: 1,
+            ff_dim: 8,
+            max_seq_len: 16,
+        };
+        assert!(matches!(
+            SimpleTransformer::new(cfg),
+            Err(HybridError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_unallocatable_weight_buffer() {
+        // vocab_size * dim fits usize but the f32 buffer exceeds Vec's
+        // byte-capacity limit; construction must error, not abort.
+        let cfg = TransformerConfig {
+            vocab_size: usize::MAX / 2,
+            dim: 1,
             num_heads: 1,
             num_layers: 1,
             ff_dim: 8,
