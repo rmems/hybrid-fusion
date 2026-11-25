@@ -344,7 +344,8 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   `from_vec` / `zeros` wrappers — and `HybridNetwork::forward` propagates
   the error before pooling or stepping, leaving `global_step` unchanged.
   `SimpleTransformer::new` now returns `Result<Self>`
-  (`HybridError::InvalidConfig` on zero `vocab_size`/`dim`) instead of
+  (`HybridError::InvalidConfig` on zero `vocab_size`/`dim`/`max_seq_len`
+  or an overflowing/unallocatable weight size) instead of
   panicking, matching `NeuromodSnn::new` and the routers. Every in-tree
   implementor, mock, example, and doc example is updated; downstream
   `Transformer` implementors must update their signature.

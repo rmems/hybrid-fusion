@@ -159,7 +159,10 @@ impl Tensor {
     }
 
     pub fn numel(&self) -> usize {
-        self.shape.iter().product()
+        // Saturates rather than wrapping: constructor-built tensors always
+        // have a fitting product, but a deserialized tensor can carry an
+        // absurd shape.
+        shape_numel(&self.shape).unwrap_or(usize::MAX)
     }
 }
 
@@ -238,6 +241,16 @@ mod tests {
         assert_eq!(scalar.data(), &[3.5]);
         let z = Tensor::try_zeros(&[]).unwrap();
         assert_eq!(z.data(), &[0.0]);
+    }
+
+    #[test]
+    fn numel_saturates_on_overflowing_deserialized_shape() {
+        // Deserialize bypasses the constructors' validation, so a crafted
+        // record can carry a shape whose product overflows usize; numel
+        // must saturate rather than silently wrap. 65536^4 = 2^64.
+        let t: Tensor = serde_json::from_str(r#"{"data":[],"shape":[65536,65536,65536,65536]}"#)
+            .expect("fields deserialize without cross-validation");
+        assert_eq!(t.numel(), usize::MAX);
     }
 
     #[test]

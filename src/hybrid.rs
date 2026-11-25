@@ -221,8 +221,7 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
 
         // A backend that cannot produce hidden states returns Err; it
         // propagates like an adapter error — before pooling or stepping,
-        // with global_step unchanged and no Sentry capture (contract-error
-        // family, same as the validation failures above).
+        // with global_step unchanged.
         let hidden = self.transformer.hidden_states(token_ids)?;
         validate::validate_hidden_state(&hidden, token_ids.len(), self.transformer.dim())?;
 
