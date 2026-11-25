@@ -6,8 +6,7 @@ use thiserror::Error;
 /// Stage of the ANN→SNN forward path where a non-finite value was found.
 ///
 /// Used by [`HybridError::NonFinite`] so backend-contract diagnostics can name
-/// the buffer (hidden state, pooled embedding, or SNN stimuli) without treating
-/// the failure as a Sentry runtime error.
+/// the buffer (hidden state, pooled embedding, or SNN stimuli).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForwardValueStage {
     /// Transformer `hidden_states` backing data.

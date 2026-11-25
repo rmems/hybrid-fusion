@@ -27,8 +27,7 @@ jobs:
 
       # Floating stable channel. On 2026-10-15 that channel is 1.99.0, the
       # same release the MSRV job pins. This job keeps tracking newer stable
-      # clippy and test breakage (including the sentry feature) before the
-      # floor in rust-toolchain.toml moves.
+      # clippy and test breakage before the floor in rust-toolchain.toml moves.
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537
         with:
@@ -98,8 +97,8 @@ jobs:
 
       # Cover the pure-flag `backends` combos on the MSRV toolchain. These pull
       # no extra crates, so they exercise the feature combination without
-      # coupling the MSRV gate to the sentry transitive tree (reqwest/hyper/
-      # tokio/ring), which `--all-features` would.
+      # coupling the MSRV gate to heavy optional dependency trees
+      # (`neuromod`, `axon-encoder`), which have their own steps below.
       - name: Build (backends)
         run: cargo build --features backends
 

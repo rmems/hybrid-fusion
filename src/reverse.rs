@@ -209,7 +209,7 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
     ///    [`DomainAdapter`] (default: the pure [`ProjectionMode`] path,
     ///    bit-identical to `project_spike_activity`) through the checked
     ///    entry point
-    /// 2. `route = router.route(&embedding)` — **no Sentry capture** on reverse v1
+    /// 2. `route = router.route(&embedding)` — errors propagate unchanged
     /// 3. Validate [`ExpertRouteOutput`](crate::ExpertRouteOutput) invariants,
     ///    including that `expert_weights` sums to `1.0` within
     ///    [`WEIGHT_SUM_TOLERANCE`]; accepted weights are renormalized in `f64`,
@@ -222,8 +222,7 @@ impl<R: ExpertRouter> ReverseHybridPath<R> {
         let embedding =
             decode_activity_checked(&mut *self.adapter, activity, self.n_neurons, self.embed_dim)?;
 
-        // v1: propagate router errors without Sentry (validation-heavy path;
-        // avoid flooding on bad activity / empty embeddings).
+        // v1: propagate router errors as typed HybridError values.
         let route = self.router.route(&embedding)?;
 
         // Spike indices are already validated by `validate_decode_input` inside

@@ -44,11 +44,6 @@ serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror  = "1.0"
 
-# ── Optional: Sentry error reporting ──────────────────────────────────────────
-# Enabling `sentry` pulls a sizable transitive tree (reqwest/hyper/tokio/ring).
-# Prefer it only in service binaries; library default builds stay lean.
-sentry = { version = "0.34", optional = true, default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
-
 # ── Optional: real SNN backend (neuromod) ─────────────────────────────────────
 # Enabling `neuromod` pulls the neuromod 0.7 spiking engine (and its `rand`
 # dependency). Off by default; the library's default build stays dependency-light.
@@ -72,7 +67,6 @@ axon-encoder = { version = "0.6", optional = true }
 
 [features]
 default  = []
-sentry   = ["dep:sentry"]
 backends = []
 neuromod = ["dep:neuromod"]
 axon-encoder = ["dep:axon-encoder"]
@@ -85,10 +79,6 @@ proptest   = "1"
 [[bench]]
 name = "routing"
 harness = false
-
-[[example]]
-name = "sentry_init"
-required-features = ["sentry"]
 
 [[example]]
 name = "simple_hybrid"

@@ -1154,8 +1154,7 @@ configuration mismatch for transformer.dim: configured 64, backend 128
 ### Shape mismatch: `hidden_states` dim vs `dim()`
 
 If your 2-D tensor's second dimension doesn't match `dim()`, the pipeline
-returns `HybridError::HiddenStateDim { expected, got }` (not a Sentry
-runtime failure):
+returns `HybridError::HiddenStateDim { expected, got }`:
 
 ```
 hidden-state dimension mismatch: expected 128, got 64
@@ -1242,7 +1241,7 @@ All errors come from [`src/error.rs`](../src/error.rs):
 | `NonFinite { stage, index }` | NaN or ±Inf in hidden / embedding / stimuli; NaN in `SpikingExpertRouter` encoder stimulus or decoder readout (`ForwardValueStage::EncoderStimulus` / `DecoderReadout`) |
 | `ZeroSnnChannels` | `SpikingNetwork::num_channels()` is 0 |
 | `InvalidConfig(String)` | Other host/config contract failures |
-| `SnnStep(String)` | SNN internal error during `step` / `step_frozen` (Sentry when enabled); unsupported frozen evaluation |
+| `SnnStep(String)` | SNN internal error during `step` / `step_frozen`; unsupported frozen evaluation |
 | `SnnUnsupported(&'static str)` | Trait-default sentinel: the backend does not implement the named operation (currently `reset`). Hosts may ignore it on stateless backends; overrides must not return it for real failures |
 | `SnnSpikeOutOfRange { neuron, num_neurons }` | Backend reported a fired ID outside `0..num_neurons` (host-side check; was free-text `SnnStep`) |
 | `SnnDuplicateSpike { neuron }` | Backend reported the same neuron twice in one tick |
@@ -1371,8 +1370,8 @@ use hybrid_fusion::{
 3. Call `forward_activity` with live `SpikeActivity` from neuromod / funnel.
 4. Do **not** use this path for SAAQ / latent calibration.
 
-**v1 error policy:** reverse-path router/project errors propagate without Sentry
-capture (validation-heavy; avoids flooding on bad activity).
+**v1 error policy:** reverse-path router/project errors propagate as typed
+`HybridError` values unchanged (validation-heavy path; no silent fallback).
 
 ### `ProjectionMode` + pure project
 

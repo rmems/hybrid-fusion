@@ -17,7 +17,6 @@ pub mod reverse;
 pub mod routing;
 mod serde_finite;
 pub mod spiking_router;
-pub mod telemetry;
 pub mod tensor;
 pub mod topology;
 pub mod track;
@@ -63,18 +62,6 @@ pub use types::{
     Dtype, HybridConfig, HybridOutput, ProjectionMode, TensorManifestEntry, TensorRole,
     TransformerConfig,
 };
-
-/// Re-export of the `sentry` crate when the `sentry` feature is enabled.
-///
-/// Downstream crates should initialise Sentry through this re-export so the
-/// same crate version (and global hub) is shared with hybrid-fusion's internal
-/// error capture:
-///
-/// ```ignore
-/// let _guard = hybrid_fusion::sentry::init(hybrid_fusion::sentry::ClientOptions::default());
-/// ```
-#[cfg(feature = "sentry")]
-pub use sentry;
 
 #[cfg(feature = "backends")]
 pub use backends::simple_snn::SimpleSnn;

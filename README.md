@@ -283,69 +283,6 @@ explicit conversion above. This keeps churn low, preserves backward
 compatibility for existing callers, and keeps neuromod types out of the public
 contract: no neuromod type appears in any public signature or re-export.
 
-## Error monitoring (optional)
-
-`hybrid-fusion` ships an optional
-[Sentry](https://docs.sentry.io/platforms/rust/) integration. When the
-`sentry` feature is enabled:
-
-1. The `sentry` crate is **re-exported** as `hybrid_fusion::sentry` so
-   applications share the same crate version and global hub as the library.
-2. `HybridNetwork::forward` captures **backend/runtime** failures (e.g. SNN
-   step errors) via `telemetry::capture_error`. Caller validation errors
-   (`InputLengthMismatch`, `ConfigMismatch`, other config mismatches) are
-   returned without capture so routine bad requests do not flood Sentry quota.
-3. Panic capture is enabled through the underlying Sentry client features.
-   Apps can also call `hybrid_fusion::telemetry::capture_error` for their
-   own error paths.
-
-**Note:** enabling `sentry` pulls a sizable transitive dependency tree
-(reqwest/hyper/tokio/ring). Prefer it in service binaries, not lean library
-builds.
-
-### Enabling
-
-```sh
-cargo build --features sentry
-# or, with the reference backends:
-cargo build --features "sentry,backends"
-```
-
-### Configuration
-
-Set the `SENTRY_DSN` environment variable to your Sentry project DSN.
-**Do not commit DSNs** — pass them at runtime or via a secrets manager.
-
-```sh
-export SENTRY_DSN=https://examplePublicKey@o0.ingest.sentry.io/0
-```
-
-Sentry's Rust SDK reads `SENTRY_DSN` automatically; an empty/missing DSN
-disables transport (safe no-op for local dev).
-
-### Initialisation pattern
-
-Always initialise through the **re-export** so events raised inside
-`hybrid-fusion` land on the same hub:
-
-```rust
-// Requires: hybrid-fusion = { version = "0.3", features = ["sentry"] }
-let _guard = hybrid_fusion::sentry::init((
-    // Empty string / missing env → client is disabled (no network).
-    std::env::var("SENTRY_DSN").unwrap_or_default(),
-    hybrid_fusion::sentry::ClientOptions {
-        release: hybrid_fusion::sentry::release_name!(),
-        ..Default::default()
-    },
-));
-```
-
-The `_guard` must be held for the lifetime of the application — dropping it
-flushes pending events and shuts down the transport.
-
-See [`examples/sentry_init.rs`](examples/sentry_init.rs) for a full working
-example (`cargo run --features sentry --example sentry_init`).
-
 ## Status
 
 Experimental. API is expected to change as backend crates evolve.

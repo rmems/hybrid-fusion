@@ -21,7 +21,6 @@ Run from the repo root. "Verified" means it ran successfully in a fresh checkout
 | `cargo test --features "neuromod backends"` | verified |
 | `cargo test --features axon-encoder` | verified |
 | `cd smoke/cortex-neuromod && cargo test --locked` | verified (18 passed; uses published `cortex-hybrid` 0.2) |
-| `cargo test --features sentry` | not run here (`--all-features` already covers it; CI's MSRV job skips it on purpose) |
 
 CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build, and test with `--all-features` on floating
 `stable` (`RUSTUP_TOOLCHAIN: stable`), plus the smoke test. `msrv` runs build and test on 1.99.0 for default, `neuromod`,
@@ -36,10 +35,10 @@ CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build
 - `src/reverse.rs` + `src/routing.rs`: `ReverseHybridPath` (activity to embedding to MoE route) and pure routing math.
 - `src/topology.rs`, `src/plan.rs`, `src/capabilities.rs` + `src/capabilities/contract.rs`: neutral planning topology,
   `HybridExecutionPlan` stage graph, and backend capability negotiation.
-- `src/tensor.rs`, `src/validate.rs`, `src/error.rs`, `src/types.rs`, `src/telemetry.rs`: shared tensor type, shape and
-  finite-value validation, `HybridError`, config/output types, optional Sentry reporting.
+- `src/tensor.rs`, `src/validate.rs`, `src/error.rs`, `src/types.rs`: shared tensor type, shape and
+  finite-value validation, `HybridError`, config/output types.
 - `src/backends/` (feature `backends`): reference toy backends. `src/neuromod_adapter.rs` (feature `neuromod`): real SNN adapter.
-- `tests/`: integration tests, including `tensor_properties.rs` (proptest). `examples/`: some need `sentry`, `backends`, or `neuromod`.
+- `tests/`: integration tests, including `tensor_properties.rs` (proptest). `examples/`: some need `backends` or `neuromod`.
 - `smoke/cortex-neuromod/`: separate package and lockfile; the published `cortex-hybrid` smoke dependency stays out of the library graph.
 - `docs/extraction-map.md` and `docs/implementing-backends.md` are user docs. `docs/superpowers/` is agent planning history.
 
@@ -56,7 +55,7 @@ CI (`.github/workflows/ci.yml`) has two jobs. `validate` runs fmt, clippy, build
 
 - Keep the toolchain pin in sync across `Cargo.toml` `rust-version`, `rust-toolchain.toml`, `smoke/cortex-neuromod/Cargo.toml`,
   `.agents/setup`, and the CI MSRV job.
-- The first all-features build compiles Sentry's transitive tree (reqwest, hyper, tokio, ring) and is slow; clippy took about 3.5 minutes cold.
+- The first all-features build compiles the `neuromod` and `axon-encoder` transitive trees and is slow; clippy took about 3.5 minutes cold.
 - The smoke test needs network access on a cold cache to fetch `cortex-hybrid` from crates.io.
 - `Cargo.toml` has an `exclude` list for publishing; `CLAUDE.md` is listed there next to `AGENTS.md`.
 - Never run `cargo publish`.
