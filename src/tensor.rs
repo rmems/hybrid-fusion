@@ -197,12 +197,13 @@ mod tests {
 
     #[test]
     fn try_constructors_reject_shape_product_overflow() {
-        // usize::MAX * 2 overflows; the fallible constructors must return
-        // InvalidConfig rather than panic (debug) or wrap to a small product
-        // that would silently accept a mismatched buffer (release).
-        let shape = [usize::MAX, 2];
+        // usize::MAX * usize::MAX overflows; checked_mul returns None on every
+        // profile. The shape is chosen so a *wrapped* product would be 1 —
+        // without checked_mul a release build would accept this one-element
+        // buffer and return a tensor whose shape lies about its data.
+        let shape = [usize::MAX, usize::MAX];
         for result in [
-            Tensor::try_from_vec(Vec::new(), &shape),
+            Tensor::try_from_vec(vec![0.0], &shape),
             Tensor::try_zeros(&shape),
         ] {
             assert!(
@@ -210,6 +211,17 @@ mod tests {
                 "overflowing shape must be InvalidConfig"
             );
         }
+    }
+
+    #[test]
+    fn try_zeros_rejects_unallocatable_buffer() {
+        // The element count fits usize but the f32 buffer exceeds Vec's
+        // byte-capacity limit, so try_reserve_exact must fail closed.
+        let shape = [usize::MAX / 2];
+        assert!(matches!(
+            Tensor::try_zeros(&shape),
+            Err(HybridError::InvalidConfig(_))
+        ));
     }
 
     #[test]

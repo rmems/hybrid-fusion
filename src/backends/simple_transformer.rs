@@ -252,4 +252,22 @@ mod tests {
             Err(HybridError::InvalidConfig(_))
         ));
     }
+
+    #[test]
+    fn rejects_weight_size_overflow() {
+        // vocab_size * dim overflows usize; construction must error before
+        // attempting the embedding allocation.
+        let cfg = TransformerConfig {
+            vocab_size: usize::MAX,
+            dim: 2,
+            num_heads: 1,
+            num_layers: 1,
+            ff_dim: 8,
+            max_seq_len: 16,
+        };
+        assert!(matches!(
+            SimpleTransformer::new(cfg),
+            Err(HybridError::InvalidConfig(_))
+        ));
+    }
 }
