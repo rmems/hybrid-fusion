@@ -286,17 +286,22 @@ fn nested_f32_vec(value: &Value, key: &str) -> Vec<Vec<f32>> {
 fn assert_matches_golden(actual: &RoundTrip) {
     let fixture: Value = serde_json::from_str(include_str!("fixtures/ann_snn_ann_round_trip.json"))
         .expect("parse round-trip fixture");
-    let matches = usize_vec(&fixture, "input_shape") == actual.hidden_shape
-        && usize_field(&fixture, "channels") == CHANNELS
-        && usize_field(&fixture, "lif_neurons") == CHANNELS
-        && usize_field(&fixture, "izh_neurons") == 1
-        && usize_field(&fixture, "ticks") == TICKS
-        && f32_vec(&fixture, "ann_signal") == actual.signal
-        && nested_f32_vec(&fixture, "encoded_stimuli") == actual.stimuli
-        && nested_usize_vec(&fixture, "spike_trace") == actual.spikes
-        && f32_vec(&fixture, "snn_readout") == actual.readout
-        && usize_vec(&fixture, "output_shape") == actual.output_shape
-        && f32_vec(&fixture, "ann_output") == actual.output;
+    let matches = [
+        usize_vec(&fixture, "input_shape") == actual.hidden_shape,
+        usize_field(&fixture, "channels") == CHANNELS,
+        usize_field(&fixture, "lif_neurons") == CHANNELS,
+        usize_field(&fixture, "izh_neurons") == 1,
+        usize_field(&fixture, "ticks") == TICKS,
+        fixture["seed"].as_u64() == Some(SEED),
+        f32_vec(&fixture, "ann_signal") == actual.signal,
+        nested_f32_vec(&fixture, "encoded_stimuli") == actual.stimuli,
+        nested_usize_vec(&fixture, "spike_trace") == actual.spikes,
+        f32_vec(&fixture, "snn_readout") == actual.readout,
+        usize_vec(&fixture, "output_shape") == actual.output_shape,
+        f32_vec(&fixture, "ann_output") == actual.output,
+    ]
+    .into_iter()
+    .all(|matches| matches);
 
     if !matches {
         let actual_json = json!({
@@ -414,7 +419,11 @@ fn rejected_inputs_leave_executor_and_backend_state_unchanged() {
         .expect("control executor output");
     assert_eq!(after_reject.data(), control.data());
 
-    let stimulus = vec![1.0f32; CHANNELS];
+    // Fractional stimuli exercise the seeded Bernoulli input encoding. If the
+    // rejected call consumed RNG draws, the post-rejection sequence diverges
+    // from the control backend with high probability; without a regression the
+    // same seed replays exactly.
+    let stimulus = vec![0.5f32; CHANNELS];
     let mut backend = make_backend();
     let mut control_backend = make_backend();
     backend.step_frozen(&stimulus).expect("backend setup tick");
@@ -429,14 +438,21 @@ fn rejected_inputs_leave_executor_and_backend_state_unchanged() {
     assert!(matches!(err, CortexError::InputLengthMismatch { .. }));
     assert_eq!(backend_state(&backend), before);
 
-    let after = backend
-        .step_frozen(&stimulus)
-        .expect("backend remains usable");
-    let control_after = control_backend
-        .step_frozen(&stimulus)
-        .expect("control backend output");
+    for _ in 0..4 {
+        let after = backend
+            .step_frozen(&stimulus)
+            .expect("backend remains usable");
+        let control_after = control_backend
+            .step_frozen(&stimulus)
+            .expect("control backend output");
+        assert_eq!(
+            after.spikes, control_after.spikes,
+            "rejected input consumed backend state or RNG"
+        );
+    }
     assert_eq!(
-        after.spikes, control_after.spikes,
-        "rejected input consumed backend state or RNG"
+        backend_state(&backend),
+        backend_state(&control_backend),
+        "rejected input changed the post-recovery backend state"
     );
 }
