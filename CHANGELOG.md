@@ -311,6 +311,10 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   expose them without changing numerical execution (RM-1804, #40).
 - **BREAKING**: `HybridError` gains `ExecutionPlan(#[from] PlanError)`
   (exhaustive enum; downstream `match` arms must be updated) (RM-1804, #40).
+- `Tensor::try_from_vec` / `Tensor::try_zeros` — fallible tensor constructors
+  returning `HybridError::InvalidConfig` on zero-extent shapes or a
+  `data.len()`/shape-product mismatch, for backend code that must not panic
+  (Linear [RM-1469](https://linear.app/rpd-34/issue/RM-1469)).
 
 ### Deprecated
 
@@ -328,6 +332,17 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Changed
 
+- **BREAKING (RM-1469):** `Transformer::hidden_states` now returns
+  `Result<Tensor>` instead of `Tensor`. A backend that cannot produce a
+  well-formed hidden-state tensor reports `Err` — build tensors with
+  `Tensor::try_from_vec` / `Tensor::try_zeros` rather than the panicking
+  `from_vec` / `zeros` wrappers — and `HybridNetwork::forward` propagates
+  the error before pooling or stepping, leaving `global_step` unchanged.
+  `SimpleTransformer::new` now returns `Result<Self>`
+  (`HybridError::InvalidConfig` on zero `vocab_size`/`dim`) instead of
+  panicking, matching `NeuromodSnn::new` and the routers. Every in-tree
+  implementor, mock, example, and doc example is updated; downstream
+  `Transformer` implementors must update their signature.
 - **BREAKING (#62):** `HybridOutput` and `SpikingRouteOutput` gain a required
   `track: ResultTrack` field, set by the host. `HybridNetwork::forward`,
   `ReverseHybridPath::forward_activity`, and `SpikingExpertRouter::forward` /

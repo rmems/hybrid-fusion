@@ -101,9 +101,9 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
     /// }
     ///
     /// impl Transformer for TinyTransformer {
-    ///     fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    ///     fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
     ///         let seq = token_ids.len();
-    ///         Tensor::from_vec(vec![0.1; seq * self.dim], &[seq, self.dim])
+    ///         Tensor::try_from_vec(vec![0.1; seq * self.dim], &[seq, self.dim])
     ///     }
     ///     fn dim(&self) -> usize {
     ///         self.dim
@@ -219,7 +219,11 @@ impl<T: Transformer, S: SpikingNetwork> HybridNetwork<T, S> {
         let num_neurons = self.snn.num_neurons();
         validate::validate_snn_population(num_neurons)?;
 
-        let hidden = self.transformer.hidden_states(token_ids);
+        // A backend that cannot produce hidden states returns Err; it
+        // propagates like an adapter error — before pooling or stepping,
+        // with global_step unchanged and no Sentry capture (contract-error
+        // family, same as the validation failures above).
+        let hidden = self.transformer.hidden_states(token_ids)?;
         validate::validate_hidden_state(&hidden, token_ids.len(), self.transformer.dim())?;
 
         // The mean-pool feeds the embedding (pre-tanh, `dim()` wide); the
@@ -408,10 +412,10 @@ mod tests {
     }
 
     impl Transformer for MockTransformer {
-        fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+        fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
             let seq = token_ids.len();
             let data: Vec<f32> = (0..seq * self.dim).map(|i| (i as f32) * 0.01).collect();
-            Tensor::from_vec(data, &[seq, self.dim])
+            Ok(Tensor::from_vec(data, &[seq, self.dim]))
         }
         fn dim(&self) -> usize {
             self.dim
@@ -529,8 +533,8 @@ mod tests {
     }
 
     impl Transformer for ScriptedTransformer {
-        fn hidden_states(&self, _token_ids: &[u32]) -> Tensor {
-            self.hidden.clone()
+        fn hidden_states(&self, _token_ids: &[u32]) -> Result<Tensor> {
+            Ok(self.hidden.clone())
         }
         fn dim(&self) -> usize {
             self.dim

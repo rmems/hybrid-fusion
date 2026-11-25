@@ -6,6 +6,7 @@
 //! linear projection to produce hidden states. It is useful for testing the
 //! hybrid forward pass without a real LLM backend.
 
+use crate::error::{HybridError, Result};
 use crate::tensor::Tensor;
 use crate::traits::Transformer;
 use crate::types::TransformerConfig;
@@ -25,19 +26,25 @@ pub struct SimpleTransformer {
 impl SimpleTransformer {
     /// Build from a [`TransformerConfig`]. Weights are initialised with a
     /// deterministic pseudo-random sequence so behaviour is reproducible.
-    pub fn new(config: TransformerConfig) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// [`HybridError::InvalidConfig`] when `vocab_size` or `dim` is `0` —
+    /// zero-sized configs would otherwise panic (modulo-by-zero in
+    /// `embed_token`) or violate `Tensor`'s non-zero extent invariant.
+    pub fn new(config: TransformerConfig) -> Result<Self> {
         let vocab_size = config.vocab_size;
         let dim = config.dim;
-        // Zero-sized configs later panic (modulo-by-zero in embed_token) or
-        // violate Tensor::from_vec's non-zero extent invariant — reject early.
-        assert!(
-            vocab_size > 0,
-            "SimpleTransformer::new: vocab_size must be > 0, got {vocab_size}"
-        );
-        assert!(
-            dim > 0,
-            "SimpleTransformer::new: dim must be > 0, got {dim}"
-        );
+        if vocab_size == 0 {
+            return Err(HybridError::InvalidConfig(format!(
+                "SimpleTransformer::new: vocab_size must be > 0, got {vocab_size}"
+            )));
+        }
+        if dim == 0 {
+            return Err(HybridError::InvalidConfig(format!(
+                "SimpleTransformer::new: dim must be > 0, got {dim}"
+            )));
+        }
 
         let mut lcg = Lcg::new(
             (vocab_size as u64).wrapping_mul(2654435761) ^ (dim as u64).wrapping_mul(2246822519),
@@ -49,13 +56,13 @@ impl SimpleTransformer {
             .collect();
         let projection = (0..dim * dim).map(|_| lcg.next_f32() * 0.01).collect();
 
-        Self {
+        Ok(Self {
             vocab_size,
             dim,
             max_seq_len: config.max_seq_len,
             embeddings,
             projection,
-        }
+        })
     }
 
     fn embed_token(&self, token_id: u32) -> &[f32] {
@@ -75,7 +82,7 @@ impl SimpleTransformer {
 }
 
 impl Transformer for SimpleTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
         let seq = token_ids.len();
         let dim = self.dim;
         let mut data = Vec::with_capacity(seq * dim);
@@ -84,7 +91,7 @@ impl Transformer for SimpleTransformer {
             let proj = self.project(emb);
             data.extend_from_slice(&proj);
         }
-        Tensor::from_vec(data, &[seq, dim])
+        Tensor::try_from_vec(data, &[seq, dim])
     }
 
     fn dim(&self) -> usize {
@@ -139,28 +146,40 @@ mod tests {
 
     #[test]
     fn hidden_states_shape() {
-        let t = SimpleTransformer::new(tiny_config());
-        let hs = t.hidden_states(&[0, 1, 2]);
+        let t = SimpleTransformer::new(tiny_config()).unwrap();
+        let hs = t.hidden_states(&[0, 1, 2]).unwrap();
         assert_eq!(hs.shape(), &[3, 4]);
     }
 
     #[test]
+    fn hidden_states_empty_input_is_err_not_panic() {
+        let t = SimpleTransformer::new(tiny_config()).unwrap();
+        // seq = 0 would be a zero-extent shape; the fallible tensor
+        // constructor reports it instead of panicking (RM-1469).
+        assert!(matches!(
+            t.hidden_states(&[]),
+            Err(HybridError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
     fn determinism() {
-        let t1 = SimpleTransformer::new(tiny_config());
-        let t2 = SimpleTransformer::new(tiny_config());
+        let t1 = SimpleTransformer::new(tiny_config()).unwrap();
+        let t2 = SimpleTransformer::new(tiny_config()).unwrap();
         assert_eq!(
-            t1.hidden_states(&[3, 5]).data(),
-            t2.hidden_states(&[3, 5]).data()
+            t1.hidden_states(&[3, 5]).unwrap().data(),
+            t2.hidden_states(&[3, 5]).unwrap().data()
         );
     }
 
     #[test]
     fn weight_init_is_symmetric_around_zero() {
-        let t = SimpleTransformer::new(tiny_config());
+        let t = SimpleTransformer::new(tiny_config()).unwrap();
         // With the corrected scaling, a non-trivial fraction of embeddings
         // should be positive (the previous bias pushed almost everything < 0).
         let positives = t
             .hidden_states(&[0, 1, 2, 3, 4, 5, 6, 7])
+            .unwrap()
             .data()
             .iter()
             .filter(|v| **v > 0.0)
@@ -173,15 +192,15 @@ mod tests {
 
     #[test]
     fn param_count_matches_allocations() {
-        let t = SimpleTransformer::new(tiny_config());
+        let t = SimpleTransformer::new(tiny_config()).unwrap();
         assert_eq!(t.param_count(), 8 * 4 + 4 * 4);
     }
 
     #[test]
     fn out_of_vocab_wraps() {
-        let t = SimpleTransformer::new(tiny_config());
-        let hs_wrap = t.hidden_states(&[100]);
-        let hs_norm = t.hidden_states(&[4]);
+        let t = SimpleTransformer::new(tiny_config()).unwrap();
+        let hs_wrap = t.hidden_states(&[100]).unwrap();
+        let hs_norm = t.hidden_states(&[4]).unwrap();
         assert_eq!(hs_wrap.data(), hs_norm.data());
     }
 
@@ -189,15 +208,19 @@ mod tests {
     fn rejects_zero_vocab_size() {
         let mut cfg = tiny_config();
         cfg.vocab_size = 0;
-        let result = std::panic::catch_unwind(|| SimpleTransformer::new(cfg));
-        assert!(result.is_err(), "vocab_size == 0 must be rejected");
+        assert!(matches!(
+            SimpleTransformer::new(cfg),
+            Err(HybridError::InvalidConfig(_))
+        ));
     }
 
     #[test]
     fn rejects_zero_dim() {
         let mut cfg = tiny_config();
         cfg.dim = 0;
-        let result = std::panic::catch_unwind(|| SimpleTransformer::new(cfg));
-        assert!(result.is_err(), "dim == 0 must be rejected");
+        assert!(matches!(
+            SimpleTransformer::new(cfg),
+            Err(HybridError::InvalidConfig(_))
+        ));
     }
 }

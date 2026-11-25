@@ -24,14 +24,14 @@ struct MockTransformer {
 }
 
 impl Transformer for MockTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> hybrid_fusion::Result<Tensor> {
         let seq = token_ids.len();
         // Guard the Tensor >0 dim invariant even though HybridNetwork::forward
         // rejects empty token_ids before calling this method.
         assert!(seq > 0, "token_ids must not be empty");
         assert!(self.dim > 0, "transformer dim must be > 0");
         let data: Vec<f32> = (0..seq * self.dim).map(|i| (i as f32) * 0.01).collect();
-        Tensor::from_vec(data, &[seq, self.dim])
+        Ok(Tensor::from_vec(data, &[seq, self.dim]))
     }
 
     fn dim(&self) -> usize {
@@ -93,10 +93,10 @@ struct MismatchedDimTransformer {
 }
 
 impl Transformer for MismatchedDimTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> hybrid_fusion::Result<Tensor> {
         let seq = token_ids.len().max(1);
         let data = vec![0.1f32; seq * self.actual_dim];
-        Tensor::from_vec(data, &[seq, self.actual_dim])
+        Ok(Tensor::from_vec(data, &[seq, self.actual_dim]))
     }
 
     fn dim(&self) -> usize {
@@ -288,7 +288,7 @@ fn reset_restores_reference_forward_output_after_membrane_epoch() {
     let config = HybridConfig::tiny();
     let build = || {
         HybridNetwork::try_new(
-            SimpleTransformer::new(config.transformer.clone()),
+            SimpleTransformer::new(config.transformer.clone()).unwrap(),
             SimpleSnn::new(config.snn_input_channels),
             config.clone(),
         )
@@ -475,8 +475,8 @@ struct ScriptedTransformer {
 }
 
 impl Transformer for ScriptedTransformer {
-    fn hidden_states(&self, _token_ids: &[u32]) -> Tensor {
-        self.hidden.clone()
+    fn hidden_states(&self, _token_ids: &[u32]) -> hybrid_fusion::Result<Tensor> {
+        Ok(self.hidden.clone())
     }
     fn dim(&self) -> usize {
         self.dim
@@ -501,11 +501,11 @@ struct CountingTransformer {
 }
 
 impl Transformer for CountingTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
+    fn hidden_states(&self, token_ids: &[u32]) -> hybrid_fusion::Result<Tensor> {
         self.hidden_calls.set(self.hidden_calls.get() + 1);
         let seq = token_ids.len().max(1);
         let data = vec![0.1f32; seq * self.dim.max(1)];
-        Tensor::from_vec(data, &[seq, self.dim.max(1)])
+        Ok(Tensor::from_vec(data, &[seq, self.dim.max(1)]))
     }
 
     fn dim(&self) -> usize {
@@ -970,6 +970,50 @@ fn public_forward_rejects_zero_snn_channels() {
     let (net, result) = scripted_forward(hidden, dim, 0, &[1, 2]);
     match result.unwrap_err() {
         HybridError::ZeroSnnChannels => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(net.snn.step_calls, 0);
+    assert_eq!(net.global_step(), 0);
+}
+
+/// A transformer that fails to produce hidden states: the backend error
+/// propagates through `forward` unchanged — the SNN is never stepped and
+/// `global_step` does not advance (RM-1469).
+struct ErrTransformer {
+    dim: usize,
+    max_seq: usize,
+}
+
+impl Transformer for ErrTransformer {
+    fn hidden_states(&self, _token_ids: &[u32]) -> hybrid_fusion::Result<Tensor> {
+        Err(HybridError::InvalidConfig(
+            "backend could not produce hidden states".into(),
+        ))
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    fn max_seq_len(&self) -> usize {
+        self.max_seq
+    }
+    fn param_count(&self) -> usize {
+        0
+    }
+}
+
+#[test]
+fn forward_propagates_transformer_error_without_stepping() {
+    let cfg = HybridConfig::tiny();
+    let t = ErrTransformer {
+        dim: cfg.transformer.dim,
+        max_seq: cfg.transformer.max_seq_len,
+    };
+    let s = SpySnn::new(cfg.snn_input_channels);
+    let mut net = HybridNetwork::try_new(t, s, cfg).unwrap();
+    match net.forward(&[1, 2], None).unwrap_err() {
+        HybridError::InvalidConfig(msg) => {
+            assert_eq!(msg, "backend could not produce hidden states")
+        }
         other => panic!("unexpected {other:?}"),
     }
     assert_eq!(net.snn.step_calls, 0);

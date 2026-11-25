@@ -177,8 +177,8 @@ impl PatternTransformer {
 }
 
 impl Transformer for PatternTransformer {
-    fn hidden_states(&self, token_ids: &[u32]) -> Tensor {
-        self.hidden(token_ids.len())
+    fn hidden_states(&self, token_ids: &[u32]) -> Result<Tensor> {
+        Ok(self.hidden(token_ids.len()))
     }
     fn dim(&self) -> usize {
         self.dim

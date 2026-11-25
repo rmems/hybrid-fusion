@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use crate::error::HybridError;
 use serde::{Deserialize, Serialize};
 
 /// Dense `f32` buffer plus its shape (`Tensor::from_vec` enforces
@@ -40,6 +41,51 @@ impl Serialize for Tensor {
 }
 
 impl Tensor {
+    /// Fallible [`Self::from_vec`]: returns [`HybridError::InvalidConfig`]
+    /// instead of panicking when a shape dimension is `0` or `data.len()`
+    /// does not equal the shape product. Backend code on the
+    /// [`crate::Transformer::hidden_states`] path should use this (or
+    /// [`Self::try_zeros`]) so a construction failure surfaces as `Err`.
+    ///
+    /// Rank-0 tensors (`shape == &[]`, one element) are valid, matching
+    /// [`Self::from_vec`].
+    pub fn try_from_vec(data: Vec<f32>, shape: &[usize]) -> Result<Self, HybridError> {
+        if shape.contains(&0) {
+            return Err(HybridError::InvalidConfig(format!(
+                "Tensor::try_from_vec: shape dimensions must be > 0, got {shape:?}"
+            )));
+        }
+        let expected: usize = shape.iter().product();
+        if data.len() != expected {
+            return Err(HybridError::InvalidConfig(format!(
+                "Tensor::try_from_vec: data.len()={} does not match shape product={expected} (shape={shape:?})",
+                data.len(),
+            )));
+        }
+        Ok(Self {
+            data,
+            shape: shape.to_vec(),
+        })
+    }
+
+    /// Fallible [`Self::zeros`]: returns [`HybridError::InvalidConfig`] when
+    /// a shape dimension is `0` instead of panicking.
+    pub fn try_zeros(shape: &[usize]) -> Result<Self, HybridError> {
+        if shape.contains(&0) {
+            return Err(HybridError::InvalidConfig(format!(
+                "Tensor::try_zeros: shape dimensions must be > 0, got {shape:?}"
+            )));
+        }
+        let len: usize = shape.iter().product();
+        Ok(Self {
+            data: vec![0.0; len],
+            shape: shape.to_vec(),
+        })
+    }
+
+    /// Panicking convenience wrapper over [`Self::try_from_vec`] for tests and
+    /// callers that have already proven the shape is valid. Backend code
+    /// should prefer the `try_*` constructors so failures return `Err`.
     pub fn from_vec(data: Vec<f32>, shape: &[usize]) -> Self {
         assert!(
             shape.iter().all(|&d| d > 0),
@@ -58,6 +104,9 @@ impl Tensor {
         }
     }
 
+    /// Panicking convenience wrapper over [`Self::try_zeros`] for tests and
+    /// callers that have already proven the shape is valid. Backend code
+    /// should prefer the `try_*` constructors so failures return `Err`.
     pub fn zeros(shape: &[usize]) -> Self {
         assert!(
             shape.iter().all(|&d| d > 0),
@@ -94,6 +143,50 @@ impl Tensor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::HybridError;
+
+    #[test]
+    fn try_from_vec_rejects_zero_extent_shapes() {
+        for shape in [&[0][..], &[1, 0][..], &[0, 4][..], &[2, 0, 3][..]] {
+            let len: usize = shape.iter().product();
+            match Tensor::try_from_vec(vec![0.0; len], shape).unwrap_err() {
+                HybridError::InvalidConfig(msg) => {
+                    assert!(msg.contains("must be > 0"), "unexpected message: {msg}");
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+            assert!(
+                matches!(Tensor::try_zeros(shape), Err(HybridError::InvalidConfig(_))),
+                "try_zeros should reject zero-extent shape {shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn try_from_vec_rejects_data_len_mismatch() {
+        match Tensor::try_from_vec(vec![0.0; 3], &[2, 2]).unwrap_err() {
+            HybridError::InvalidConfig(msg) => {
+                assert!(msg.contains("does not match shape product"), "{msg}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_constructors_accept_valid_and_rank0_shapes() {
+        let t = Tensor::try_from_vec(vec![0.5, -1.25, 3.0], &[3]).unwrap();
+        assert_eq!(t.shape(), &[3]);
+        Tensor::try_from_vec(vec![0.0; 6], &[2, 3]).unwrap();
+        Tensor::try_zeros(&[2, 3]).unwrap();
+
+        // Rank-0 scalar: empty shape, exactly one element.
+        let scalar = Tensor::try_from_vec(vec![3.5], &[]).unwrap();
+        assert_eq!(scalar.ndim(), 0);
+        assert_eq!(scalar.numel(), 1);
+        assert_eq!(scalar.data(), &[3.5]);
+        let z = Tensor::try_zeros(&[]).unwrap();
+        assert_eq!(z.data(), &[0.0]);
+    }
 
     #[test]
     fn tensor_finite_round_trips_through_json() {
