@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.99.0"
 publish = false
-description = "Fixed-seed smoke harness: one cortex-tensor embedding stage into NeuromodSnn (issue #45), plus cross-crate SNN step-contract parity tests (RM-2360)."
+description = "Fixed-seed smoke harness: cortex-hybrid ANN stages into NeuromodSnn (issue #45), cross-crate SNN step-contract parity tests (RM-2360), and a cortex-only ANN→SNN→ANN round trip (RM-2208)."
 license = "MIT OR Apache-2.0"
 
 # Not a workspace member of the library root. An empty `[workspace]` table
@@ -20,27 +20,17 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 hybrid-fusion = { path = "../..", features = ["neuromod", "axon-encoder"] }
-# cortex-tensor 0.1.0 is not on crates.io (index 404 as of 2026-10-02).
-# Authorized by issue #45 as a test-only harness, not a library dependency.
-# The `neuromod` feature turns on `snn::NeuromodNetwork` for the parity
-# tests; it pulls the same published neuromod 0.7 both crates already use.
-# Pinned past the engram-backed MoE + SNN fix series (#91/#92/#93, PRs
-# #131/#145) and past RM-2364 (#155): `NeuromodNetwork::with_seed`,
-# `step_frozen`, the additive spike boost, and the bounded hidden gain all
-# exist at this rev, so the parity tests in tests/snn_contract_parity.rs can
-# compare like with like, and the ±Inf stimulus policy difference (ADR 0002
-# §4.6) is observable through this rev's `SnnInvalidStimulus`. The old
-# `5cbee81` pin predates the fix series and `f591f2e` predates RM-2364
-# (RM-2208's bump and its RM-2364 follow-up, landed with RM-2360).
-cortex-tensor = { git = "https://github.com/rmems/cortex-tensor", rev = "74d63ee0430bcc11486ceff302e0816a9628559f", features = [
-    "neuromod",
-    "axon-encoder",
-] }
+# Published cortex-hybrid 0.2.0 (crates.io, verified 2026-11-25) provides the
+# ANN stage executor plus the `snn` contract used by this test-only harness.
+cortex-hybrid = { version = "0.2", features = ["neuromod", "axon-encoder"] }
 # Direct test-only dependency for the encoder-adapter parity test: both
 # crates' axon adapters wrap the same published axon-encoder 0.6 Encoder
 # type, so constructing encoders here feeds identical instances to each side.
 axon-encoder = "0.6"
 # Direct test-only dependency for the parity tests: constructing a blank
-# `neuromod::SpikingNetwork` proves cortex-tensor's public #91 rejection.
+# `neuromod::SpikingNetwork` proves cortex-hybrid's public #91 rejection.
 # Resolves to the same published neuromod 0.7 both crates already depend on.
 neuromod = "0.7"
+
+[dev-dependencies]
+serde_json = "1.0"

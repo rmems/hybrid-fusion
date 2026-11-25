@@ -2,15 +2,15 @@
 
 //! Cross-crate SNN step-contract parity tests (Linear RM-2360, ADR 0002).
 //!
-//! cortex-tensor keeps its own `src/snn` contract (`SnnBackend`,
+//! cortex-hybrid keeps its own `src/snn` contract (`SnnBackend`,
 //! `SnnEncoder`/`SnnDecoder`, `SpikingMoeRouter`, `NeuromodNetwork`) because
 //! the crate is deliberately ANN+SNN capable (decision RM-2206/RM-2360; the
-//! removal PRs rmems/cortex-tensor#137 and #141 were closed unmerged).
+//! removal PRs rmems/cortex-hybrid#137 and #141 were closed unmerged).
 //! hybrid-fusion owns a twin contract (`SpikingNetwork`, `SpikeEncoder`/
 //! `SpikeDecoder`, `SpikingExpertRouter`, `NeuromodSnn`) for its orchestrator
 //! role. The two are held together by a documented mapping —
 //! `docs/adr/0002-snn-step-contract-parity.md` in this repo, mirrored in
-//! cortex-tensor as `docs/snn-contract-mapping.md` — and by these tests,
+//! cortex-hybrid as `docs/snn-contract-mapping.md` — and by these tests,
 //! which run the same seeded inputs through both trait sets and fail when
 //! they drift apart.
 //!
@@ -26,7 +26,7 @@
 //! * Host-side validation: a backend firing an out-of-range or duplicate ID
 //!   is rejected by both routers before the readout can influence routing.
 //! * The #91 never-spiking-channel fix exists on both sides. The tests
-//!   assert cortex-tensor's public rejection (`from_network` on a blank
+//!   assert cortex-hybrid's public rejection (`from_network` on a blank
 //!   network); hybrid-fusion's copy sits behind its `pub(crate)` boundary
 //!   and its public constructors cannot produce a dead network, so its side
 //!   is covered by that crate's in-crate tests, not by this gate.
@@ -34,16 +34,21 @@
 //! # Intentional differences (documented in ADR 0002, asserted here)
 //!
 //! * Width axes: hybrid-fusion separates `num_channels` (stimulus width) from
-//!   `num_neurons` (output population); cortex-tensor requires one LIF neuron
+//!   `num_neurons` (output population); cortex-hybrid requires one LIF neuron
 //!   per channel, so `NeuromodNetwork::new(8, 1, 4)` is an error while
 //!   `NeuromodSnn::with_seed(4, 8, ..)` is fine.
-//! * `SpikeCountDecoder`: hybrid-fusion's decoder is fallible, sized by the
-//!   output population, and rejects out-of-range fired IDs; cortex-tensor's
-//!   is infallible, sized by the channel count, and silently drops
-//!   out-of-range IDs because its *host* (`SpikingMoeRouter`) validates the
-//!   spike list before decoding. Both routers fail closed; only the
+//! * `SpikeCountDecoder`: hybrid-fusion's decoder is sized by the output
+//!   population and rejects out-of-range fired IDs; cortex-hybrid's is sized
+//!   by the channel count and silently drops out-of-range IDs because its
+//!   *host* (`SpikingMoeRouter`) validates the spike list before decoding.
+//!   cortex-hybrid's decoder is fallible only when the requested channel
+//!   count exceeds `MAX_SNN_CHANNELS`. Both routers fail closed; only the
 //!   standalone-decoder behavior differs.
-//! * Reset semantics: cortex-tensor's `reset` rewinds the replay RNG to the
+//! * Channel allocation cap: cortex-hybrid's router rejects widths above
+//!   `MAX_SNN_CHANNELS` before allocating per-tick buffers; hybrid-fusion's
+//!   router currently has no matching cap. The difference is asserted
+//!   explicitly below.
+//! * Reset semantics: cortex-hybrid's `reset` rewinds the replay RNG to the
 //!   seed and keeps learned weights; hybrid-fusion's `reset` restores the
 //!   construction-time weights/thresholds and keeps the RNG stream (explicit
 //!   `reseed` restarts it). Both replay recipes are pinned below.
@@ -51,14 +56,14 @@
 //!   (`embedding × gain`); `SpikingExpertRouter` reports the scalar
 //!   `hidden_gain` and the fired IDs instead. The parity assertion is
 //!   `cortex.hidden ≈ embedding × hybrid.hidden_gain`.
-//! * ±Inf stimulus policy (ADR 0002 §4.6, cortex-tensor RM-2364):
+//! * ±Inf stimulus policy (ADR 0002 §4.6, cortex-hybrid RM-2364):
 //!   `SpikingMoeRouter` rejects a ±Inf gate score (or encoded stimulus
 //!   sample) with `SnnInvalidStimulus` before the encoder or backend runs;
 //!   `SpikingExpertRouter` ranks ±Inf and the backend's own preflight
 //!   rejects the encoded stimulus (`SnnStep`). Both fail closed; the
 //!   layer, variant, and encoder-tick consumption differences are asserted
 //!   below with a mirrored stateful phase encoder.
-//! * Capabilities vocabulary: cortex-tensor's `SnnCapabilities` struct maps
+//! * Capabilities vocabulary: cortex-hybrid's `SnnCapabilities` struct maps
 //!   onto hybrid-fusion's `BackendCapabilities` + `RequiredFeature` strings
 //!   (asserted field by field below).
 //!
@@ -66,12 +71,12 @@
 //!
 //! The adapters use all-zero neuromodulators: hybrid-fusion's converter maps
 //! an all-zero `NeuroModulators` to an all-zero `neuromod::NeuroModulators`,
-//! which is exactly the `NeuroModulators::default()` frame cortex-tensor's
+//! which is exactly the `NeuroModulators::default()` frame cortex-hybrid's
 //! adapter applies to every step, so both backends receive the identical
 //! effective frame without this package re-stating hybrid-fusion's field
 //! mapping.
 //!
-//! The routers use each crate's own synthetic gate policy: cortex-tensor's
+//! The routers use each crate's own synthetic gate policy: cortex-hybrid's
 //! stub `MoeRouter` (empty path, `DenseSim`) and hybrid-fusion's
 //! `synthetic_gate_scores`. The two chunkings of the embedding coincide
 //! exactly when `num_experts` divides the embedding width, which the
@@ -81,20 +86,20 @@
 //! Float tolerance: `selected_experts` and fired-ID lists are compared
 //! exactly (identical `f32` inputs and operation order on both sides), while
 //! `expert_weights` and the hidden state use a small tolerance because the
-//! two crates' softmax kernels differ in accumulation detail (cortex-tensor
+//! two crates' softmax kernels differ in accumulation detail (cortex-hybrid
 //! exponentiates in `f64` and applies a simplex residual; hybrid-fusion
 //! exponentiates in `f32` and accumulates the normalizer in `f64`).
 
 use axon_encoder::prelude::{EmbeddingEncoderConfig, EmbeddingRateEncoder};
-use cortex_tensor::CortexError;
-use cortex_tensor::moe::MoeRouter;
-use cortex_tensor::snn::{
-    AxonEncoder as CortexAxonEncoder, DEFAULT_SPIKE_BOOST, NeuromodNetwork,
-    RateEncoder as CortexRateEncoder, SnnBackend, SnnCapabilities,
-    SnnDecoder as CortexSnnDecoder, SnnEncoder as CortexSnnEncoder, SnnStepOutput,
-    SpikeCountDecoder as CortexSpikeCountDecoder, SpikingMoeRouter,
+use cortex_hybrid::CortexError;
+use cortex_hybrid::moe::MoeRouter;
+use cortex_hybrid::snn::{
+    AxonEncoder as CortexAxonEncoder, DEFAULT_SPIKE_BOOST, MAX_SNN_CHANNELS, NeuromodNetwork,
+    RateEncoder as CortexRateEncoder, SnnBackend, SnnCapabilities, SnnDecoder as CortexSnnDecoder,
+    SnnEncoder as CortexSnnEncoder, SnnStepOutput, SpikeCountDecoder as CortexSpikeCountDecoder,
+    SpikingMoeRouter,
 };
-use cortex_tensor::types::EMBEDDING_DIM;
+use cortex_hybrid::types::EMBEDDING_DIM;
 use hybrid_fusion::{
     AxonEncoderAdapter, BackendCapabilities, DEFAULT_SPIKE_BOOST as HYBRID_SPIKE_BOOST,
     DomainAdapter, ExpertRouteOutput, ExpertRouter, HybridError, NeuroModulators, NeuromodSnn,
@@ -119,7 +124,7 @@ const SEED: u64 = 0x5EED_2360;
 const SHORT: usize = CHANNELS - 1;
 
 /// hybrid-fusion modulator frame that converts to the all-zero
-/// `neuromod::NeuroModulators` cortex-tensor's adapter uses by default.
+/// `neuromod::NeuroModulators` cortex-hybrid's adapter uses by default.
 fn zero_modulators() -> NeuroModulators {
     NeuroModulators {
         dopamine: 0.0,
@@ -139,7 +144,7 @@ fn stimulus_for_tick(tick: usize) -> Vec<f32> {
         .collect()
 }
 
-/// cortex-tensor `SpikingMoeRouter::forward`/`forward_frozen` embeddings:
+/// cortex-hybrid `SpikingMoeRouter::forward`/`forward_frozen` embeddings:
 /// `[EMBEDDING_DIM]` values whose per-expert chunk sums reproduce the
 /// [`stimulus_for_tick`] magnitudes, so the router fixture and the adapter
 /// fixture drive comparable stimuli into the same backends.
@@ -150,7 +155,7 @@ fn embedding_for_tick(tick: usize) -> Vec<f32> {
         .collect()
 }
 
-/// hybrid-fusion `ExpertRouter` that mirrors cortex-tensor's stub
+/// hybrid-fusion `ExpertRouter` that mirrors cortex-hybrid's stub
 /// `MoeRouter` gate policy: the synthetic chunk sums of
 /// [`synthetic_gate_scores`]. Requires `EMBEDDING_DIM % num_experts == 0` so
 /// both chunkings partition the embedding identically.
@@ -217,7 +222,7 @@ fn hybrid_advertises(caps: &BackendCapabilities, feature: &str) -> bool {
 }
 
 fn assert_adapter_capabilities_match(cortex: &NeuromodNetwork, hybrid: &NeuromodSnn) {
-    // SnnCapabilities (cortex-tensor) ↔ BackendCapabilities + features
+    // SnnCapabilities (cortex-hybrid) ↔ BackendCapabilities + features
     // (hybrid-fusion): same backend identity and the same five advertised
     // facts, in two vocabularies.
     let caps = cortex.capabilities();
@@ -279,7 +284,7 @@ fn axon_encoder_adapters_replay_identically() {
     // ADR 0002 §3: both crates bridge axon-encoder 0.6 `Encoder::encode_step`
     // to a ±1.0-per-spike stimulus vector. `EmbeddingRateEncoder` fires at
     // most once per channel per step, so the two accumulation policies agree
-    // bit-for-bit: cortex-tensor's `AxonEncoder` adds each spike's ±1.0
+    // bit-for-bit: cortex-hybrid's `AxonEncoder` adds each spike's ±1.0
     // unclamped, while hybrid-fusion's `AxonEncoderAdapter` nets the same
     // contributions and clamps at ±STIMULUS_BOUND — identical when the net
     // is within the bound. The hybrid side also owns the
@@ -347,16 +352,25 @@ fn spike_count_decoders_documented_difference_and_host_parity() {
             num_neurons: 4
         }
     ));
-    // … while cortex-tensor's silently drops it: its `SpikingMoeRouter` host
+    // … while cortex-hybrid's silently drops it: its `SpikingMoeRouter` host
     // validates the spike list before decoding, so a compliant flow never
     // reaches the decoder with a bad ID.
-    let counts = CortexSpikeCountDecoder.decode(
-        &SnnStepOutput {
-            spikes: vec![99, 1],
-        },
-        4,
-    );
+    let counts = CortexSpikeCountDecoder
+        .decode(
+            &SnnStepOutput {
+                spikes: vec![99, 1],
+            },
+            4,
+        )
+        .expect("small channel count is representable");
     assert_eq!(counts, vec![0.0, 1.0, 0.0, 0.0]);
+    let err = CortexSpikeCountDecoder
+        .decode(&SnnStepOutput { spikes: vec![] }, MAX_SNN_CHANNELS + 1)
+        .expect_err("oversized channel count must fail before allocation");
+    assert!(
+        matches!(err, CortexError::InvalidConfig(_)),
+        "expected typed InvalidConfig, got {err:?}"
+    );
 
     // Host parity: both routers reject a misbehaving backend (out-of-range
     // and duplicate fired IDs) before the readout can influence routing.
@@ -367,12 +381,12 @@ fn spike_count_decoders_documented_difference_and_host_parity() {
         fn channels(&self) -> usize {
             CHANNELS
         }
-        fn step(&mut self, _stimulus: &[f32]) -> cortex_tensor::Result<SnnStepOutput> {
+        fn step(&mut self, _stimulus: &[f32]) -> cortex_hybrid::Result<SnnStepOutput> {
             Ok(SnnStepOutput {
                 spikes: self.spikes.clone(),
             })
         }
-        fn step_frozen(&mut self, stimulus: &[f32]) -> cortex_tensor::Result<SnnStepOutput> {
+        fn step_frozen(&mut self, stimulus: &[f32]) -> cortex_hybrid::Result<SnnStepOutput> {
             self.step(stimulus)
         }
         fn reset(&mut self) {}
@@ -457,6 +471,94 @@ fn spike_count_decoders_documented_difference_and_host_parity() {
             ));
         }
     }
+}
+
+#[test]
+fn router_channel_cap_is_an_explicit_difference() {
+    // cortex-hybrid caps backend-controlled channel counts before allocating
+    // per-tick buffers. hybrid-fusion currently has no matching router cap:
+    // the same width is accepted and stepped. The width is only one Mi channels
+    // plus one, so the hybrid allocation is about 4 MiB and safe for this test.
+    struct WideCortex(usize);
+    impl SnnBackend for WideCortex {
+        fn channels(&self) -> usize {
+            self.0
+        }
+        fn step(&mut self, _stimulus: &[f32]) -> cortex_hybrid::Result<SnnStepOutput> {
+            Ok(SnnStepOutput { spikes: vec![0] })
+        }
+        fn step_frozen(&mut self, stimulus: &[f32]) -> cortex_hybrid::Result<SnnStepOutput> {
+            self.step(stimulus)
+        }
+        fn reset(&mut self) {}
+        fn capabilities(&self) -> SnnCapabilities {
+            SnnCapabilities {
+                backend_name: "wide-stub",
+                frozen_evaluation: true,
+                plasticity: false,
+                caller_rng: false,
+                neuromodulation: false,
+            }
+        }
+    }
+
+    let mut at_limit = SpikingMoeRouter::new(
+        MoeRouter::load("", EXPERTS, TOP_K).expect("stub MoeRouter"),
+        WideCortex(MAX_SNN_CHANNELS),
+        CortexRateEncoder::default(),
+        CortexSpikeCountDecoder,
+    )
+    .expect("cortex router must accept the inclusive channel cap");
+    let limit_output = at_limit
+        .forward(&embedding_for_tick(0))
+        .expect("cortex router must step at the inclusive channel cap");
+    assert_eq!(limit_output.hidden.len(), EMBEDDING_DIM);
+
+    let err = SpikingMoeRouter::new(
+        MoeRouter::load("", EXPERTS, TOP_K).expect("stub MoeRouter"),
+        WideCortex(MAX_SNN_CHANNELS + 1),
+        CortexRateEncoder::default(),
+        CortexSpikeCountDecoder,
+    )
+    .err()
+    .expect("cortex router must reject oversized channels");
+    assert!(
+        matches!(err, CortexError::InvalidConfig(_)),
+        "expected typed InvalidConfig, got {err:?}"
+    );
+
+    struct WideHybrid;
+    impl SpikingNetwork for WideHybrid {
+        fn step(
+            &mut self,
+            stimuli: &[f32],
+            _modulators: &NeuroModulators,
+        ) -> HybridResult<Vec<usize>> {
+            assert_eq!(stimuli.len(), MAX_SNN_CHANNELS + 1);
+            Ok(vec![0])
+        }
+        fn num_channels(&self) -> usize {
+            MAX_SNN_CHANNELS + 1
+        }
+        fn num_neurons(&self) -> usize {
+            EXPERTS
+        }
+    }
+
+    let mut hybrid_router = SpikingExpertRouter::new(
+        SyntheticChunkRouter {
+            num_experts: EXPERTS,
+            top_k: TOP_K,
+        },
+        WideHybrid,
+        HybridRateEncoder::default(),
+        HybridSpikeCountDecoder,
+    )
+    .expect("hybrid router currently accepts the same width");
+    let output = hybrid_router
+        .forward(&embedding_for_tick(0), &zero_modulators())
+        .expect("hybrid router currently steps the same width");
+    assert_eq!(output.num_neurons, EXPERTS);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -547,7 +649,7 @@ fn frozen_steps_and_reset_recipes_replay_identically() {
         })
         .collect();
 
-    // cortex-tensor reset recipe: `reset` rewinds the RNG to the seed, so the
+    // cortex-hybrid reset recipe: `reset` rewinds the RNG to the seed, so the
     // frozen sequence replays (frozen stepping leaves weights untouched).
     SnnBackend::reset(&mut cortex);
     let cortex_replay: Vec<Vec<usize>> = stimuli
@@ -599,7 +701,7 @@ fn frozen_steps_and_reset_recipes_replay_identically() {
 #[test]
 fn width_rules_and_never_spiking_rejection_match_the_mapping() {
     // Intentional difference (ADR 0002): hybrid-fusion separates the output
-    // population from the stimulus width; cortex-tensor requires one LIF
+    // population from the stimulus width; cortex-hybrid requires one LIF
     // neuron per channel because `channels()` is its whole width contract.
     let wide = NeuromodSnn::with_seed(4, 8, SEED).expect("population != width is allowed");
     assert_eq!(wide.num_channels(), 4);
@@ -615,7 +717,7 @@ fn width_rules_and_never_spiking_rejection_match_the_mapping() {
     );
 
     // #91 parity: both adapters reject a network whose LIF neurons can never
-    // spike. cortex-tensor exposes the check through the public
+    // spike. cortex-hybrid exposes the check through the public
     // `from_network`; hybrid-fusion's equivalent lives behind its
     // `pub(crate)` `from_network` boundary (no `neuromod` type may cross its
     // public API), and its public constructors seed strictly positive
@@ -636,7 +738,7 @@ fn width_rules_and_never_spiking_rejection_match_the_mapping() {
 // ─────────────────────────────────────────────────────────────────────────
 
 fn assert_routes_agree(
-    cortex: &cortex_tensor::moe::MoeOutput,
+    cortex: &cortex_hybrid::moe::MoeOutput,
     hybrid: &hybrid_fusion::SpikingRouteOutput,
     embedding: &[f32],
     tick: usize,
@@ -653,7 +755,7 @@ fn assert_routes_agree(
     {
         assert_close(c, h, &format!("tick {tick}: expert {expert} weight"));
     }
-    // Intentional output-shape difference (ADR 0002): cortex-tensor returns
+    // Intentional output-shape difference (ADR 0002): cortex-hybrid returns
     // the scaled hidden state, hybrid-fusion the scalar gain — same number.
     assert!(
         (0.0..=1.0).contains(&hybrid.hidden_gain),
@@ -761,7 +863,7 @@ struct CortexPhaseEncoder {
 }
 
 impl CortexSnnEncoder for CortexPhaseEncoder {
-    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> cortex_tensor::Result<Vec<f32>> {
+    fn encode(&mut self, ann_signal: &[f32], channels: usize) -> cortex_hybrid::Result<Vec<f32>> {
         let phase = *self.phase.borrow();
         let mut stimulus = vec![0.0_f32; channels];
         for (i, &value) in ann_signal.iter().enumerate() {
@@ -800,13 +902,13 @@ impl HybridSpikeEncoder for HybridPhaseEncoder {
 
 #[test]
 fn inf_gate_scores_fail_closed_at_documented_layers() {
-    // ADR 0002 §4.6: a +Inf gate score is rejected by cortex-tensor's router
+    // ADR 0002 §4.6: a +Inf gate score is rejected by cortex-hybrid's router
     // preflight (`SnnInvalidStimulus`, before the encoder or backend run) but
     // ranked by hybrid-fusion's router and rejected by the backend's own
     // preflight (`SnnStep`) after the encoder advanced. Both fail closed. The
     // probe clones pin the layer difference directly (did `encode` run
     // before the rejection?), and the recovery tick proves no other state
-    // was consumed on the cortex-tensor side.
+    // was consumed on the cortex-hybrid side.
     let mut inf_embedding = embedding_for_tick(0);
     inf_embedding[0] = f32::INFINITY;
 
@@ -873,7 +975,7 @@ fn inf_gate_scores_fail_closed_at_documented_layers() {
     )
     .expect("fresh cortex SpikingMoeRouter");
 
-    // cortex-tensor rejected before the encoder ran, so its post-failure
+    // cortex-hybrid rejected before the encoder ran, so its post-failure
     // tick is bit-for-bit a fresh router's first tick: no state was consumed.
     let recovered_cortex = cortex.forward(&valid).expect("cortex recovers");
     let control_cortex = fresh_cortex

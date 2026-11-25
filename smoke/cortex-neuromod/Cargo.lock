@@ -41,9 +41,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "cortex-tensor"
-version = "0.1.0"
-source = "git+https://github.com/rmems/cortex-tensor?rev=74d63ee0430bcc11486ceff302e0816a9628559f#74d63ee0430bcc11486ceff302e0816a9628559f"
+name = "cortex-hybrid"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "581d27d4050895322c2259bb4684b411b1f3c35b142e7fb0e66ac4eb5523ca48"
 dependencies = [
  "axon-encoder",
  "engram-parser",
@@ -142,9 +143,10 @@ name = "hybrid-fusion-cortex-neuromod-smoke"
 version = "0.0.0"
 dependencies = [
  "axon-encoder",
- "cortex-tensor",
+ "cortex-hybrid",
  "hybrid-fusion",
  "neuromod",
+ "serde_json",
 ]
 
 [[package]]
