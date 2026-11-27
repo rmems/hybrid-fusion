@@ -17,7 +17,7 @@
 - **Trees cited:** hybrid-fusion `506ff5b`, cortex-tensor `a0fd18e`
   (open cortex-tensor PRs #130, #131 read from their GitHub diffs).
 - **Scope:** contracts and placement only. No code changes ship with this ADR.
-  Spikenaut-SNN internals and benchmarking (combine-for-AI) are out of scope.
+  Spikenaut-SNN internals and benchmarking (peira) are out of scope.
 
 ## 1. Context
 

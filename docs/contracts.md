@@ -96,7 +96,7 @@ Verified for RM-1465: a scratch probe at `hf` `506ff5b` serialized `HybridOutput
 
 The hybrid host output records carry a required `track` field, set by the host: `HybridOutput` (from `HybridNetwork::forward` and `ReverseHybridPath::forward_activity`) and `SpikingRouteOutput` (from `SpikingExpertRouter::forward` / `forward_frozen`). All three hosts cross the ANN/SNN boundary, so all of them emit `hybrid` today. A plain `ExpertRouter::route` result is semantically `ann` (ADR 0001 §5.1), but `ExpertRouteOutput` currently has no track field; see gap 13. The `ExpertRouteOutput` nested in `SpikingRouteOutput.route` is a component of that hybrid record and has no separate label, as the ADR specifies. `snn-native` is reserved for native-SNN emitters outside this crate.
 
-The field is required on the wire for `HybridOutput` and `SpikingRouteOutput`: a record without `track` fails to deserialize (`` missing field `track` ``), and unknown values are rejected. Code that combines two results must call `ResultTrack::require_same`, which returns `HybridError::TrackMismatch { left, right }` on a cross-track pair. Scoring, comparison, and benchmarking stay in combine-for-AI.
+The field is required on the wire for `HybridOutput` and `SpikingRouteOutput`: a record without `track` fails to deserialize (`` missing field `track` ``), and unknown values are rejected. Code that combines two results must call `ResultTrack::require_same`, which returns `HybridError::TrackMismatch { left, right }` on a cross-track pair. Scoring, comparison, and benchmarking stay in peira.
 
 ## 5. Ownership
 
