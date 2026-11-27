@@ -106,13 +106,21 @@ inventory talk to layout types, not payload parsers.
 | MoE router/expert candidates | corinth-canal safetensors discovery | `TensorRole` + `SafetensorsLayout::entries_with_role` kept as legacy inventory | **engram-parser** for discovery; hybrid-fusion keeps the name-only helper | [#27](https://github.com/rmems/hybrid-fusion/issues/27) (landed) | Name-only classifier (`TensorRole::from_name`); shape is not consulted. Topology and role discovery move to engram-parser [#88](https://github.com/rmems/engram-parser/issues/88). |
 | GGUF checkpoint façade | corinth-canal `src/moe/checkpoint.rs`, `gguf/*` | not promoted into hybrid-fusion body | **engram-parser** | — | Research status: **reference** |
 
-### D. Precision tiers + dry-run planner (grok-ozempic)
+### D. Placement policy + dry-run planner (grok-ozempic)
+
+#24's 2026-09 direction update replaced the original `preserve` / `fp16` /
+`ternary_snn` precision-tier framing: Grok's vocabulary does not become
+hybrid-fusion's core types. The landed surface is a generic
+`Placement` (`Ann` / `Snn` / `Hybrid` / `Preserve`) +
+`PlacementPolicy` + `PlacementPlanner` + `PlacementReport` in
+`src/placement.rs`. Grok's precision tiers adapt into it per RM-1817 (see
+[implementing-backends.md](implementing-backends.md#adapting-a-model-family-policy-rm-1817)).
 
 | Source module | Local path | Target hybrid-fusion type/trait | Owner crate | Issue | Notes |
 |---------------|------------|----------------------------------|-------------|-------|-------|
-| Precision policy | grok-ozempic `src/core/precision.rs` | precision-tier types (`preserve` / `fp16` / `ternary_snn` concepts) | **hybrid-fusion** (types) | [#24](https://github.com/rmems/hybrid-fusion/issues/24) | No GOZ1 packing |
-| Tensor classification | grok-ozempic `src/core/selection.rs` | classification hooks / enums usable by planner | **hybrid-fusion** (optional thin types) | [#24](https://github.com/rmems/hybrid-fusion/issues/24) | Manifest-driven logic can stay research initially |
-| Dry-run planner | grok-ozempic `src/core/dry_run.rs` | `HybridStagePlanner` (or equivalent) dry-run report types | **hybrid-fusion** | [#24](https://github.com/rmems/hybrid-fusion/issues/24) | Plan kernel calls without loading full weights |
+| Precision policy | grok-ozempic `src/core/precision.rs` | **do not extract** — grok tiers map onto `Placement` via a grok-side `PlacementPolicy` impl; the tier name rides `PlacementDecision::attrs` | **grok-ozempic** (vocabulary) → **hybrid-fusion** (generic `Placement`) | [#24](https://github.com/rmems/hybrid-fusion/issues/24) | No GOZ1 packing; no precision enums in the public API |
+| Tensor classification | grok-ozempic `src/core/selection.rs` | planner sees generic `StageKind` / `StageGraph` concepts, not Grok tensor classes | **grok-ozempic** / `engram-parser` (discovery) | [#24](https://github.com/rmems/hybrid-fusion/issues/24) | Manifest-driven logic stays research-side |
+| Dry-run planner | grok-ozempic `src/core/dry_run.rs` | `PlacementPlanner::dry_run` → `PlacementReport` (references `HybridExecutionPlan`) | **hybrid-fusion** | [#24](https://github.com/rmems/hybrid-fusion/issues/24) | Plan placements without loading weights |
 | `BackendKernel` trait | grok-ozempic `src/core/backend.rs` | **not** hybrid-fusion’s primary surface | `myelin-accelerator` / research | — | Kernel ownership is outside orchestrator |
 | GOZ1 / weight pack | grok-ozempic `weight_pack*`, `artifact.rs` | **non-extract** | **grok-ozempic** | — | Grok-specific container |
 
@@ -171,7 +179,7 @@ Do **not** copy these into `hybrid-fusion` as implementation work:
  ├─ 2. #22  ExpertRouter + SpikeActivity traits
  ├─ 3. #25  ProjectionMode contract
  ├─ 4. #26  pure MoE router math
- ├─ 5. #24  precision-tier + HybridStagePlanner
+ ├─ 5. #24  generic placement policy + dry-run planner
  ├─ 6. #23  mock reverse-path tests
  └─ 7. #27  SafetensorsLoader / layout types  ← landed (this crate: trait; engram-parser: I/O)
 ```

@@ -10,6 +10,29 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
 
 ### Added
 
+- **Generic placement policy and dry-run planning** (issue
+  [#24](https://github.com/rmems/hybrid-fusion/issues/24), Linear
+  [RM-330](https://linear.app/rpd-34/issue/RM-330)): `src/placement.rs` adds
+  `Placement` (`Ann` / `Snn` / `Hybrid` / `Preserve` — the policy-level
+  placement vocabulary, with `Hybrid` mapping to the boundary
+  `ExecutionDomain::Adapter` and `Preserve` keeping a stage's existing
+  assignment), `PlacementDecision` (per-stage assignment plus namespaced
+  `attrs` metadata so policy vocabularies travel without contaminating the
+  core enums), the `PlacementPolicy` trait (`place(&StageGraph,
+  &[BackendCapabilities]) -> Result<Vec<PlacementDecision>, PlanError>`),
+  `PlacementPlanner::dry_run` / `dry_run_plan`, and `PlacementReport`
+  (policy identity + the compiled `HybridExecutionPlan` + normalized
+  decisions, with a deterministic `describe()`). `dry_run` validates that
+  decisions cover the graph exactly once (`PlanError::InvalidPlacement`),
+  applies pins and merges decision attributes into stage `attrs`, compiles
+  through the full `StageGraph::compile` suite (illegal pins fail
+  `InvalidDomain`), and — when backends are offered — checks every resolved
+  domain is advertised (`UnsupportedBackend`). Planning is weight-free and
+  file-free by construction; backend *selection* stays with
+  `CapabilityNegotiation`. `docs/implementing-backends.md` documents the
+  grok-ozempic precision-policy adapter path (RM-1817) — Grok tiers map to
+  `Placement` grok-side and ride `PlacementDecision::attrs`, never becoming
+  core types.
 - **Stage-graph / capability conformance matrix** (Linear
   [RM-1813](https://linear.app/rpd-34/issue/RM-1813)):
   `docs/conformance-matrix.md` maps every `StageKind` to its domain contract,

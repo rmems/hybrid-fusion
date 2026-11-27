@@ -23,6 +23,7 @@ For authoritative signatures, always refer to [`src/traits.rs`](../src/traits.rs
 4. [GgufLoader / GgufLayout (legacy)](#4-ggufloader--gguflayout)
 5. [SafetensorsLoader / SafetensorsLayout (legacy)](#5-safetensorsloader--safetensorslayout)
    - [Migrating off format-specific loaders](#migrating-off-format-specific-loaders)
+   - [Placement policies and dry-run planning](#placement-policies-and-dry-run-planning)
 6. [How construction and the forward pipeline work](#6-how-construction-and-the-forward-pipeline-work)
 7. [Tensor shape conventions](#7-tensor-shape-conventions)
 8. [Minimal working example](#8-minimal-working-example)
@@ -815,8 +816,9 @@ Downstream:
 - **#22 `ExpertRouter`** — locate gate tensors to bind a checkpoint-backed router.
 - **#26 pure MoE math** — file-free; roles are unused until a real gate matmul
   backend lands in `cortex-tensor` + `engram-parser`.
-- **#24 `HybridStagePlanner`** — classify stage names (router vs expert vs
-  attention) for dry-run precision tiers without loading weights.
+- **#24 `PlacementPolicy`** — classify stage names for dry-run placement
+  without loading weights; see
+  [Placement policies and dry-run planning](#placement-policies-and-dry-run-planning).
 
 `Dtype` is the Safetensors header vocabulary (`F32`, `BF16`, `BOOL`, `U16`,
 `F8_E4M3`, `C64`, …), not a precision-planning policy.
@@ -854,6 +856,66 @@ moves to engram-parser #88.
 
 A later minor release removes the four compatibility shims. Removal is no
 earlier than the release after engram-parser publishes its topology API.
+
+---
+
+## Placement policies and dry-run planning
+
+Issue [#24](https://github.com/rmems/hybrid-fusion/issues/24) /
+[RM-330](https://linear.app/rpd-34/issue/RM-330). `src/placement.rs` owns the
+generic placement contract; nothing here loads or mutates model weights.
+
+The pieces:
+
+- **`Placement`** — the policy-level domain a discovered stage is assigned:
+  `Ann`, `Snn`, `Hybrid` (the ANN↔SNN boundary, mapped to
+  `ExecutionDomain::Adapter`), or `Preserve` (keep the stage's existing
+  assignment, i.e. its kind's default domain or an earlier pin). It is
+  deliberately **not** `ExecutionDomain`: the enum carries no MoE or
+  precision vocabulary.
+- **`PlacementPolicy`** — the pluggable trait. `place(&StageGraph,
+  &[BackendCapabilities])` returns one `PlacementDecision` per stage. The
+  graph input is generic stage metadata (names, `StageKind`s, `PortSpec`
+  contracts, edges) — a `TopologySource`-fed or hand-built graph, never
+  checkpoint tensors.
+- **`PlacementPlanner`** — the dry-run host. `new(policy)` + `offer(caps)` +
+  `dry_run(&graph)` (or `dry_run_plan(&plan)` for an already-compiled plan)
+  validates the decision set (every stage decided exactly once, no attribute
+  overwrites), applies the domain pins, compiles the graph, and — when
+  backends are offered — checks each stage's resolved domain is advertised
+  by at least one report.
+- **`PlacementReport`** — the deterministic, inspectable output: policy
+  name, the compiled `HybridExecutionPlan`, and the normalized decisions in
+  `StageId` order. `describe()` renders a stable diff-able form.
+
+Failure is explicit at every step: an illegal pin is
+`PlanError::InvalidDomain`, a malformed decision set is
+`PlanError::InvalidPlacement`, a legal pin no offered backend can run is
+`PlanError::UnsupportedBackend`. Backend *selection* is out of scope — the
+report's plan feeds `CapabilityNegotiation` like any other compiled plan.
+
+### Adapting a model-family policy (RM-1817)
+
+Research crates adapt their own policy vocabularies into `PlacementDecision`
+— the vocabulary itself does not move into hybrid-fusion. The worked
+example is grok-ozempic's precision policy (`src/core/precision.rs`), whose
+`preserve` / `fp16` / `ternary_snn` tiers stay a grok type. A grok-side
+adapter implements `PlacementPolicy` and maps its tiers:
+
+| grok tier | `Placement` | rationale |
+|-----------|-------------|-----------|
+| `preserve` | `Preserve` | the stage keeps its discovered domain; routing-critical tensors are never re-placed |
+| `fp16` | `Ann` (or `Hybrid` for a boundary stage) | dense-side compute in half precision |
+| `ternary_snn` | `Snn` | the stage migrates to the spiking runtime |
+
+The tier name travels as policy metadata —
+`PlacementDecision::with_attr("goz.precision", "fp16")` — merged into the
+stage's `attrs`, so the compiled plan stays inspectable without
+`ExecutionDomain`, `StageKind`, or `Placement` ever naming a Grok concept.
+GOZ1 packing, quantization, and kernel selection stay in grok-ozempic /
+myelin-accelerator: a placement decision describes *where* a stage runs,
+never how its weights are stored. The placement dry-run experiment matrix
+(RM-1818) builds on this surface; it is not part of this contract.
 
 ---
 
