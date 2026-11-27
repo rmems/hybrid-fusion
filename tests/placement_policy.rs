@@ -6,9 +6,9 @@
 //! the public re-exports stay honest.
 
 use hybrid_fusion::{
-    AnnTopology, BackendCapabilities, ExecutionDomain, HybridExecutionPlan, HybridTopology,
-    Placement, PlacementDecision, PlacementPlanner, PlacementPolicy, PlacementReport, PlanError,
-    PortSpec, SnnTopology, StageGraph, StageId, StageKind,
+    AnnTopology, BackendCapabilities, EdgeKind, ExecutionDomain, HybridExecutionPlan,
+    HybridTopology, Placement, PlacementDecision, PlacementPlanner, PlacementPolicy,
+    PlacementReport, PlanError, PortSpec, SnnTopology, StageGraph, StageId, StageKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -200,6 +200,39 @@ fn preserve_policy_reproduces_the_canonical_plan() {
     for d in report.decisions() {
         assert_eq!(d.placement, Placement::Preserve);
     }
+}
+
+#[test]
+fn preserve_policy_keeps_existing_pins_and_feedback() {
+    let mut g = discovered_graph();
+    g.allow_feedback(true);
+    let snn = g.stage_by_name("blk.snn").expect("snn").id;
+    let adapt = g.stage_by_name("blk.adapt").expect("adapt").id;
+    assert!(g.set_domain(snn, ExecutionDomain::Snn));
+    g.connect_feedback(snn, adapt);
+    let plan = g.compile().expect("compiled graph with pin and feedback");
+    assert_eq!(plan.resolved_domain(snn), Some(ExecutionDomain::Snn));
+    assert!(
+        plan.edges()
+            .iter()
+            .any(|e| e.kind == EdgeKind::Feedback && e.from == snn && e.to == adapt)
+    );
+
+    let report = PlacementPlanner::new(PreserveAll)
+        .dry_run_plan(&plan)
+        .expect("preserve dry_run_plan");
+    assert_eq!(report.plan(), &plan);
+    assert_eq!(
+        report.plan().resolved_domain(snn),
+        Some(ExecutionDomain::Snn)
+    );
+    assert!(
+        report
+            .plan()
+            .edges()
+            .iter()
+            .any(|e| e.kind == EdgeKind::Feedback && e.from == snn && e.to == adapt)
+    );
 }
 
 #[test]
