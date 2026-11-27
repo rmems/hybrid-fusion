@@ -332,8 +332,8 @@ fn apply_decisions(
         if let Some(domain) = d.placement.domain_pin() {
             placed.set_domain(d.stage, domain);
         }
-        // Index once so collision checks do not rescan the stage list for every
-        // attribute key (and stay O(1) per decision as the graph grows).
+        // Index stages once so collision checks do not rescan the stage list
+        // for every attribute key. Lookup is logarithmic in the stage count.
         let occupied = {
             let idx = *stage_index.get(&d.stage).expect("stage validated above");
             let stage = &placed.stages()[idx];
