@@ -11,6 +11,7 @@ pub mod error;
 pub mod hybrid;
 #[cfg(feature = "neuromod")]
 pub mod neuromod_adapter;
+pub mod placement;
 pub mod plan;
 pub mod projector;
 pub mod reverse;
@@ -39,6 +40,9 @@ pub use encoding::{
 };
 pub use error::{ForwardValueStage, HybridError, Result};
 pub use hybrid::HybridNetwork;
+pub use placement::{
+    Placement, PlacementDecision, PlacementPlanner, PlacementPolicy, PlacementReport,
+};
 pub use plan::{
     DimSpec, Edge, EdgeKind, ExecutionDomain, HybridExecutionPlan, PlanError, PortSpec, Stage,
     StageGraph, StageId, StageKind,

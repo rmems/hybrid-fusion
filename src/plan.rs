@@ -618,6 +618,16 @@ pub enum PlanError {
     /// [`StageGraph::add_stage`] always assigns sequential IDs).
     #[error("stage at index {position} carries non-sequential id {id}")]
     NonSequentialStageId { position: usize, id: StageId },
+
+    /// A [`crate::PlacementPolicy`] decision set is malformed: it names an
+    /// unknown stage, decides a stage twice, leaves a stage undecided, or
+    /// overwrites an existing stage attribute. `reason` names the offending
+    /// stages in deterministic [`StageId`] order.
+    #[error("invalid placement decisions: {reason}")]
+    InvalidPlacement {
+        /// Why the decision set is not a total assignment over the graph.
+        reason: String,
+    },
 }
 
 // ── Graph builder ───────────────────────────────────────────────────────────

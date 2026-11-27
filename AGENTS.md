@@ -57,6 +57,7 @@ implementations live here.
 - Configuration and output types (`HybridConfig`, `TransformerConfig`, `HybridOutput`)
 - Reverse-path host `ReverseHybridPath` (activity → embedding → ExpertRouter)
 - Neutral planning topology (`AnnTopology`, `SnnTopology`, `HybridTopology`) and execution plans compiled from it
+- Generic placement policy and dry-run planning (`PlacementPolicy`, `Placement`, `PlacementPlanner`, `PlacementReport`) in `src/placement.rs` (issue #24 / RM-330)
 
 ### This crate does not own
 
@@ -85,6 +86,7 @@ Core traits / types on the pluggable surface:
 - **`SpikingExpertRouter`** — hybrid spiking MoE routing host (`src/spiking_router.rs`, ported from cortex-tensor's `SpikingMoeRouter` with the #93 fixes): gate logits → encode → step → decode → additive spike boost → top-k. A host like `ReverseHybridPath`, not a `HybridNetwork` generic.
 - **`ExpertRouter`** + **`SpikeActivity`** — reverse-path MoE routing contract (embedding → expert weights / selection). `gate_logits` exposes the pre-softmax scores the spike boost needs (default fails closed). Pure math lives in `src/routing.rs`; checkpoint backends stay outside this crate.
 - **`AnnTopology`** / **`SnnTopology`** / **`HybridTopology`** / **`TopologySource`** — format-neutral planning input. ANN dimensions may come from a `TopologySource`. SNN dimensions are caller-supplied. This crate does not open checkpoint files.
+- **`PlacementPolicy`** / **`Placement`** / **`PlacementReport`** (`src/placement.rs`, issue #24 / RM-330) — generic dry-run placement: a policy assigns each `StageGraph` stage `Ann`/`Snn`/`Hybrid`/`Preserve`, `PlacementPlanner::dry_run` validates the decision set and compiles a `HybridExecutionPlan`. Policy vocabularies (e.g. grok-ozempic precision tiers, RM-1817) adapt in downstream crates and ride `PlacementDecision::attrs`; they do not become core types.
 - **`GgufLoader`** / **`SafetensorsLoader`** — deprecated compatibility shims. Checkpoint parsing, mmap, layout discovery, tensor roles, and topology discovery belong to `engram-parser`. Do not add a new loader abstraction here. Migration: [docs/implementing-backends.md](docs/implementing-backends.md#migrating-off-format-specific-loaders).
 
 `HybridNetwork<T: Transformer, S: SpikingNetwork>` is generic over the `Transformer` and `SpikingNetwork` traits. Planning consumes `HybridTopology` and does not require a GGUF or Safetensors loader. `ExpertRouter` is consumed separately. Adding a concrete backend dependency to `Cargo.toml` is a boundary violation unless covered by the escape hatch above. Current tracked exceptions, both optional and off by default: `neuromod` (issue #44, `NeuromodSnn`, no neuromod type in its signatures) and `axon-encoder` (RM-1811, `AxonEncoderAdapter`, whose public API intentionally takes axon-encoder `Encoder` types).
