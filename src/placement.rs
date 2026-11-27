@@ -203,9 +203,10 @@ impl<P: PlacementPolicy> PlacementPlanner<P> {
     /// Offer a backend capability report for domain-coverage validation.
     /// Reports are read, never executed.
     ///
-    /// Must use the returned planner: `offer` consumes `self`, and a discarded
-    /// result leaves the original planner with no backends, which skips
-    /// domain-coverage validation.
+    /// Must use the returned planner. `offer` consumes `self`, so a discarded
+    /// result drops the planner (including any backends already offered). There
+    /// is no leftover planner to run without the new backend — the input value
+    /// has been moved.
     #[must_use]
     pub fn offer(mut self, caps: BackendCapabilities) -> Self {
         self.backends.push(caps);
@@ -321,23 +322,26 @@ fn apply_decisions(
     }
 
     let mut placed = graph.clone();
+    let stage_index: BTreeMap<StageId, usize> = placed
+        .stages()
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id, i))
+        .collect();
     for d in decisions {
         if let Some(domain) = d.placement.domain_pin() {
             placed.set_domain(d.stage, domain);
         }
-        let occupied = d
-            .attrs
-            .keys()
-            .find(|key| {
-                placed
-                    .stages()
-                    .iter()
-                    .find(|s| s.id == d.stage)
-                    .expect("stage validated above")
-                    .attrs
-                    .contains_key(*key)
-            })
-            .cloned();
+        // Index once so collision checks do not rescan the stage list for every
+        // attribute key (and stay O(1) per decision as the graph grows).
+        let occupied = {
+            let idx = *stage_index.get(&d.stage).expect("stage validated above");
+            let stage = &placed.stages()[idx];
+            d.attrs
+                .keys()
+                .find(|key| stage.attrs.contains_key(*key))
+                .cloned()
+        };
         if let Some(key) = occupied {
             return Err(PlanError::InvalidPlacement {
                 reason: format!(

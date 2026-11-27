@@ -416,6 +416,10 @@ fn dry_run_output_is_deterministic_and_inspectable() {
     // The report carries the compiled HybridExecutionPlan.
     let text = a.describe();
     assert!(text.contains("policy 'tier-adapter'"), "{text}");
+    assert!(
+        text.contains("family.tier"),
+        "describe() must include policy labels, got: {text}"
+    );
     assert_eq!(a.plan().execution_order().len(), graph.stages().len());
     // …and the input graph was not mutated by the run.
     let pristine = discovered_graph();
