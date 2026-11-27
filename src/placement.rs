@@ -203,7 +203,7 @@ impl<P: PlacementPolicy> PlacementPlanner<P> {
     /// Offer a backend capability report for domain-coverage validation.
     /// Reports are read, never executed.
     ///
-    /// Must use the returned planner: \offer\ consumes \self\, and a discarded
+    /// Must use the returned planner: `offer` consumes `self`, and a discarded
     /// result leaves the original planner with no backends, which skips
     /// domain-coverage validation.
     #[must_use]
@@ -293,9 +293,12 @@ fn apply_decisions(
     graph: &StageGraph,
     decisions: &[PlacementDecision],
 ) -> Result<StageGraph, PlanError> {
+    // Validate and apply in StageId order so the first error is deterministic
+    // even when the policy returns decisions in a different order.
+    let decisions = normalize(decisions.to_vec());
     let known: BTreeSet<StageId> = graph.stages().iter().map(|s| s.id).collect();
     let mut decided = BTreeSet::new();
-    for d in decisions {
+    for d in &decisions {
         if !known.contains(&d.stage) {
             return Err(PlanError::InvalidPlacement {
                 reason: format!(
@@ -444,8 +447,13 @@ impl PlacementReport {
                 .plan
                 .resolved_domain(d.stage)
                 .expect("resolved domain exists for a known stage");
+            let attrs = if d.attrs.is_empty() {
+                String::new()
+            } else {
+                format!(" attrs={:?}", d.attrs)
+            };
             out.push_str(&format!(
-                "  {} '{}' kind={:?} placement={:?} domain={domain:?}\n",
+                "  {} '{}' kind={:?} placement={:?} domain={domain:?}{attrs}\n",
                 stage.id, stage.name, stage.kind, d.placement
             ));
         }

@@ -33,6 +33,7 @@ will accumulate here until a tagged `v0.3.0` GitHub release.
   grok-ozempic precision-policy adapter path (RM-1817) — Grok tiers map to
   `Placement` grok-side and ride `PlacementDecision::attrs`, never becoming
   core types.
+- **BREAKING (#24):** `PlanError` gains `InvalidPlacement { reason }` for dry-run decision-set failures (unknown stage, duplicate, or missing coverage). `PlanError` is exhaustive, so downstream matches must be updated.
 - **Stage-graph / capability conformance matrix** (Linear
   [RM-1813](https://linear.app/rpd-34/issue/RM-1813)):
   `docs/conformance-matrix.md` maps every `StageKind` to its domain contract,
