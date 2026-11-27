@@ -202,6 +202,11 @@ impl<P: PlacementPolicy> PlacementPlanner<P> {
 
     /// Offer a backend capability report for domain-coverage validation.
     /// Reports are read, never executed.
+    ///
+    /// Must use the returned planner: \offer\ consumes \self\, and a discarded
+    /// result leaves the original planner with no backends, which skips
+    /// domain-coverage validation.
+    #[must_use]
     pub fn offer(mut self, caps: BackendCapabilities) -> Self {
         self.backends.push(caps);
         self
