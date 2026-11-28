@@ -47,7 +47,7 @@
 //!   this adapter rejects first with [`HybridError::InvalidConfig`]:
 //!   `EmbeddingRateEncoder` and `DerivativeEncoder` `expect` a `u16` channel
 //!   index, so `snn_width` is capped at
-//!   [`MAX_ENCODER_CHANNEL_INPUTS`]; and [`PopulationEncoder`] fans each input
+//!   `MAX_ENCODER_CHANNEL_INPUTS`; and [`PopulationEncoder`] fans each input
 //!   out to `num_neurons` spike channels, which cannot fit the
 //!   `snn_width`-wide stimulus. Its `encode_step` also samples an unseeded
 //!   thread RNG, which breaks the [`DomainAdapter`] determinism contract
@@ -75,6 +75,8 @@
 //!
 //! [`decode_activity`]: DomainAdapter::decode_activity
 //! [`ModulatedEncoder`]: axon_encoder::ModulatedEncoder
+//! [`SpikeEvent`]: axon_encoder::types::SpikeEvent
+//! [`SpikeEvent::timestamp`]: axon_encoder::types::SpikeEvent::timestamp
 
 use std::any::Any;
 
@@ -238,14 +240,15 @@ impl<E: Encoder + Clone + 'static> AxonEncoderAdapter<E> {
 }
 
 impl AxonEncoderAdapter<AxonRateEncoder> {
-    /// Default maximum firing rate for [`rate`]: `10 Hz` against the
+    /// Default maximum firing rate for [`rate`](Self::rate): `10 Hz` against the
     /// compatibility `dt_seconds = 0.1` gives at most one spike per tick at
     /// full signal, matching the one-tick-per-forward pacing of the host.
     pub const DEFAULT_MAX_RATE_HZ: f32 = 10.0;
 
     /// Stateful [`RateEncoder`][AxonRateEncoder] adapter: `base_rate = 0`,
-    /// `max_rate` [`DEFAULT_MAX_RATE_HZ`], input range `[-1, 1]` (the `tanh`
-    /// signal domain), `dt_seconds` the compatibility `0.1`.
+    /// `max_rate` [`DEFAULT_MAX_RATE_HZ`](Self::DEFAULT_MAX_RATE_HZ), input
+    /// range `[-1, 1]` (the `tanh` signal domain), `dt_seconds` the
+    /// compatibility `0.1`.
     ///
     /// [`Self::with_encoder`] remains the knob for callers that need other
     /// rates, a caller-owned RNG (`encode_with_rng`), or a different `dt`.

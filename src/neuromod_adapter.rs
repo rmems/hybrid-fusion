@@ -176,7 +176,7 @@ const DEFAULT_NUM_IZH: usize = 1;
 /// contract.
 ///
 /// `initial_weights` snapshots each LIF neuron's seed-derived weight vector at
-/// construction (see [`seeded_weight`]) so [`reset`](Self::reset) can restore the
+/// construction (see `seeded_weight`) so [`reset`](Self::reset) can restore the
 /// original connectivity for a from-scratch replay even after R-STDP has mutated
 /// the live weights. It is a plain `Vec<Vec<f32>>`, not a `neuromod` type, so no
 /// backend type crosses the public boundary.
@@ -258,7 +258,7 @@ impl NeuromodSnn {
     ///
     /// Each LIF input synapse is seeded with a strictly positive,
     /// **seed-derived** weight in `[0.3, 1.0)` computed from the `seed` and the
-    /// neuron/channel indices (see [`seeded_weight`]) so the network can actually
+    /// neuron/channel indices (see `seeded_weight`) so the network can actually
     /// fire under stimulus:
     /// neuromod initializes all synaptic weights to `0.0` and only grows
     /// connectivity via R-STDP after a first post-synaptic spike, which never
@@ -574,7 +574,8 @@ impl SpikingNetwork for NeuromodSnn {
     /// Same report cortex-tensor's neuromod adapter published
     /// (`backend_name: "neuromod::SpikingNetwork"`, plasticity and
     /// neuromodulation on, caller-controlled RNG on), translated into
-    /// [`BackendCapabilities`] rather than a second vocabulary.
+    /// [`BackendCapabilities`](crate::BackendCapabilities) rather than a second
+    /// vocabulary.
     ///
     /// `caller_rng` is the owned generator passed to `step_with_rng` /
     /// `step_frozen_with_rng`. Callers set that generator with

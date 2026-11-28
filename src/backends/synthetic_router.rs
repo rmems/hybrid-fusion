@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Synthetic [`ExpertRouter`](crate::ExpertRouter) using pure [`crate::routing`] math.
+//! Synthetic [`ExpertRouter`] using pure [`crate::routing`] math.
 //!
 //! No model files: gate scores from embedding chunks, softmax, top-k selection.
 

@@ -84,7 +84,7 @@ pub const DEFAULT_SPIKE_BOOST: f32 = 1.0;
 /// # JSON / serde policy
 ///
 /// `hidden_gain` fails closed on non-finite values, and the nested
-/// [`ExpertRouteOutput`](crate::ExpertRouteOutput) brings its own guard for
+/// [`ExpertRouteOutput`] brings its own guard for
 /// `expert_weights` and `routing_entropy`: serialization returns an error
 /// naming the offending field instead of letting `serde_json` write `null`
 /// (crate `serde_finite` policy, RM-1465).

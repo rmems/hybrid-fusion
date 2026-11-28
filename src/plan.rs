@@ -1129,9 +1129,9 @@ impl HybridExecutionPlan {
         )
     }
 
-    /// [`from_topology`] with an explicit declared [`SpikeEncoding`] on the
-    /// adaptation port — the honest description when the host runs an
-    /// injected [`crate::DomainAdapter`] rather than the reference
+    /// [`from_topology`](Self::from_topology) with an explicit declared
+    /// [`SpikeEncoding`] on the adaptation port — the honest description when
+    /// the host runs an injected [`crate::DomainAdapter`] rather than the reference
     /// pool→resize→`tanh` path (RM-1811). `encoding` is what the injected
     /// adapter reports via [`crate::DomainAdapter::encoding`].
     ///
@@ -1224,12 +1224,13 @@ impl HybridExecutionPlan {
         )
     }
 
-    /// [`from_hybrid_config`] with an explicit declared [`SpikeEncoding`] on
-    /// the adaptation port — see [`from_topology_with_encoding`].
+    /// [`from_hybrid_config`](Self::from_hybrid_config) with an explicit declared
+    /// [`SpikeEncoding`] on the adaptation port — see
+    /// [`from_topology_with_encoding`](Self::from_topology_with_encoding).
     ///
     /// # Errors
     ///
-    /// Same validation failures as [`from_hybrid_config`].
+    /// Same validation failures as [`from_hybrid_config`](Self::from_hybrid_config).
     pub fn from_hybrid_config_with_encoding(
         config: &HybridConfig,
         encoding: crate::SpikeEncoding,
@@ -1306,9 +1307,9 @@ impl HybridExecutionPlan {
         )
     }
 
-    /// [`from_reverse_path`] with an explicit declared [`SpikeDecoding`] on the
-    /// adaptation port — the honest description when the host runs an
-    /// injected [`crate::DomainAdapter`] rather than the reference
+    /// [`from_reverse_path`](Self::from_reverse_path) with an explicit declared
+    /// [`SpikeDecoding`] on the adaptation port — the honest description when
+    /// the host runs an injected [`crate::DomainAdapter`] rather than the reference
     /// `ProjectionMode` path (RM-1811).
     ///
     /// `mode` is still recorded as stage metadata (it is the host's declared
