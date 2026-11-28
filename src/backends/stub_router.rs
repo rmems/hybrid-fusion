@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Stub [`ExpertRouter`](crate::ExpertRouter) for tests and examples.
+//! Stub [`ExpertRouter`] for tests and examples.
 //!
 //! Produces a uniform gate distribution and selects the first `top_k` experts.
 //! No checkpoints, no matmul — pure bookkeeping for reverse-path smoke tests.
